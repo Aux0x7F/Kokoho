@@ -185,9 +185,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("line-color" to "#FFFFFF", "line-width" to 11.0)),
             layer("$NAV_ROUTES-line", "line", NAV_ROUTES, filter = a("==", get("sel"), true), layout = routeLine,
                 paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0)),
-            // Pinpointed devices: the circle each is very likely in, in its colour.
-            layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to 0.18)),
-            layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 1.5, "line-opacity" to 0.7)),
+            // Flagged signal radius circles (distance radius circle or triangulated position circle).
+            layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to 0.20)),
+            layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to 0.88)),
             // What each CCTV camera watches (zoomed in).
             layer("$CONES-fill", "fill", CONES, minzoom = CCTV_CONE_ZOOM, paint = o("fill-color" to color, "fill-opacity" to get("opacity"))),
             // Which way each plate, speed and red-light camera faces (when mapped), in its icon's colour.
@@ -204,14 +204,15 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("icon-opacity" to get("opacity"))),
             // A saved trace's every sighting of each device (Settings › Log every sighting in traces): small, under the devices.
             layer(PINGS, "circle", paint = o("circle-color" to color, "circle-radius" to 3.0, "circle-opacity" to 0.8)),
-            // Devices: flagged ones bigger and on top, in the same colours as the list.
-            layer(DOTS, "circle", DEVICES, layout = o("circle-sort-key" to a("case", flagged, 1.0, 0.0)),
+            // Devices: only drawn as a center dot when narrow enough to be a point (showDot == true).
+            layer(DOTS, "circle", DEVICES, filter = a("==", get("showDot"), true),
+                layout = o("circle-sort-key" to a("case", flagged, 1.0, 0.0)),
                 paint = o("circle-color" to color, "circle-radius" to a("case", flagged, 8.0, 5.0),
                     "circle-stroke-color" to "#FFFFFF", "circle-stroke-width" to 1.5)),
             layer(LABELS, "symbol", DEVICES, filter = flagged,
-                layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 12.0, "text-anchor" to "top",
-                    "text-offset" to a(0.0, 1.1), "text-optional" to true),
-                paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 1.5)),
+                layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 13.0, "text-anchor" to "top",
+                    "text-offset" to a(0.0, 0.6), "text-optional" to true),
+                paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0)),
             // Networks pinned from a WiGLE search: purple, with their name.
             layer(WIGLE, "circle", paint = o("circle-color" to WIGLE_COLOR, "circle-radius" to 7.0,
                 "circle-stroke-color" to "#FFFFFF", "circle-stroke-width" to 2.0)),
@@ -260,16 +261,28 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         map.setData(source, GeoJson.collection(features))
     }
 
-    /** Devices (and their pinpoint circles); returns what was drawn. */
+    /** Devices (and their radius circles); returns what was drawn. */
     fun drawPins(shown: List<MapPin>) {
         if (!ready()) return
         pins = shown.associateBy { it.mac }
         set(DEVICES, shown.map { p ->
-            GeoJson.feature(GeoJson.point(p.lat, p.lon), "mac" to p.mac, "label" to p.label.take(32),
-                "color" to hex(p.color), "flagged" to p.flagged)
+            // Place the text label on the north rim of the circle when rendered as a circle (!showDot), or at the point when pinpointed
+            val (labelLat, labelLon) = if (!p.showDot && p.radiusM != null && p.radiusM > 0.0) {
+                MapGeo.offset(p.lat, p.lon, p.radiusM, 0.0)
+            } else {
+                p.lat to p.lon
+            }
+            GeoJson.feature(
+                GeoJson.point(labelLat, labelLon),
+                "mac" to p.mac,
+                "label" to p.label.take(36),
+                "color" to hex(p.color),
+                "flagged" to p.flagged,
+                "showDot" to p.showDot
+            )
         })
         set(PRECISION, shown.filter { it.radiusM != null }.map { p ->
-            GeoJson.feature(GeoJson.polygon(MapGeo.circle(p.lat, p.lon, p.radiusM!!)), "color" to hex(p.color))
+            GeoJson.feature(GeoJson.polygon(MapGeo.circle(p.lat, p.lon, p.radiusM!!)), "color" to hex(p.color), "mac" to p.mac)
         })
     }
 
@@ -306,55 +319,71 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     }
 
     /**
-     * Fast-changing live layers, every few seconds: devices, Waze, drones, aircraft, the trace.
-     * Returns the devices drawn.
+     * Fast-changing live layers: draws ONLY Kokoho's active flagged agency detections
+     * (as radius circles or pinpointed circles/aircraft). Never draws ordinary Wi-Fi, Bluetooth,
+     * Cell Towers, Waze, or cameras.
      */
-    fun drawLive(devices: List<DeviceRegistry.Snapshot>): List<MapPin> {
+    fun drawLive(@Suppress("UNUSED_PARAMETER") devices: List<DeviceRegistry.Snapshot>): List<MapPin> {
         if (!ready()) return emptyList()
-        val shown = MapPins.live(activity, devices, filter)
+        val snap = com.rfsentinel.app.kokoho.KokohoPostureEngine.evaluate(activity)
+        val fallbackLat = ScanForegroundService.lastFix?.latitude ?: map.camera.lat.takeIf { kotlin.math.abs(it) > 1e-4 } ?: 32.2226
+        val fallbackLon = ScanForegroundService.lastFix?.longitude ?: map.camera.lon.takeIf { kotlin.math.abs(it) > 1e-4 } ?: -110.9747
+
+        val groundThreats = snap.activeThreats.filter { !it.isAircraft }
+        val shown = groundThreats.map { t ->
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val shortDist = com.rfsentinel.app.kokoho.KokohoPostureEngine.formatShortDistance(activity, t.estimatedDistanceM)
+            val fullDist = com.rfsentinel.app.kokoho.KokohoPostureEngine.formatUserDistance(activity, t.estimatedDistanceM)
+            val radius = if (t.isPinpointed) null else t.mapCircleRadiusM.toDouble()
+            val note = when {
+                !t.isApproximatedPosition ->
+                    "Radius circle centered on your position at the signal's estimated distance ($shortDist). Move across a wider area to triangulate an approximated position."
+                !t.isPinpointed ->
+                    "Approximated position circle (±${com.rfsentinel.app.kokoho.KokohoPostureEngine.formatShortDistance(activity, t.uncertaintyRadiusM)}) from multi-point GPS + signal triangulation."
+                else ->
+                    "Pinpointed position."
+            }
+            MapPin(
+                mac = t.uuid,
+                lat = lat,
+                lon = lon,
+                label = "${t.friendlyLabel} · $shortDist",
+                flagged = true,
+                color = t.posture.colorArgb,
+                details = "${t.posture.badgeLabel}\n$fullDist\n${t.combinedConfidence}% confidence · ${t.evidenceCount} ${if (t.evidenceCount == 1) "signal" else "signals"}",
+                radiusM = radius,
+                whereNote = note,
+                showDot = t.isPinpointed
+            )
+        }
         drawPins(shown)
 
-        val waze = if (filter == DeviceFilter.ALL || filter == DeviceFilter.WAZE) WazePolice.latest else emptyList()
-        wazeShown = waze.associateBy { it.report.id }
-        set(WAZE, waze.map { w ->
-            GeoJson.feature(GeoJson.point(w.report.lat, w.report.lon), "id" to w.report.id, "color" to hex(w.report.type.color))
+        wazeShown = emptyMap()
+        set(WAZE, emptyList())
+        drones = emptyMap()
+        set(DRONES, emptyList())
+        set(DRONE_OPS, emptyList())
+        set(DRONE_LINES, emptyList())
+        set(WIGLE, emptyList())
+        set(ASKED, emptyList())
+
+        val airThreats = snap.activeThreats.filter { it.isAircraft }
+        set(AIRCRAFT, airThreats.map { t ->
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val shortDist = com.rfsentinel.app.kokoho.KokohoPostureEngine.formatShortDistance(activity, t.estimatedDistanceM)
+            GeoJson.feature(
+                GeoJson.point(lat, lon),
+                "hex" to t.uuid,
+                "icon" to "rf-plane-police",
+                "track" to (t.aircraftTrackDeg ?: 0.0),
+                "flagged" to true,
+                "clear" to true,
+                "label" to "${t.friendlyLabel} · $shortDist"
+            )
         })
 
-        val flying = devices.filter { it.remoteId?.hasPosition == true }
-        drones = flying.associateBy { it.mac }
-        set(DRONES, flying.map { s ->
-            val r = s.remoteId!!
-            GeoJson.feature(GeoJson.point(r.latitude!!, r.longitude!!), "mac" to s.mac, "dir" to (r.directionDeg ?: 0).toDouble())
-        })
-        val withOperator = flying.filter { it.remoteId!!.hasOperatorPosition }
-        set(DRONE_OPS, withOperator.map { s ->
-            val r = s.remoteId!!
-            GeoJson.feature(GeoJson.point(r.operatorLatitude!!, r.operatorLongitude!!), "mac" to s.mac)
-        })
-        set(DRONE_LINES, withOperator.map { s ->
-            val r = s.remoteId!!
-            GeoJson.feature(GeoJson.line(listOf(r.operatorLatitude!! to r.operatorLongitude!!, r.latitude!! to r.longitude!!)))
-        })
-
-        val air = PoliceAircraft.all()
-        planes = air.associateBy { it.plane.hex }
-        val clear = filter == DeviceFilter.AIRCRAFT
-        set(AIRCRAFT, air.map { (p, hit) ->
-            GeoJson.feature(GeoJson.point(p.lat, p.lon),
-                "hex" to p.hex,
-                "icon" to if (hit != null) "rf-plane-police" else if (clear) "rf-plane-clear" else "rf-plane",
-                "track" to (p.trackDeg ?: 0.0),
-                "flagged" to (hit != null),
-                "clear" to clear,
-                "label" to if (hit == null) {
-                    if (clear) listOfNotNull(AircraftActivity.name(p), AircraftActivity.altitude(p)).joinToString(" · ") else ""
-                } else listOfNotNull(
-                    hit.label.substringAfter(": ", hit.label).take(28), p.altitudeFt?.takeIf { it > 0 }?.let { com.rfsentinel.app.util.Units.altitude(it) }
-                ).joinToString(" · "))
-        })
-
-        drawWigle()
-        drawAsked()
         val trace = if (TripRecorder.isRecording) TripRecorder.livePoints() else emptyList()
         drawTrace(trace.map { it.lat to it.lon }, TRACE_COLOR)
         return shown
@@ -393,75 +422,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
      * Cameras, CCTV and cell towers: many, and they don't move - drawn for the area in view (and
      * around it), again once the view leaves that area or every 15 s for new downloads.
      */
-    fun maybeRedrawStatic(force: Boolean = false) {
+    fun maybeRedrawStatic(@Suppress("UNUSED_PARAMETER") force: Boolean = false) {
         if (!ready()) return
-        if (tripMode) { clearStatic(); return }
-        towerCount = CellTowerStore.all(activity).count { it.bestLat != null }
-        if (map.camera.zoom < CAMERAS_MIN_ZOOM) {
-            if (force) clearStatic()
-            updateCctvLine(null)
-            return
-        }
-        val view = map.visibleBox() ?: return
-        val now = System.currentTimeMillis()
-        val box = staticBox
-        val cctvZoom = map.camera.zoom >= CCTV_MIN_ZOOM
-        if (!force && box != null && box.contains(view) && now - staticAt < 15_000 && cctvZoom == staticCctv) return
-        val drawStart = android.os.SystemClock.elapsedRealtime()
-        val (n, e, so, w) = grownBox(view.north, view.east, view.south, view.west, 0.5)
-        val big = MapEngine.Box(n, e, so, w)
-        staticBox = big; staticAt = now; staticCctv = cctvZoom
-        fun inside(lat: Double, lon: Double) = big.contains(lat, lon)
-        // Over the limit, the ones on screen come first (not whichever the file lists first).
-        fun <T> onScreenFirst(list: List<T>, max: Int, lat: (T) -> Double, lon: (T) -> Double): List<T> =
-            if (list.size <= max) list else list.partition { view.contains(lat(it), lon(it)) }.let { (seen, around) -> (seen + around).take(max) }
-
-        val cams = if (Prefs.showKnownAlpr(activity))
-            onScreenFirst(AlprStore.cameras.filter { inside(it.lat, it.lon) }, 1500, { it.lat }, { it.lon }) else emptyList()
-        cameras = cams.associateBy { it.osmId }
-        set(CAMERAS, cams.map { c ->
-            GeoJson.feature(GeoJson.point(c.lat, c.lon), "id" to c.osmId, "icon" to "rf-cam-${c.type.name}",
-                "opacity" to if (com.rfsentinel.app.alpr.IgnoredCameras.contains(activity, c.osmId)) 0.35 else 1.0)
-        })
-        set(CAM_CONES, cams.mapNotNull { c ->
-            val dir = com.rfsentinel.app.alpr.CameraDirections.of(activity, c) ?: return@mapNotNull null
-            val faded = com.rfsentinel.app.alpr.IgnoredCameras.contains(activity, c.osmId)
-            GeoJson.feature(GeoJson.polygon(MapGeo.wedge(c.lat, c.lon, dir.toDouble(), CAMERA_CONE_DEG, CAMERA_CONE_M)),
-                "color" to hex(MapIcons.cameraColor(c.type)), "opacity" to if (faded) 0.08 else 0.25)
-        })
-
-        val showCctv = Prefs.showCctv(activity)
-        val private = Prefs.cctvPrivate(activity)
-        val cctv = if (showCctv && cctvZoom)
-            onScreenFirst(CctvStore.cameras.filter { (private || !it.isPrivate) && inside(it.lat, it.lon) }, 3000, { it.lat }, { it.lon }) else emptyList()
-        cctvs = cctv.associateBy { it.osmId }
-        set(CCTV, cctv.map { c ->
-            GeoJson.feature(GeoJson.point(c.lat, c.lon), "id" to c.osmId, "icon" to if (c.isPrivate) "rf-cctv-private" else "rf-cctv-public")
-        })
-        set(CONES, cctv.mapNotNull { c ->
-            val color = hex(if (c.isPrivate) MapIcons.CCTV_PRIVATE_COLOR else MapIcons.CCTV_PUBLIC_COLOR)
-            val range = Cctv.viewRangeM(c)
-            val dir = c.direction
-            val ring = when {
-                dir != null -> MapGeo.wedge(c.lat, c.lon, dir.toDouble(), Cctv.viewAngle(c).toDouble(), range)
-                // No direction: only domes / panning cameras get a (fainter, smaller) all-round area.
-                c.cameraType == "dome" || c.cameraType == "panning" -> MapGeo.circle(c.lat, c.lon, range * 0.6, 24)
-                else -> return@mapNotNull null
-            }
-            GeoJson.feature(GeoJson.polygon(ring), "color" to color, "opacity" to if (dir != null) 0.2 else 0.1)
-        })
-        updateCctvLine(if (!showCctv) null else view)
-
-        val showTowers = filter == DeviceFilter.CELLS || (filter == DeviceFilter.ALL && Prefs.showCellTowers(activity))
-        val tw = if (showTowers) CellTowerStore.all(activity).filter { it.bestLat != null } else emptyList()
-        towers = tw.associateBy { it.key }
-        set(TOWERS, tw.map { t ->
-            GeoJson.feature(GeoJson.point(t.bestLat!!, t.bestLon!!), "id" to t.key)
-        })
-
-        maybeFetchCameras(view)
-        val took = android.os.SystemClock.elapsedRealtime() - drawStart
-        if (took > 100) android.util.Log.i("RfMap", "Cameras, CCTV and towers drawn in $took ms (${cameras.size} + ${cctvs.size} + ${towers.size})")
+        clearStatic()
     }
 
     private fun clearStatic() {
@@ -534,7 +497,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val r = 22f * activity.resources.displayMetrics.density
         val box = RectF(x - r, y - r, x + r, y + r)
         val asked = listOf(AIRCRAFT to "hex", WAZE to "id", DRONES to "mac", DRONE_OPS to "mac", DOTS to "mac",
-            CAMERAS to "id", CCTV to "id", TOWERS to "id", WIGLE to "id", ASKED to "id", PINGS to "mac")
+            CAMERAS to "id", CCTV to "id", TOWERS to "id", WIGLE to "id", ASKED to "id", "$PRECISION-fill" to "mac")
         map.query(box, asked) { found ->
             if (activity.isFinishing || activity.isDestroyed) return@query
             safe("tap") { showTapped(found, me) }

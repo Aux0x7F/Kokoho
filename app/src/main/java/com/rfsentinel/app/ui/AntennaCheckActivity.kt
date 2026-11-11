@@ -57,6 +57,7 @@ class AntennaCheckActivity : AppCompatActivity() {
         binding = ActivityAntennaCheckBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.root.applySystemBarInsets()
+        binding.root.setBackgroundColor(com.rfsentinel.app.kokoho.KokohoPostureEngine.currentPostureColorArgb(this))
         title = "Antenna check"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         binding.apList.layoutManager = LinearLayoutManager(this)

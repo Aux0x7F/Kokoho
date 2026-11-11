@@ -117,7 +117,7 @@ object KokohoHubClient {
     }
 
     fun isSensorContributor(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SENSOR_CONTRIBUTE, false)
+        KokohoSignatures.isContributeObservationsEnabled(context)
 
     fun setSensorContributor(context: Context, enabled: Boolean, roomId: String, roomKey: String) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -129,6 +129,7 @@ object KokohoHubClient {
             putString(KEY_ROOM_KEY, roomKey.trim())
             putString(KEY_SENSOR_SLOT, existingSlot)
         }
+        KokohoSignatures.setContributeObservationsEnabled(context, enabled)
     }
 
     fun roomId(context: Context): String =
@@ -139,18 +140,51 @@ object KokohoHubClient {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_ROOM_KEY, "") ?: ""
 
-    private fun sensorSlot(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_SENSOR_SLOT, "owl-node") ?: "owl-node"
+    private fun sensorSlot(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val existing = prefs.getString(KEY_SENSOR_SLOT, null)
+        if (!existing.isNullOrBlank()) return existing
+        val generated = "owl-${java.util.UUID.randomUUID().toString().take(8)}"
+        prefs.edit { putString(KEY_SENSOR_SLOT, generated) }
+        return generated
+    }
 
-    fun activeObjects(nowMs: Long = System.currentTimeMillis()): List<RemoteThreatObject> {
-        objects.entries.removeIf { nowMs - it.value.updatedAtMs > OBJECT_TTL_MS }
+    /**
+     * Immediately stops contributing and clears the local ephemeral session slot.
+     * Server-side observations are processed exclusively in volatile memory and decay ephemerally.
+     */
+    fun purgeContributedObservations(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.edit { remove(KEY_SENSOR_SLOT) }
+    }
+
+    fun activeObjects(nowMs: Long = System.currentTimeMillis(), ttlMs: Long = OBJECT_TTL_MS): List<RemoteThreatObject> {
+        objects.entries.removeIf { nowMs - it.value.updatedAtMs > ttlMs }
         return objects.values.toList()
+    }
+
+    fun ingestThreatObjectJson(json: String): RemoteThreatObject? {
+        val obj = gson.fromJson(json, RemoteThreatObject::class.java)
+        if (obj != null && obj.uuid.isNotBlank()) {
+            objects[obj.uuid] = obj
+        }
+        return obj
+    }
+
+    fun clearCachedObjects() {
+        objects.clear()
+        lastSeq = 0L
     }
 
     @Synchronized
     fun start(context: Context) {
         val app = context.applicationContext
+        if (!KokohoSignatures.isAuxnetEnabled(app)) {
+            stop(app)
+            statusLabel = "offline-first"
+            return
+        }
         schedulePeriodicCheckin(app)
         if (streamJob?.isActive == true) return
         streamJob = scope.launch {
@@ -218,6 +252,10 @@ object KokohoHubClient {
     /** Executes an immediate Auxnet check-in (`POST /v1/checkin?since=<lastSeq>`). */
     fun checkinNow(context: Context) {
         val app = context.applicationContext
+        if (!KokohoSignatures.isAuxnetEnabled(app)) {
+            statusLabel = "offline-first"
+            return
+        }
         scope.launch {
             runCatching {
                 val base = hubUrl(app)
@@ -266,7 +304,7 @@ object KokohoHubClient {
         propagationClass: String
     ) {
         val app = context.applicationContext
-        if (!isSensorContributor(app)) return
+        if (!KokohoSignatures.isAuxnetEnabled(app) || !isSensorContributor(app)) return
         val rId = roomId(app)
         val rKey = roomKey(app)
         val slot = sensorSlot(app)

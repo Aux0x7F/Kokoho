@@ -41,6 +41,7 @@ class WaterfallActivity : AppCompatActivity() {
         binding = ActivityWaterfallBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.root.applySystemBarInsets()
+        binding.root.setBackgroundColor(com.rfsentinel.app.kokoho.KokohoPostureEngine.currentPostureColorArgb(this))
         title = "Radio waterfall"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
         binding.waterfall.onTap = { hz -> zoom(hz) }

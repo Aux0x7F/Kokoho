@@ -36,7 +36,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.rfsentinel.app"
+        applicationId = "org.tucsoncommunity.kokoho"
         minSdk = 26
         targetSdk = 36
         versionCode = appVersionCode

@@ -32,20 +32,10 @@ import kotlinx.coroutines.launch
 object DeviceActions {
 
     /**
-     * A logged match: the device's details, or for a police aircraft or a Waze report the map on it -
-     * where it is now while the feed still has it, else where it was logged.
+     * Opens the Entity Details view for a logged or active detection.
      */
     fun openDetection(activity: AppCompatActivity, d: com.rfsentinel.app.data.DetectionEntity) {
-        // Internet alerts are logged as "AIR <ICAO address>" / "WAZE <report id>" (their alert key).
-        val key = d.mac.takeIf { d.source == "ONLINE" && ' ' in it }?.let { it.substringBefore(' ').lowercase() + ":" + it.substringAfter(' ') }
-        val intent = key?.let { MapActivity.onlineIntent(activity, it, d.latitude, d.longitude) }
-        if (key == null || intent == null) { openDetails(activity, d.mac); return }
-        if (d.latitude == null && !MapActivity.onlineIsLive(key)) {
-            android.widget.Toast.makeText(activity, "Its position wasn't saved (GPS tagging off) and it's no longer current",
-                android.widget.Toast.LENGTH_LONG).show()
-            return
-        }
-        activity.startActivity(intent)
+        openDetails(activity, d.mac)
     }
 
     fun openDetails(activity: AppCompatActivity, mac: String) {
@@ -93,58 +83,82 @@ object DeviceActions {
             .show()
     }
 
-    /** Long-press menu. */
-    fun showQuickActions(activity: AppCompatActivity, mac: String) {
+    /** Long-press menu for list/log items — aligned with Kokoho Entity Details menu. */
+    fun showQuickActions(activity: AppCompatActivity, mac: String, onChanged: (() -> Unit)? = null) {
+        com.rfsentinel.app.kokoho.KokohoSignatures.ensureLoaded(activity)
+        val postureSnap = com.rfsentinel.app.kokoho.KokohoPostureEngine.evaluate(activity)
+        val matchedThreat = postureSnap.activeThreats.firstOrNull {
+            it.uuid.equals(mac, ignoreCase = true) || mac.endsWith(it.uuid, ignoreCase = true)
+        }
+        val entityUuid = matchedThreat?.uuid ?: mac
         val snap = DeviceRegistry.get(mac)
-        val watched = watchEntries(mac, snap?.name)
-        val whitelisted = WhitelistCache.inTable(mac)
-        val ignoredTracker = com.rfsentinel.app.data.TrackerMutes.isMuted(mac)
-        // Trackers that change their address can't be whitelisted: offer ignoring instead.
-        val rotatingTracker = snap?.best?.category == com.rfsentinel.app.detect.Category.TRACKER &&
-            snap.addressType != com.rfsentinel.app.detect.AddressType.PUBLIC
-        val favorite = Favorites.contains(mac)
-        val items = mutableListOf<Pair<String, () -> Unit>>()
-        items += "Show details" to { openDetails(activity, mac) }
-        watched.forEach { e -> items += "Remove from watchlist (${e.prefix})" to { removeWatch(activity, e) } }
-        items += (if (watched.isEmpty()) "Add to watchlist..." else "Add to watchlist another way...") to {
-            addToWatchlist(activity, mac, snap?.name, snap?.advert?.isWifi == true)
-        }
-        val trustedName = !whitelisted && TrustedNetworks.contains(mac)
-        val trustRule = if (whitelisted) null else TrustRules.ruleOf(mac)
-        when {
-            trustedName -> items += "Remove network name from whitelist" to { untrustNetwork(activity, ssidOf(snap)) }
-            trustRule != null -> items += "Remove whitelist rule: ${trustRule.describe}" to { untrustRule(activity, trustRule) }
-            ignoredTracker -> items += "Stop ignoring this tracker" to {
-                com.rfsentinel.app.data.TrackerMutes.unmute(activity, mac)
-                toast(activity, "Tracker no longer ignored")
+
+        val defaultClassification = matchedThreat?.friendlyLabel
+            ?: snap?.best?.label
+            ?: snap?.name
+            ?: mac
+        val customClassification = com.rfsentinel.app.kokoho.KokohoSignatures.getCustomEntityLabel(activity, entityUuid)
+        val titleLabel = customClassification ?: defaultClassification
+
+        val whitelisted = com.rfsentinel.app.kokoho.KokohoSignatures.isEntityWhitelisted(activity, entityUuid) ||
+            WhitelistCache.inTable(mac)
+        val watched = com.rfsentinel.app.kokoho.KokohoSignatures.isEntityWatched(activity, entityUuid) ||
+            Favorites.contains(mac)
+
+        val items = listOf<Pair<String, () -> Unit>>(
+            "Details" to {
+                openDetails(activity, entityUuid)
+            },
+            (if (whitelisted) "Remove from Whitelist" else "Whitelist") to {
+                val next = !whitelisted
+                com.rfsentinel.app.kokoho.KokohoSignatures.setEntityWhitelisted(activity, entityUuid, next)
+                if (!next && WhitelistCache.inTable(mac)) {
+                    unwhitelist(activity, mac)
+                }
+                Toast.makeText(
+                    activity,
+                    if (next) "Whitelisted locally" else "Removed from local whitelist",
+                    Toast.LENGTH_SHORT
+                ).show()
+                onChanged?.invoke()
+            },
+            (if (watched) "Unwatch" else "Watch") to {
+                val next = !watched
+                com.rfsentinel.app.kokoho.KokohoSignatures.setEntityWatched(activity, entityUuid, next)
+                activity.lifecycleScope.launch {
+                    Favorites.set(activity, mac, next, snap?.name, snap?.vendor, snap?.deviceType)
+                }
+                Toast.makeText(
+                    activity,
+                    if (next) "Added to Watch (local)" else "Removed from Watch",
+                    Toast.LENGTH_SHORT
+                ).show()
+                onChanged?.invoke()
+            },
+            "Share" to {
+                val lat = matchedThreat?.lat ?: snap?.broadcast?.lat ?: snap?.located?.lat ?: 32.2226
+                val lon = matchedThreat?.lon ?: snap?.broadcast?.lon ?: snap?.located?.lon ?: -110.9747
+                val radiusM = matchedThreat?.mapCircleRadiusM ?: matchedThreat?.estimatedDistanceM ?: 350
+                val coordStr = "%.5f, %.5f".format(java.util.Locale.US, lat, lon)
+                val radiusStr = com.rfsentinel.app.kokoho.KokohoPostureEngine.formatAccuracyRadius(activity, radiusM)
+                val shareText = buildString {
+                    appendLine("Kokoho Detection: $titleLabel")
+                    appendLine("$coordStr ($radiusStr)")
+                    if (matchedThreat != null && matchedThreat.evidenceSources.isNotEmpty()) {
+                        appendLine("Evidence:")
+                        matchedThreat.evidenceSources.forEach { appendLine("• ${it.detail}") }
+                    }
+                }.trim()
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, shareText)
+                }
+                activity.startActivity(Intent.createChooser(sendIntent, "Share detection"))
             }
-            rotatingTracker && !whitelisted -> items += "Ignore this tracker..." to { ignoreTracker(activity, mac) }
-            else -> items += (if (whitelisted) "Remove from whitelist" else "Whitelist (trust & ignore)") to {
-                if (whitelisted) unwhitelist(activity, mac) else whitelist(activity, mac, snap?.best?.label ?: snap?.name ?: "", ssidOf(snap))
-            }
-        }
-        val best = TrustRules.likeHit(snap?.hits)
-        if (best != null && !WhitelistCache.contains(mac)) items += "Ignore all like this (${best.label})" to { ignoreAllLikeThis(activity, mac) }
-        items += (if (favorite) "Remove from favorites" else "Add to favorites ★") to {
-            activity.lifecycleScope.launch {
-                Favorites.set(activity, mac, !favorite, snap?.name, snap?.vendor, snap?.deviceType)
-                toast(activity, if (favorite) "Removed from favorites" else "Added to favorites")
-            }
-        }
-        if (com.rfsentinel.app.data.FalseAlerts.contains(activity, mac)) items += "Remove from false alerts" to { unmarkFalseAlert(activity, mac) }
-        else if (snap?.best != null) items += "False alert..." to { markFalseAlert(activity, mac) }
-        items += "Learn this device..." to { learn(activity, mac) }
-        if (snap?.advert != null && snap.best == null) {
-            items += "Report unknown device..." to { reportUnknown(activity, mac) }
-        }
-        // An access point's address is what WiGLE maps; a phone or laptop (client) isn't on it.
-        if (snap?.advert?.isWifi == true && snap.advert.wifi?.client != true) {
-            items += "Find on WiGLE" to { com.rfsentinel.app.probes.WigleUi.search(activity, mac) }
-        }
-        items += "Copy address" to { copy(activity, mac) }
+        )
 
         MaterialAlertDialogBuilder(activity)
-            .setTitle(snap?.best?.label ?: snap?.name ?: mac)
+            .setTitle(titleLabel)
             .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
             .show()
     }

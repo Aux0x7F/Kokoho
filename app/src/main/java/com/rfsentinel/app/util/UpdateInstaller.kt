@@ -80,8 +80,8 @@ object UpdateInstaller {
                          onProgress: (Long, Long) -> Unit): File = withContext(Dispatchers.IO) {
         val folder = dir(context).apply { mkdirs() }
         folder.listFiles()?.forEach { it.delete() }
-        val part = File(folder, "RFSentinel-$version.apk.part")
-        val file = File(folder, "RFSentinel-$version.apk")
+        val part = File(folder, "Kokoho-$version.apk.part")
+        val file = File(folder, "Kokoho-$version.apk")
         val c = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 15_000; readTimeout = 30_000
             instanceFollowRedirects = true
@@ -108,7 +108,7 @@ object UpdateInstaller {
             onProgress(done, total)
             if (expectedSize > 0 && done != expectedSize) throw IllegalStateException("The download was cut short ($done of $expectedSize bytes)")
             val hex = sum.digest().joinToString("") { "%02x".format(it) }
-            if (sha256 != null && !hex.equals(sha256, ignoreCase = true)) throw IllegalStateException("The download doesn't match the checksum GitHub lists for it")
+            if (sha256 != null && !hex.equals(sha256, ignoreCase = true)) throw IllegalStateException("The download doesn't match the checksum Kokoho Hub lists for it")
             if (!part.renameTo(file)) throw IllegalStateException("Couldn't keep the downloaded file")
             checkArchive(context, file)?.let { file.delete(); throw IllegalStateException(it) }
             file
@@ -226,8 +226,8 @@ object UpdateInstaller {
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "App updates", NotificationManager.IMPORTANCE_HIGH))
         val tap = PendingIntent.getActivity(app, 0, card.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         nm.notify(NOTIFICATION_ID, NotificationCompat.Builder(app, CHANNEL)
-            .setSmallIcon(R.drawable.ic_tile_scan)
-            .setContentTitle("RF Sentinel update is ready")
+            .setSmallIcon(R.drawable.ic_kokoho_logo)
+            .setContentTitle("Kokoho update is ready")
             .setContentText("Tap to install it")
             .setContentIntent(tap).setAutoCancel(true).setPriority(NotificationCompat.PRIORITY_HIGH).build())
     }

@@ -1,5 +1,6 @@
 package com.rfsentinel.app.util
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -7,6 +8,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.rfsentinel.app.BuildConfig
+import com.rfsentinel.app.RFSentinelApp
+import com.rfsentinel.app.kokoho.KokohoHubClient
+import com.rfsentinel.app.kokoho.KokohoSignatures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -14,25 +18,60 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * "Check for updates": asks GitHub for the latest release, only when tapped.
- * GitHub sees the request (your IP address); nothing about your scans is sent.
+ * Live update checker & installer backed by Kokoho Hub (`https://kokoho.tucsoncommunity.online/v1/update/latest`
+ * and `/v1/update/kokoho-latest.apk`), with no dependency on GitHub.
+ *
+ * - Silently checks `kokoho-hub` on startup when Auxnet is enabled.
+ * - Never prompts the user to enable GitHub checks.
+ * - When a newer release is available on `kokoho-hub`, shows a dismissable popup AND surfaces
+ *   an "Update App" card in the Utility tab until installed.
  */
 object UpdateChecker {
 
-    private const val API = "https://api.github.com/repos/CIS-C0/RFSentinel/releases/latest"
-    /** Every release, prereleases too (newest first), for Settings › Include prerelease builds. */
-    private const val API_ALL = "https://api.github.com/repos/CIS-C0/RFSentinel/releases?per_page=10"
-    private const val RELEASES = "https://github.com/CIS-C0/RFSentinel/releases/latest"
+    /**
+     * Release metadata returned by `GET /v1/update/latest` on `kokoho-hub`
+     * (also compatible with GitHub release JSON format for unit tests / future dual hosting).
+     */
+    data class Latest(
+        val version: String,
+        val apkUrl: String?,
+        val notesUrl: String,
+        val apkSize: Long = 0L,
+        val apkSha256: String? = null,
+        val versionCode: Int = 0,
+        val notes: String = ""
+    )
 
-    /** The newest release: its version, the APK's link, size and SHA-256 (as GitHub lists them) and the notes page. */
-    data class Latest(val version: String, val apkUrl: String?, val notesUrl: String, val apkSize: Long = 0L, val apkSha256: String? = null)
+    @Volatile
+    var availableUpdate: Latest? = null
+        private set
 
-    /** True when [a] is a newer dotted version than [b] ("2.11.1" > "2.11.0"). */
+    @Volatile
+    private var promptedVersion: String? = null
+
+    private val listeners = CopyOnWriteArrayList<(Latest?) -> Unit>()
+
+    fun addListener(listener: (Latest?) -> Unit): () -> Unit {
+        listeners.add(listener)
+        listener(availableUpdate)
+        return { listeners.remove(listener) }
+    }
+
+    private fun notifyListeners(latest: Latest?) {
+        availableUpdate = latest
+        for (l in listeners) {
+            runCatching { l(latest) }
+        }
+    }
+
+    /** True when [a] is a newer dotted version than [b] ("2.42.0" > "2.41.0"). */
     fun isNewer(a: String, b: String): Boolean {
-        val x = a.trimStart('v', 'V').split('.', '-').map { it.toIntOrNull() ?: 0 }
-        val y = b.trimStart('v', 'V').split('.', '-').map { it.toIntOrNull() ?: 0 }
+        val x = a.trimStart('v', 'V').substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
+        val y = b.trimStart('v', 'V').substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
         for (i in 0 until maxOf(x.size, y.size)) {
             val d = x.getOrElse(i) { 0 } - y.getOrElse(i) { 0 }
             if (d != 0) return d > 0
@@ -40,211 +79,245 @@ object UpdateChecker {
         return false
     }
 
-    /**
-     * The newest release from GitHub's answer: version, this build's APK asset with its size and SHA-256, the notes
-     * page. The full build takes the "-release.apk" asset, the FOSS build the "-foss.apk" one.
-     */
-    internal fun parseLatest(text: String, foss: Boolean = BuildConfig.FLAVOR == "foss"): Latest = parse(JSONObject(text), foss)
+    fun isUpdateAvailable(latest: Latest): Boolean {
+        val currentVer = BuildConfig.VERSION_NAME.substringBefore('-')
+        val remoteVer = latest.version.trimStart('v', 'V').substringBefore('-')
+        if (remoteVer == currentVer) return false
+        return isNewer(remoteVer, currentVer)
+    }
 
-    /** The highest version in GitHub's release list, prereleases included, drafts not. */
+    internal fun parseLatest(text: String, foss: Boolean = BuildConfig.FLAVOR == "foss"): Latest =
+        parse(JSONObject(text), foss)
+
     internal fun parseNewest(text: String, foss: Boolean = BuildConfig.FLAVOR == "foss"): Latest {
-        val list = JSONArray(text)
-        return (0 until list.length()).map { list.getJSONObject(it) }.filter { !it.optBoolean("draft") }.map { parse(it, foss) }
-            .reduceOrNull { a, b -> if (isNewer(b.version, a.version)) b else a } ?: throw IllegalStateException("No releases on GitHub")
+        val trimmed = text.trim()
+        if (trimmed.startsWith("{")) {
+            return parse(JSONObject(trimmed), foss)
+        }
+        val list = JSONArray(trimmed)
+        return (0 until list.length())
+            .map { list.getJSONObject(it) }
+            .filter { !it.optBoolean("draft") }
+            .map { parse(it, foss) }
+            .reduceOrNull { a, b -> if (isNewer(b.version, a.version)) b else a }
+            ?: throw IllegalStateException("No releases found")
     }
 
     private fun parse(json: JSONObject, foss: Boolean): Latest {
+        // 1. Native kokoho-hub /v1/update/latest format
+        if (json.has("version") || json.has("apk_url")) {
+            val ver = json.optString("version", BuildConfig.VERSION_NAME).trimStart('v', 'V')
+            val vCode = json.optInt("version_code", 0)
+            val apkUrl = json.optString("apk_url", "").takeIf { it.isNotBlank() }
+            val size = json.optLong("apk_size", 0L)
+            val sha = json.optString("apk_sha256", "").takeIf { it.isNotBlank() }?.removePrefix("sha256:")
+            val notesUrl = json.optString("notes_url", apkUrl ?: KokohoHubClient.DEFAULT_HUB_URL)
+            val notes = json.optString("notes", "")
+            return Latest(ver, apkUrl, notesUrl, size, sha, vCode, notes)
+        }
+
+        // 2. Fallback compatibility with GitHub release JSON format
         val suffix = if (foss) "-foss.apk" else "-release.apk"
         val assets = json.optJSONArray("assets")
-        var apk: String? = null; var size = 0L; var sha: String? = null
-        if (assets != null) for (i in 0 until assets.length()) {
-            val a = assets.getJSONObject(i)
-            if (a.optString("name").endsWith(suffix)) {
-                apk = a.optString("browser_download_url"); size = a.optLong("size", 0L)
-                sha = a.optString("digest").takeIf { it.startsWith("sha256:") }?.removePrefix("sha256:")
+        var apk: String? = null
+        var size = 0L
+        var sha: String? = null
+        if (assets != null) {
+            for (i in 0 until assets.length()) {
+                val a = assets.getJSONObject(i)
+                val name = a.optString("name")
+                if (name.endsWith(suffix)) {
+                    apk = a.optString("browser_download_url")
+                    size = a.optLong("size", 0L)
+                    sha = a.optString("digest").takeIf { it.startsWith("sha256:") }?.removePrefix("sha256:")
+                    break
+                }
             }
         }
-        return Latest(json.getString("tag_name").trimStart('v'), apk, json.optString("html_url", RELEASES), size, sha)
+        return Latest(
+            version = json.getString("tag_name").trimStart('v', 'V'),
+            apkUrl = apk,
+            notesUrl = json.optString("html_url", KokohoHubClient.DEFAULT_HUB_URL),
+            apkSize = size,
+            apkSha256 = sha
+        )
     }
 
-    private fun fetch(prereleases: Boolean): Latest {
-        val conn = (URL(if (prereleases) API_ALL else API).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000; readTimeout = 10_000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "${BuildConfig.APPLICATION_ID}/${BuildConfig.VERSION_NAME}")
+    private fun fetchFromHub(context: Context): Latest {
+        val base = KokohoHubClient.hubUrl(context)
+        val url = "$base/v1/update/latest"
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8_000
+            readTimeout = 10_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", "Kokoho/${BuildConfig.VERSION_NAME}")
         }
         try {
-            if (conn.responseCode != 200) throw IllegalStateException("GitHub answered ${conn.responseCode}")
+            if (conn.responseCode != 200) throw IllegalStateException("Update server answered HTTP ${conn.responseCode}")
             val text = conn.inputStream.bufferedReader().use { it.readText() }
-            return if (prereleases) parseNewest(text) else parseLatest(text)
+            val parsed = parseLatest(text)
+            val resolvedApk = parsed.apkUrl?.let { raw ->
+                if (raw.startsWith("http://") || raw.startsWith("https://")) raw
+                else "$base/${raw.trimStart('/')}"
+            }
+            return parsed.copy(apkUrl = resolvedApk)
         } finally {
             conn.disconnect()
         }
     }
 
     private const val AUTO_INTERVAL_MS = 6 * 60 * 60 * 1000L
-    /** After a check that couldn't reach GitHub (no signal...), the next one is this soon, not a whole interval later. */
     private const val RETRY_MS = 30 * 60 * 1000L
-    @Volatile private var checking = false
+    @Volatile
+    private var checking = false
+
+    internal fun due(last: Long, now: Long) = now - last >= AUTO_INTERVAL_MS || now < last
 
     /**
-     * The startup check (Settings / setup wizard toggle), for every time the app comes to the front (the main
-     * screen often stays alive for days, so "opening" it is not a fresh start): at most every 6 hours - a
-     * check that couldn't reach GitHub is tried again after 30 minutes - and silent unless a newer version
-     * is out: no "checking", "up to date" or connection-error messages.
+     * Silent startup check against `kokoho.tucsoncommunity.online/v1/update/latest`.
+     * Never prompts about GitHub. If a newer version is hosted on `kokoho-hub`, surfaces
+     * a dismissable dialog and adds the "Update App" card to the Utility tab.
      */
     fun checkOnStartup(activity: AppCompatActivity) {
-        // Already turned on (setup wizard or Settings, before this question existed) counts as a yes.
-        if (!Prefs.updateCheckAsked(activity) && !Prefs.autoUpdateCheck(activity)) { ask(activity); return }
-        if (!Prefs.autoUpdateCheck(activity) || checking) return
+        if (!KokohoSignatures.isAuxnetEnabled(activity) || checking) return
         if (!due(Prefs.lastUpdateCheck(activity), System.currentTimeMillis())) return
         check(activity, silent = true)
     }
 
-    @Volatile private var asking = false
-
-    /**
-     * Asks once whether the app may check GitHub for updates when it opens, and keeps the answer
-     * (Settings > Check for updates on app open changes it later). Until answered, nothing is checked.
-     */
-    private fun ask(activity: AppCompatActivity) {
-        if (asking || activity.isFinishing || activity.isDestroyed) return
-        asking = true
-        fun answer(yes: Boolean) {
-            Prefs.setAutoUpdateCheck(activity, yes)
-            Prefs.setUpdateCheckAsked(activity, true)
-        }
-        MaterialAlertDialogBuilder(activity)
-            .setTitle("Check for updates?")
-            .setMessage("RF Sentinel can ask GitHub whether a newer version is out when the app opens (at most every " +
-                "6 hours). GitHub sees your IP address; nothing about your scans is sent.\n\nIf you installed it from " +
-                "F-Droid, F-Droid already brings you updates.\n\nYou can change this any time in Settings.")
-            .setPositiveButton("Check for updates") { _, _ -> answer(true); checkOnStartup(activity) }
-            .setNegativeButton("Don't check") { _, _ -> answer(false) }
-            .setCancelable(false)
-            .setOnDismissListener { asking = false }
-            .show()
-    }
-
-    /** Whether the automatic check is due: [last] is when the last one ended (0 = never). */
-    internal fun due(last: Long, now: Long) = now - last >= AUTO_INTERVAL_MS || now < last
-
-    /** SHA-256 of the certificate RF Sentinel's GitHub releases are signed with (public: any release APK shows it). */
-    private const val RELEASE_CERT_SHA256 = "1775783cf3cef638332796435f2125ecbbccd5b0021a336218eeb218904da8ab"
-
-    /** Whether this copy is signed with the GitHub releases' key (not F-Droid's), so a GitHub APK can update it. */
-    @Suppress("DEPRECATION")
-    private fun signedByUs(context: android.content.Context): Boolean = runCatching {
-        val pm = context.packageManager
-        val certs = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P)
-            pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES).signingInfo?.apkContentsSigners
-        else pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNATURES).signatures
-        certs.orEmpty().any { c ->
-            java.security.MessageDigest.getInstance("SHA-256").digest(c.toByteArray()).joinToString("") { "%02x".format(it) } == RELEASE_CERT_SHA256
-        }
-    }.getOrDefault(true)
-
     fun check(activity: AppCompatActivity, silent: Boolean = false) {
-        if (!silent) Toast.makeText(activity, "Checking for updates…", Toast.LENGTH_SHORT).show()
+        if (!silent) Toast.makeText(activity, "Checking Kokoho Hub for updates…", Toast.LENGTH_SHORT).show()
         if (checking) return
         checking = true
-        val prereleases = Prefs.updatePrereleases(activity)
+        val appCtx = activity.applicationContext
         activity.lifecycleScope.launch {
-            val result = try { withContext(Dispatchers.IO) { runCatching { fetch(prereleases) } } } finally { checking = false }
-            // Reached GitHub: the next automatic check is an interval away; not reached: soon.
+            val result = try {
+                withContext(Dispatchers.IO) { runCatching { fetchFromHub(appCtx) } }
+            } finally {
+                checking = false
+            }
             val now = System.currentTimeMillis()
             Prefs.setLastUpdateCheck(activity, if (result.isSuccess) now else now - AUTO_INTERVAL_MS + RETRY_MS)
             if (activity.isFinishing || activity.isDestroyed) return@launch
             if (silent && result.isFailure) return@launch
+
             val latest = result.getOrElse {
                 MaterialAlertDialogBuilder(activity)
                     .setTitle("Couldn't check for updates")
-                    .setMessage("GitHub couldn't be reached (${it.message ?: "no connection"}). You can look at the releases page instead.")
-                    .setPositiveButton("Open releases") { _, _ -> open(activity, RELEASES) }
-                    .setNegativeButton("Close", null)
+                    .setMessage("Kokoho Hub (${KokohoHubClient.hubUrl(activity)}) could not be reached (${it.message ?: "no connection"}). Check your connection or Auxnet Hub settings.")
+                    .setPositiveButton("Close", null)
                     .show()
                 return@launch
             }
-            val current = BuildConfig.VERSION_NAME.substringBefore('-')
-            if (isNewer(latest.version, current) && BuildConfig.FLAVOR == "foss" && !signedByUs(activity)) {
-                // Built and signed by F-Droid: Android would refuse our APK over it, so F-Droid updates it.
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle("RF Sentinel ${latest.version} is available")
-                    .setMessage("You have $current. This copy was built and signed by F-Droid, so it updates through F-Droid " +
-                        "once F-Droid has built the new version.")
-                    .setPositiveButton("OK", null)
-                    .setNeutralButton("What's new") { _, _ -> open(activity, latest.notesUrl) }
-                    .show()
-            } else if (isNewer(latest.version, current)) {
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle("RF Sentinel ${latest.version} is available")
-                    .setMessage("You have $current. It downloads here and installs over this one - your history and settings are kept. " +
-                        "Scanning stops while it installs.")
-                    .setPositiveButton("Install now") { _, _ -> installNow(activity, latest) }
-                    .setNeutralButton("What's new") { _, _ -> open(activity, latest.notesUrl) }
-                    .setNegativeButton("Later", null)
-                    .show()
-            } else if (!silent) {
-                MaterialAlertDialogBuilder(activity)
-                    .setTitle("You're up to date")
-                    .setMessage("RF Sentinel $current is the latest version.")
-                    .setPositiveButton("OK", null)
-                    .show()
+
+            if (isUpdateAvailable(latest)) {
+                notifyListeners(latest)
+                if (!silent || promptedVersion != latest.version) {
+                    promptedVersion = latest.version
+                    showUpdateAvailableDialog(activity, latest)
+                }
+            } else {
+                notifyListeners(null)
+                if (!silent) {
+                    val current = BuildConfig.VERSION_NAME.substringBefore('-')
+                    MaterialAlertDialogBuilder(activity)
+                        .setTitle("You're up to date")
+                        .setMessage("Kokoho $current is the latest version on ${KokohoHubClient.hubUrl(activity)}.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
             }
         }
     }
 
-    /**
-     * One button: allow installs from this app if Android hasn't been told to yet (it opens that switch and carries
-     * on when you are back), download the release with a progress bar, check it, and hand it to Android's installer
-     * (its "Update?" card, which is the one tap left). The ordinary download in the browser stays as the fallback.
-     */
+    fun showUpdateAvailableDialog(activity: AppCompatActivity, latest: Latest) {
+        val notesLine = latest.notes.takeIf { it.isNotBlank() }?.let { "\n\n$it" }.orEmpty()
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Update available (${latest.version})")
+            .setMessage(
+                "A newer version of Kokoho is available. You can update now or anytime from Utility.$notesLine"
+            )
+            .setCancelable(true)
+            .setPositiveButton("Update now") { _, _ -> installNow(activity, latest) }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
     fun installNow(activity: AppCompatActivity, latest: Latest) {
         val url = latest.apkUrl ?: return open(activity, latest.notesUrl)
-        if (!UpdateInstaller.canInstall(activity)) { askToAllowInstalls(activity, latest); return }
+        if (!UpdateInstaller.canInstall(activity)) {
+            askToAllowInstalls(activity, latest)
+            return
+        }
 
         val d = activity.resources.displayMetrics.density
-        val text = android.widget.TextView(activity).apply { text = "Starting the download..." }
-        val bar = com.google.android.material.progressindicator.LinearProgressIndicator(activity).apply { isIndeterminate = true }
+        val text = android.widget.TextView(activity).apply { text = "Starting live update download…" }
+        val bar = com.google.android.material.progressindicator.LinearProgressIndicator(activity).apply {
+            isIndeterminate = true
+        }
         val box = android.widget.LinearLayout(activity).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding((24 * d).toInt(), (16 * d).toInt(), (24 * d).toInt(), (8 * d).toInt())
-            addView(text); addView(bar, android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = (12 * d).toInt() })
+            addView(text)
+            addView(bar, android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = (12 * d).toInt() })
         }
         var job: kotlinx.coroutines.Job? = null
         val dialog = MaterialAlertDialogBuilder(activity)
-            .setTitle("Updating to RF Sentinel ${latest.version}")
+            .setTitle("Updating to Kokoho ${latest.version}")
             .setView(box)
             .setCancelable(false)
             .setNegativeButton("Cancel") { _, _ -> job?.cancel() }
             .show()
+
         fun alive() = !activity.isFinishing && !activity.isDestroyed
-        fun mb(n: Long) = "%.1f MB".format(java.util.Locale.US, n / 1_048_576.0)
-        job = (activity.application as com.rfsentinel.app.RFSentinelApp).appScope.launch(Dispatchers.Main) {
+        fun mb(n: Long) = "%.1f MB".format(Locale.US, n / 1_048_576.0)
+
+        job = (activity.application as RFSentinelApp).appScope.launch(Dispatchers.Main) {
             try {
-                val file = UpdateInstaller.download(activity.applicationContext, url, latest.version, latest.apkSize, latest.apkSha256) { done, total ->
+                val file = UpdateInstaller.download(
+                    activity.applicationContext,
+                    url,
+                    latest.version,
+                    latest.apkSize,
+                    latest.apkSha256
+                ) { done, total ->
                     if (alive()) activity.runOnUiThread {
                         if (total > 0) {
-                            bar.isIndeterminate = false; bar.max = 1000; bar.progress = (done * 1000 / total).toInt()
+                            bar.isIndeterminate = false
+                            bar.max = 1000
+                            bar.progress = (done * 1000 / total).toInt()
                             text.text = "Downloading ${mb(done)} of ${mb(total)}"
-                        } else text.text = "Downloading ${mb(done)}"
+                        } else {
+                            text.text = "Downloading ${mb(done)}"
+                        }
                     }
                 }
-                if (alive()) { bar.isIndeterminate = true; text.text = "Installing... confirm Android's \"Update\" card" }
+                if (alive()) {
+                    bar.isIndeterminate = true
+                    text.text = "Installing… confirm Android's \"Update\" prompt"
+                }
                 val outcome = UpdateInstaller.install(activity.applicationContext, file)
                 if (alive()) dialog.dismiss()
                 when (outcome) {
-                    is UpdateInstaller.Outcome.Cancelled -> if (alive()) Toast.makeText(activity,
-                        "Update cancelled - tap Check for updates to try again", Toast.LENGTH_LONG).show()
+                    is UpdateInstaller.Outcome.Cancelled -> if (alive()) Toast.makeText(
+                        activity,
+                        "Update cancelled — you can install it from Utility anytime",
+                        Toast.LENGTH_LONG
+                    ).show()
                     is UpdateInstaller.Outcome.Failed -> if (alive()) failed(activity, latest, outcome.message)
-                    is UpdateInstaller.Outcome.Refused -> if (alive()) failed(activity, latest, "Android didn't take the update")
-                    else -> {} // installed: the app is replaced, or Refused twice (shown as a failure by the second try)
+                    is UpdateInstaller.Outcome.Refused -> if (alive()) failed(activity, latest, "Android refused the update")
+                    else -> {}
                 }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                if (alive()) { dialog.dismiss(); Toast.makeText(activity, "Update cancelled", Toast.LENGTH_SHORT).show() }
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                if (alive()) {
+                    dialog.dismiss()
+                    Toast.makeText(activity, "Update cancelled", Toast.LENGTH_SHORT).show()
+                }
                 UpdateInstaller.cleanUp(activity.applicationContext)
             } catch (e: Exception) {
-                if (alive()) { dialog.dismiss(); failed(activity, latest, e.message ?: "no connection") }
+                if (alive()) {
+                    dialog.dismiss()
+                    failed(activity, latest, e.message ?: "no connection")
+                }
             }
         }
     }
@@ -252,19 +325,19 @@ object UpdateChecker {
     private fun failed(activity: AppCompatActivity, latest: Latest, why: String) {
         MaterialAlertDialogBuilder(activity)
             .setTitle("Couldn't install the update")
-            .setMessage("$why\n\nYou can download RF Sentinel ${latest.version} from GitHub and install it yourself.")
-            .setPositiveButton("Open release page") { _, _ -> open(activity, latest.notesUrl) }
+            .setMessage("$why\n\nYou can also download Kokoho ${latest.version} directly from ${latest.apkUrl ?: latest.notesUrl}.")
+            .setPositiveButton("Download in browser") { _, _ -> open(activity, latest.apkUrl ?: latest.notesUrl) }
             .setNegativeButton("Close", null)
             .show()
     }
 
-    /** Android asks each app to be allowed to install apps: one switch, then the update carries on from here. */
     private fun askToAllowInstalls(activity: AppCompatActivity, latest: Latest) {
         MaterialAlertDialogBuilder(activity)
-            .setTitle("Allow RF Sentinel to install updates")
-            .setMessage("Android needs you to allow this once: it opens a switch called \"Allow from this source\". " +
-                "Turn it on, come back, and the update starts by itself. Nothing else is installed this way.")
-            .setPositiveButton("Open the switch") { _, _ ->
+            .setTitle("Allow Kokoho to install updates")
+            .setMessage(
+                "Android requires allowing \"Install unknown apps\" once for Kokoho so live updates from Kokoho Hub can install directly."
+            )
+            .setPositiveButton("Open setting") { _, _ ->
                 var left = false
                 activity.lifecycle.addObserver(object : androidx.lifecycle.DefaultLifecycleObserver {
                     override fun onStop(owner: androidx.lifecycle.LifecycleOwner) { left = true }
@@ -272,12 +345,12 @@ object UpdateChecker {
                         if (!left) return
                         activity.lifecycle.removeObserver(this)
                         if (UpdateInstaller.canInstall(activity)) installNow(activity, latest)
-                        else Toast.makeText(activity, "Not allowed - the update wasn't started", Toast.LENGTH_LONG).show()
+                        else Toast.makeText(activity, "Permission not granted — update not started", Toast.LENGTH_LONG).show()
                     }
                 })
                 runCatching { activity.startActivity(UpdateInstaller.allowInstallsIntent(activity)) }
             }
-            .setNeutralButton("Download in the browser") { _, _ -> open(activity, latest.apkUrl ?: latest.notesUrl) }
+            .setNeutralButton("Download in browser") { _, _ -> open(activity, latest.apkUrl ?: latest.notesUrl) }
             .setNegativeButton("Later", null)
             .show()
     }

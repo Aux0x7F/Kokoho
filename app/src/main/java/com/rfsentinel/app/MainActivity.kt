@@ -161,7 +161,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 else DeviceActions.openDetails(this, it.mac)
             },
-            onLongPress = { if (listOf(CELL_ROW, WAZE_ROW, RADIO_ROW, TG_ROW, AIRCRAFT_ROW).none { p -> it.mac.startsWith(p) }) DeviceActions.showQuickActions(this, it.mac) },
+            onLongPress = { DeviceActions.showQuickActions(this, it.mac) { render(); kokohoViews.updatePosture() } },
             onMute = { row, forever -> toggleMute(row, forever) }
         )
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
@@ -316,13 +316,12 @@ class MainActivity : AppCompatActivity() {
                 while (true) { kotlinx.coroutines.delay(12_000L); com.rfsentinel.app.ui.DemoData.publishSampleAlert(com.rfsentinel.app.ui.DemoData.fakeLocation?.let { it.latitude to it.longitude }) }
             }
         }
+        supportActionBar?.hide()
+        if (!Prefs.onboardingDone(this)) Prefs.setOnboardingDone(this)
         applyViewMode()
         observeDevices()
         updateStatus()
         lifecycleScope.launch { Favorites.load(this@MainActivity); com.rfsentinel.app.data.DeviceNames.load(this@MainActivity) }
-        // Only on a real fresh start - a theme change recreates this screen too.
-        if (savedInstanceState == null && !Prefs.onboardingDone(this)) showOnboarding()
-
         if (savedInstanceState == null) com.rfsentinel.app.util.CrashLog.offerAfterCrash(this)
     }
 
@@ -333,11 +332,8 @@ class MainActivity : AppCompatActivity() {
             if (f != filter) filterChips[f]?.let { it.isChecked = true; scrollToChip(it) }
         }
         updateStatus()
-        // Every time the app comes to the front (this screen can stay alive for days): Settings > Check for updates on app open.
-        // The FOSS build first asks whether it may fetch the known cameras on its own.
-        if (Prefs.onboardingDone(this)) com.rfsentinel.app.util.CameraQuestion.askIfNeeded(this) {
-            com.rfsentinel.app.util.UpdateChecker.checkOnStartup(this)
-        }
+        // Check self-hosted Kokoho update endpoint on startup (no camera location popup).
+        com.rfsentinel.app.util.UpdateChecker.checkOnStartup(this)
     }
 
 
@@ -387,8 +383,7 @@ class MainActivity : AppCompatActivity() {
     private fun applyViewMode() {
         panes.apply()
         if (::kokohoViews.isInitialized &&
-            kokohoViews.currentTab != com.rfsentinel.app.kokoho.KokohoViews.Tab.MAP &&
-            kokohoViews.currentTab != com.rfsentinel.app.kokoho.KokohoViews.Tab.LIST
+            kokohoViews.currentTab != com.rfsentinel.app.kokoho.KokohoViews.Tab.MAP
         ) {
             binding.mapPane.visibility = View.GONE
             binding.radarPane.visibility = View.GONE
@@ -523,6 +518,12 @@ class MainActivity : AppCompatActivity() {
             val fg = if (running) 0xFFFFFFFF.toInt() else onAccent
             binding.startStopButton.setTextColor(fg)
             binding.startStopButton.iconTint = android.content.res.ColorStateList.valueOf(fg)
+        }
+        if (::kokohoViews.isInitialized) {
+            binding.statusText.visibility = View.GONE
+            statusPanel.root.visibility = View.GONE
+            kokohoViews.syncRunningState(running)
+            return
         }
         val visual = com.rfsentinel.app.ui.VisualMode.on(this, com.rfsentinel.app.ui.VisualMode.Screen.STATUS)
         binding.statusText.visibility = if (visual) View.GONE else View.VISIBLE
@@ -787,140 +788,43 @@ class MainActivity : AppCompatActivity() {
         updateBanner(flagged, threshold)
         updateStatus()
         if (::kokohoViews.isInitialized) kokohoViews.updatePosture(now)
+        (binding.filterChips.parent as? View)?.visibility = View.GONE
 
-        // Live counts on the chips ("Trackers 2"); empty filters stay unlabelled.
-        val visualChips = com.rfsentinel.app.ui.VisualMode.on(this, com.rfsentinel.app.ui.VisualMode.Screen.STATUS)
-        for ((f, chip) in filterChips) {
-            val n = when (f) {
-                com.rfsentinel.app.ui.DeviceFilter.CELLS -> liveCellCount(now)
-                com.rfsentinel.app.ui.DeviceFilter.WAZE -> currentWaze(now).size
-                com.rfsentinel.app.ui.DeviceFilter.AIRCRAFT -> aircraft.size
-                com.rfsentinel.app.ui.DeviceFilter.FLAGGED -> all.count { f.matches(it) } + aircraft.count { it.hit != null }
-                com.rfsentinel.app.ui.DeviceFilter.RADIO -> if (ScanForegroundService.isRunning) com.rfsentinel.app.sdr.RadioLog.current(now).size else 0
-                com.rfsentinel.app.ui.DeviceFilter.TALKGROUPS -> currentTalkgroups(now).size
-                else -> all.count { f.matches(it) }
-            }
-            val label = if (f == com.rfsentinel.app.ui.DeviceFilter.ALL || n > 0) "${f.label} $n" else f.label
-            if (chip.text != label) chip.text = label
-            styleFilterChip(chip, visualChips, if (f == com.rfsentinel.app.ui.DeviceFilter.FLAGGED && n > 0) 0xFFD0503C.toInt() else null)
-            // Only the filters with something in them (and All, Flagged, the one picked): no row of empty chips to scroll past.
-            chip.visibility = if (n > 0 || f == com.rfsentinel.app.ui.DeviceFilter.ALL || f == com.rfsentinel.app.ui.DeviceFilter.FLAGGED || f == filter) View.VISIBLE else View.GONE
-        }
-        // Sort by / Group by from the ⋮ menu (alerts stay on top); the default is alerts, then closest.
-        val sections = com.rfsentinel.app.ui.DeviceOrder.arrange(
-            all.filter { filter.matches(it) && matchesQuery(it) }.map { s ->
-                com.rfsentinel.app.ui.DeviceOrder.Item(s, com.rfsentinel.app.ui.DeviceFilter.seen(s),
-                    com.rfsentinel.app.data.DeviceNames.of(s.mac) ?: s.best?.label ?: s.name ?: s.deviceType,
-                    s.vendor, s.rssi, s.firstSeen, s.lastSeen)
-            },
-            com.rfsentinel.app.ui.DeviceOrder.sort(this), com.rfsentinel.app.ui.DeviceOrder.group(this),
-            compareByDescending<com.rfsentinel.app.ui.DeviceOrder.Item<DeviceRegistry.Snapshot>> { it.value.following }
-                .thenByDescending { it.value.best?.confidence ?: 0 }
-                .thenBy { bandOrder(ProximityUtil.band(it.rssi)) }
-                .thenBy { it.firstSeen }
-        )
-        val visible = sections.flatMap { it.items }
-        shownDevices = visible
+        val kokohoSnap = com.rfsentinel.app.kokoho.KokohoPostureEngine.evaluate(this, now)
+        val activeThreats = kokohoSnap.activeThreats
+        shownDevices = emptyList()
 
         refreshMuteButton()
-        // The map and radar frames take the top alert's colour.
-        panes.update(flagged.maxByOrNull { it.best?.confidence ?: 0 }?.let { colorFor(it) })
-        var radioBlips = 0
-        if (panes.radarShown) {
-            val radio = radioBlips(now, Prefs.alertThreshold(this, Category.RADIO))
-            radioBlips = radio.size
-            val fix = if (demoMode) com.rfsentinel.app.ui.DemoData.fakeLocation else ScanForegroundService.lastFix
-            // Heading-up from the compass (and the GPS course while driving), north-up without either.
-            binding.radarView.setFix(fix)
-            binding.radarView.pinpointOff = !Prefs.pinpointFlagged(this)
-            binding.radarView.setBlips(visible.take(200).map { s ->
-                val alert = com.rfsentinel.app.ui.LiveWindow.alerting(s, now)
-                val at = if (alert && fix != null) knownPosition(s, fix.latitude, fix.longitude) else null
-                // Placed by your turns and kept placed as you walk, or the device being located once its sweep locked.
-                val tracked = if (alert && at == null) com.rfsentinel.app.ui.RadarTrack.place(s.mac, now) else null
-                val swept = if (at == null && tracked == null) com.rfsentinel.app.ui.LiveRead.sweptBearing(s.mac) else null
-                RadarView.Blip(
-                    s.mac, s.rssi,
-                    if (alert) colorFor(s) else binding.radarView.ordinaryColor(),
-                    alert,
-                    if (alert) s.best?.label else null,
-                    at?.let { com.rfsentinel.app.alpr.KnownCameras.bearingTo(fix!!.latitude, fix.longitude, it.first, it.second).toFloat() }
-                        ?: tracked?.bearing ?: swept,
-                    at?.let { DeviceRegistry.metersBetween(fix!!.latitude, fix.longitude, it.first, it.second).toFloat() } ?: tracked?.distanceM,
-                    now - s.lastSeen
-                )
-            } + radio)
-        }
+        panes.update(kokohoSnap.primaryThreat?.posture?.colorArgb)
+
         if (panes.listShown) {
-            val cells = cellRows(now)
-            val waze = wazeRows(now, Prefs.alertThreshold(this, Category.POLICE_REPORT))
-            val radio = radioRows(now, Prefs.alertThreshold(this, Category.RADIO))
-            val talkgroups = talkgroupRows(now, Prefs.alertThreshold(this, Category.RADIO))
-            val air = aircraftRows(now, Prefs.alertThreshold(this, Category.AIRCRAFT))
-            // Waze reports, radios on the air and aircraft that meet the alert threshold rank with the flagged devices;
-            // the rest follow the devices.
-            val (urgent, quiet) = waze.partition { it.flashing }
-            val (radioLive, radioOld) = radio.partition { it.flashing }
-            val (tgLive, tgOld) = talkgroups.partition { it.flashing || it.mac == TG_ROW + com.rfsentinel.app.sdr.SdrRadio.p25Hold }
-            val (airUrgent, airQuiet) = air.partition { it.flashing }
-            // Under the default sort; another Sort by keeps its own order for the devices.
-            fun ranked(rows: List<DeviceRow>) = if (com.rfsentinel.app.ui.DeviceOrder.sort(this) != com.rfsentinel.app.ui.DeviceOrder.Sort.ALERTS) rows
-                else rows.sortedWith(compareByDescending<DeviceRow> { it.tag?.startsWith("FOLLOWING") == true }.thenByDescending { it.confidence ?: 0 })
-            // Alerting devices from your own watchlist entries go above all of them.
-            fun mine(s: DeviceRegistry.Snapshot) = com.rfsentinel.app.ui.LiveWindow.alerting(s, now) &&
-                s.hits.any { it.source == com.rfsentinel.app.oui.OuiEntry.YOURS }
-            if (com.rfsentinel.app.ui.DeviceOrder.group(this) == com.rfsentinel.app.ui.DeviceOrder.Group.NONE) {
-                val (yours, devices) = sections.flatMap { it.items }.partition(::mine)
-                val (alerting, others) = devices.partition { it.best != null && !WhitelistCache.contains(it.mac) }
-                submitRows(yours.map { toRow(it, now, threshold) } +
-                    ranked(airUrgent + tgLive + radioLive + urgent + alerting.map { toRow(it, now, threshold) }) +
-                    others.map { toRow(it, now, threshold) } + airQuiet + tgOld + radioOld + cells + quiet)
-            } else {
-                // Grouped: everything the list shows has a group, not only Bluetooth and WiFi devices. What's
-                // urgent (Waze, radio, aircraft) joins the flagged devices in Alerts, at the top.
-                fun block(key: String, label: String, rows: List<DeviceRow>) =
-                    if (rows.isEmpty()) emptyList() else listOf(DeviceRow.header(key, "$label · ${rows.size}")) + rows
-                val alerts = com.rfsentinel.app.ui.DeviceOrder.ALERTS
-                val (yours, flagged) = sections.filter { it.header == alerts }.flatMap { it.items }.partition(::mine)
-                submitRows(
-                    block(alerts, alerts, yours.map { toRow(it, now, threshold) } +
-                        ranked(airUrgent + tgLive + radioLive + urgent + flagged.map { toRow(it, now, threshold) })) +
-                        sections.filter { it.header != alerts }.flatMap { sec -> block(sec.header.orEmpty(), sec.header.orEmpty(), sec.items.map { toRow(it, now, threshold) }) } +
-                        block("x:aircraft", "Aircraft", airQuiet) + block("x:talkgroups", "Talkgroups", tgOld) +
-                        block("x:radio", "Radio transmissions", radioOld) +
-                        block("x:waze", "Waze reports", quiet) + block("x:cells", "Cell towers", cells)
+            val kokohoRows = activeThreats.map { t ->
+                val distText = com.rfsentinel.app.kokoho.KokohoPostureEngine.formatUserDistance(this, t.estimatedDistanceM)
+                val sigText = "${t.combinedConfidence}% confidence · ${t.evidenceCount} ${if (t.evidenceCount == 1) "signal" else "signals"}"
+                com.rfsentinel.app.ui.DeviceRow(
+                    mac = "kokoho:${t.uuid}",
+                    title = t.friendlyLabel,
+                    subtitle = distText,
+                    meta = sigText,
+                    tag = t.posture.badgeLabel,
+                    tagColor = t.posture.colorArgb,
+                    highlight = t.posture.colorArgb,
+                    flashing = t.posture == com.rfsentinel.app.kokoho.PostureColor.RED,
+                    bold = true,
+                    rssi = 0,
+                    confidence = t.combinedConfidence
                 )
             }
-            shownCells = cells.size + waze.size + radio.size + talkgroups.size + air.size
+            submitRows(kokohoRows)
+            shownCells = kokohoRows.size
         }
-        binding.emptyState.visibility = if (visible.isEmpty() && (!panes.listShown || shownCells == 0) &&
-            (!panes.radarShown || radioBlips == 0)) View.VISIBLE else View.GONE
-        // Once, with the first device listed: nothing else on screen shows that long-press exists.
-        if (visible.isNotEmpty() && panes.listShown && !Prefs.listTipShown(this)) {
-            Prefs.setListTipShown(this, true)
-            com.google.android.material.snackbar.Snackbar.make(binding.root,
-                "Tap a device for details. Long-press it for watchlist, whitelist and favorite.", 8000)
-                .setAction("OK") {}.show()
-        }
-        // A filter that hides everything heard: one tap back to the full list.
-        binding.showAllButton.visibility =
-            if (filter != com.rfsentinel.app.ui.DeviceFilter.ALL && all.isNotEmpty()) View.VISIBLE else View.GONE
-        // Not scanning: the Start button right under the note, where the eyes are.
-        binding.emptyStartButton.visibility = if (all.isEmpty() && !ScanForegroundService.isRunning) View.VISIBLE else View.GONE
-        binding.emptyText.text = when {
-            all.isEmpty() && !ScanForegroundService.isRunning -> "Not scanning."
-            all.isEmpty() -> "Listening... no devices heard yet."
-            filter == com.rfsentinel.app.ui.DeviceFilter.WAZE ->
-                "No Waze reports in range.\nTurn on Waze police reports in Settings and keep scanning."
-            filter == com.rfsentinel.app.ui.DeviceFilter.RADIO ->
-                "No radio transmissions heard in the last 5 minutes.\nNeeds an RTL-SDR on USB. Set it up in Settings › RTL-SDR radio."
-            filter == com.rfsentinel.app.ui.DeviceFilter.TALKGROUPS ->
-                "No talkgroups in the last 5 minutes.\nNeeds an RTL-SDR on USB with P25 control channel on in Settings › RTL-SDR radio."
-            filter == com.rfsentinel.app.ui.DeviceFilter.AIRCRAFT ->
-                "No aircraft yet.\nNeeds an RTL-SDR on USB, or the online feeds. Both are in Settings."
-            filter == com.rfsentinel.app.ui.DeviceFilter.CELLS ->
-                "No cell towers yet. They're read every 15 s while scanning\n(needs Fake cell tower signs on in Settings › What to detect)."
-            else -> "No devices match this filter."
+        binding.emptyState.visibility = if (panes.listShown && activeThreats.isEmpty()) View.VISIBLE else View.GONE
+        binding.showAllButton.visibility = View.GONE
+        binding.emptyStartButton.visibility = View.GONE
+        binding.emptyText.text = if (ScanForegroundService.isRunning) {
+            "No threats detected."
+        } else {
+            "Standby · Tap Scan to monitor."
         }
     }
 
@@ -1412,6 +1316,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateBanner(flagged: List<DeviceRegistry.Snapshot>, threshold: Int) {
         val banner = binding.threatBanner
+        if (::kokohoViews.isInitialized) {
+            banner.visibility = View.GONE
+            showBannerClose(false)
+            return
+        }
         if (!ScanForegroundService.isRunning && flagged.isEmpty()) {
             banner.visibility = View.GONE
             showBannerClose(false)

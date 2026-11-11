@@ -1,7 +1,7 @@
 package com.rfsentinel.app.kokoho
 
 import android.content.Context
-import android.location.Location
+import com.rfsentinel.app.online.PoliceAircraft
 import com.rfsentinel.app.sdr.RadioLog
 import com.rfsentinel.app.sdr.SdrRadio
 import com.rfsentinel.app.service.DeviceRegistry
@@ -9,9 +9,12 @@ import com.rfsentinel.app.service.ScanForegroundService
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -49,14 +52,35 @@ data class EvaluatedThreat(
     val evidenceSources: List<EvidenceBadge>,
     val updatedAtMs: Long,
     val lat: Double?,
-    val lon: Double?
-)
+    val lon: Double?,
+    /** True once multi-GPS client triangulation (>= 60m spread) or Auxnet room correlation approximates the source position. */
+    val isApproximatedPosition: Boolean = false,
+    /** True only when the approximated position uncertainty is narrow enough to render as a point (<= 35m) or exact ADS-B GPS. */
+    val isPinpointed: Boolean = false,
+    /** True if this threat is an airborne ADS-B aircraft. */
+    val isAircraft: Boolean = false,
+    val aircraftTrackDeg: Double? = null
+) {
+    val friendlyLabel: String get() = label.ifBlank { agency.friendlyLabel }
+    val combinedConfidence: Int
+        get() = ((classificationConfidence + spatialConfidence) / 2.0).roundToInt().coerceIn(1, 99)
+    val evidenceCount: Int
+        get() = evidenceSources.size.coerceAtLeast(1)
+    /**
+     * Radius (in meters) to draw on the Map:
+     *  - Before wide-baseline triangulation (`!isApproximatedPosition`): circle centered at user GPS with `radius = estimatedDistanceM`.
+     *  - After triangulation (`isApproximatedPosition`): circle centered at `(lat, lon)` with `radius = uncertaintyRadiusM`.
+     */
+    val mapCircleRadiusM: Int
+        get() = if (isApproximatedPosition) uncertaintyRadiusM.coerceAtLeast(20) else estimatedDistanceM.coerceAtLeast(35)
+}
 
 data class PostureSnapshot(
     val color: PostureColor,
     val headline: String,
     val subheadline: String,
     val distanceAndBearingText: String,
+    val bottomConfidenceText: String,
     val primaryThreat: EvaluatedThreat?,
     val activeThreats: List<EvaluatedThreat>,
     val enabledScopeText: String
@@ -64,8 +88,37 @@ data class PostureSnapshot(
 
 object KokohoPostureEngine {
 
-    private const val ACTIVE_WINDOW_MS = 120_000L
-    private const val COLOCATION_WINDOW_MS = 45_000L
+    private const val COLOCATION_WINDOW_MS = 90_000L
+    /** Minimum GPS spread (meters) across client observations before transitioning from a user-centered distance circle to an approximated source circle. */
+    const val MIN_TRIANGULATION_BASELINE_M = 60.0
+    /** Maximum uncertainty radius (meters) at which an approximated circle is considered narrow enough to show a point dot. */
+    const val PINPOINT_POINT_RADIUS_M = 35
+
+    data class SpatialSample(
+        var lat: Double,
+        var lon: Double,
+        var signalDb: Int,
+        var estDistanceM: Int,
+        var timestampMs: Long
+    )
+
+    data class TriangulationResult(
+        val centerLat: Double?,
+        val centerLon: Double?,
+        val estimatedDistanceM: Int,
+        val uncertaintyRadiusM: Int,
+        val spatialConfidence: Int,
+        val isApproximatedPosition: Boolean,
+        val isPinpointed: Boolean,
+        val isClosing: Boolean
+    )
+
+    private val spatialHistory = ConcurrentHashMap<String, MutableList<SpatialSample>>()
+    private val localThreatCache = ConcurrentHashMap<String, EvaluatedThreat>()
+    @Volatile
+    private var lastPostureColor: PostureColor = PostureColor.GREEN
+    @Volatile
+    private var lastEvaluateNowMs: Long = 0L
 
     /** Deterministic UUIDv5 matching kokoho-hub's namespace. */
     private val KOKOHO_NS = byteArrayOf(
@@ -87,94 +140,264 @@ object KokohoPostureEngine {
         )
     }
 
+    fun clearLocalState() {
+        spatialHistory.clear()
+        localThreatCache.clear()
+        lastPostureColor = PostureColor.GREEN
+        lastEvaluateNowMs = 0L
+    }
+
+    /**
+     * Records a local observation at `(gpsLat, gpsLon)` with estimated range `estDistanceM`
+     * and solves for either:
+     *  - A user-centered radius circle (`radius = estDistanceM`) when GPS spread < 60m, OR
+     *  - An approximated source position circle (`(approxLat, approxLon)`, `radius = uncertaintyRadiusM`)
+     *    when multiple GPS fixes span >= 60m.
+     */
+    fun recordAndTriangulate(
+        uuid: String,
+        gpsLat: Double?,
+        gpsLon: Double?,
+        signalDb: Int,
+        estDistanceM: Int,
+        nowMs: Long,
+        decayMs: Long
+    ): TriangulationResult {
+        val list = spatialHistory.getOrPut(uuid) { mutableListOf() }
+        synchronized(list) {
+            list.removeAll { nowMs - it.timestampMs > decayMs }
+            if (gpsLat != null && gpsLon != null) {
+                val last = list.lastOrNull()
+                if (last != null && haversineMeters(last.lat, last.lon, gpsLat, gpsLon) < 8.0) {
+                    last.signalDb = signalDb
+                    last.estDistanceM = estDistanceM
+                    last.timestampMs = nowMs
+                } else {
+                    list.add(SpatialSample(gpsLat, gpsLon, signalDb, estDistanceM, nowMs))
+                    if (list.size > 64) list.removeAt(0)
+                }
+            }
+
+            if (list.isEmpty()) {
+                return TriangulationResult(
+                    centerLat = gpsLat,
+                    centerLon = gpsLon,
+                    estimatedDistanceM = estDistanceM,
+                    uncertaintyRadiusM = estDistanceM,
+                    spatialConfidence = 40,
+                    isApproximatedPosition = false,
+                    isPinpointed = false,
+                    isClosing = false
+                )
+            }
+
+            val latest = list.last()
+            val isClosing = if (list.size >= 2) {
+                val prev = list[max(0, list.size - 2)]
+                latest.estDistanceM < (prev.estDistanceM * 0.88).toInt() || (latest.signalDb - prev.signalDb >= 4)
+            } else false
+
+            // Compute maximum pairwise GPS baseline across recorded samples
+            var maxSpreadM = 0.0
+            for (i in list.indices) {
+                for (j in i + 1 until list.size) {
+                    val d = haversineMeters(list[i].lat, list[i].lon, list[j].lat, list[j].lon)
+                    if (d > maxSpreadM) maxSpreadM = d
+                }
+            }
+
+            if (list.size < 3 || maxSpreadM < MIN_TRIANGULATION_BASELINE_M) {
+                // Not enough spatial diversity yet: show radius circle centered on user's GPS at estimatedDistanceM
+                val baseSpatialConf = (35 + min(20, (maxSpreadM / 3.0).toInt())).coerceIn(35, 55)
+                return TriangulationResult(
+                    centerLat = gpsLat ?: latest.lat,
+                    centerLon = gpsLon ?: latest.lon,
+                    estimatedDistanceM = latest.estDistanceM,
+                    uncertaintyRadiusM = latest.estDistanceM,
+                    spatialConfidence = baseSpatialConf,
+                    isApproximatedPosition = false,
+                    isPinpointed = false,
+                    isClosing = isClosing
+                )
+            }
+
+            // Wide baseline (>= 60m across >= 3 GPS fixes): solve 2D range-annulus intersection around strongest samples
+            val refLat = list.maxByOrNull { it.signalDb }?.lat ?: latest.lat
+            val refLon = list.maxByOrNull { it.signalDb }?.lon ?: latest.lon
+            val mPerDegLat = 111_132.0
+            val mPerDegLon = 111_320.0 * cos(Math.toRadians(refLat)).coerceAtLeast(0.1)
+
+            val searchSpanM = maxOf(maxSpreadM * 1.5, latest.estDistanceM * 1.25).coerceIn(80.0, 4000.0)
+            val steps = 16
+            var bestX = 0.0
+            var bestY = 0.0
+            var bestScore = Double.MAX_VALUE
+
+            val sampleXY = list.map { s ->
+                val x = (s.lon - refLon) * mPerDegLon
+                val y = (s.lat - refLat) * mPerDegLat
+                val w = 1.0 / max(s.estDistanceM.toDouble(), 25.0).pow(1.5)
+                Triple(x to y, s.estDistanceM.toDouble(), w)
+            }
+            val totalWeight = sampleXY.sumOf { it.third }.coerceAtLeast(1e-9)
+
+            for (ix in -steps..steps) {
+                val cx = (ix.toDouble() / steps) * searchSpanM
+                for (iy in -steps..steps) {
+                    val cy = (iy.toDouble() / steps) * searchSpanM
+                    var err = 0.0
+                    for ((pt, r, w) in sampleXY) {
+                        val d = sqrt((cx - pt.first).pow(2) + (cy - pt.second).pow(2))
+                        val diff = d - r
+                        err += w * diff * diff
+                    }
+                    if (err < bestScore) {
+                        bestScore = err
+                        bestX = cx
+                        bestY = cy
+                    }
+                }
+            }
+
+            val approxLat = refLat + (bestY / mPerDegLat)
+            val approxLon = refLon + (bestX / mPerDegLon)
+            val rmsResidualM = sqrt(bestScore / totalWeight)
+            val curUserLat = gpsLat ?: latest.lat
+            val curUserLon = gpsLon ?: latest.lon
+            val distFromUserM = haversineMeters(curUserLat, curUserLon, approxLat, approxLon).roundToInt().coerceAtLeast(15)
+
+            // Uncertainty shrinks as GPS baseline widens relative to distance and as RMS residual tightens
+            val dilutionM = (distFromUserM * 42.0 / maxSpreadM).coerceIn(15.0, distFromUserM * 0.85)
+            val approxRadiusM = maxOf(rmsResidualM * 0.75, dilutionM).roundToInt().coerceIn(20, max(distFromUserM, 60))
+            val isPinpointed = approxRadiusM <= PINPOINT_POINT_RADIUS_M
+            val spatialConf = (92 - (approxRadiusM * 35 / max(distFromUserM, 80))).coerceIn(60, 95)
+
+            return TriangulationResult(
+                centerLat = approxLat,
+                centerLon = approxLon,
+                estimatedDistanceM = distFromUserM,
+                uncertaintyRadiusM = approxRadiusM,
+                spatialConfidence = spatialConf,
+                isApproximatedPosition = true,
+                isPinpointed = isPinpointed,
+                isClosing = isClosing
+            )
+        }
+    }
+
     fun evaluate(context: Context, nowMs: Long = System.currentTimeMillis()): PostureSnapshot {
         KokohoSignatures.ensureLoaded(context)
         val enabled = KokohoSignatures.getEnabledAgencies(context)
+        val decayMs = KokohoSignatures.signalDecayMs(context)
+        val auxnetOn = KokohoSignatures.isAuxnetEnabled(context)
+
         val enabledScopeText = if (enabled.isEmpty()) {
             "No agencies selected"
         } else {
             val dhsCount = enabled.count { it.isDhs }
             val dhsPart = if (dhsCount == KokohoAgency.DHS_AGENCIES.size) {
-                "DHS (All: CBP, ICE, HSI, AMO, FPS)"
+                "DHS"
             } else if (dhsCount > 0) {
-                "DHS (" + enabled.filter { it.isDhs }.joinToString(", ") { it.shortName } + ")"
+                enabled.filter { it.isDhs }.joinToString(", ") { it.friendlyLabel }
             } else null
             val otherPart = enabled.filter { !it.isDhs }.takeIf { it.isNotEmpty() }
-                ?.joinToString(", ") { it.shortName }
-            listOfNotNull(dhsPart, otherPart).joinToString(" + ")
+                ?.joinToString(", ") { it.friendlyLabel }
+            listOfNotNull(dhsPart, otherPart).joinToString(" · ")
         }
 
         val userLoc = ScanForegroundService.lastFix
         val evaluated = mutableMapOf<String, EvaluatedThreat>()
 
-        // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub
-        for (remote in KokohoHubClient.activeObjects(nowMs)) {
-            val agency = KokohoAgency.fromCode(remote.classification.category) ?: continue
-            if (agency !in enabled) continue
+        // Prune expired local threat cache entries beyond the configured decay window
+        localThreatCache.entries.removeIf { nowMs - it.value.updatedAtMs > decayMs }
 
-            val distM = if (userLoc != null) {
-                haversineMeters(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
-            } else {
-                remote.location.uncertaintyRadiusM.roundToInt()
-            }
+        // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub (when Auxnet is enabled)
+        if (auxnetOn) {
+            for (remote in KokohoHubClient.activeObjects(nowMs, decayMs)) {
+                val isAir = remote.location.propagationClass.equals("AIR_TO_GROUND", ignoreCase = true) ||
+                    remote.classification.evidenceSources.any { it.kind.contains("ADSB", ignoreCase = true) }
+                val agency = KokohoAgency.fromCode(remote.classification.category) ?: continue
+                if (isAir) {
+                    if (!KokohoSignatures.isAdsbEnabled(context)) continue
+                    val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
+                    val allowed = if (agency.isDhs) airEnabled.any { it.isDhs } else agency in airEnabled
+                    if (!allowed) continue
+                } else {
+                    if (agency !in enabled) continue
+                }
 
-            val bearingFromUser = if (userLoc != null) {
-                bearingDeg(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
-            } else {
-                remote.location.bearingDeg?.roundToInt()
-            }
+                val distM = if (userLoc != null) {
+                    haversineMeters(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
+                } else {
+                    remote.location.uncertaintyRadiusM.roundToInt()
+                }
 
-            val headingTowardUser = isHeadingTowardUser(
-                userLat = userLoc?.latitude,
-                userLon = userLoc?.longitude,
-                objLat = remote.location.lat,
-                objLon = remote.location.lon,
-                objBearingDeg = remote.location.bearingDeg,
-                objVelocityMps = remote.location.velocityMps
-            )
+                val bearingFromUser = if (userLoc != null) {
+                    bearingDeg(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
+                } else {
+                    remote.location.bearingDeg?.roundToInt()
+                }
 
-            val posture = when {
-                distM <= 300 || (remote.location.uncertaintyRadiusM <= 180 && distM <= 500) -> PostureColor.RED
-                headingTowardUser -> PostureColor.ORANGE
-                else -> PostureColor.YELLOW
-            }
+                val headingTowardUser = isHeadingTowardUser(
+                    userLat = userLoc?.latitude,
+                    userLon = userLoc?.longitude,
+                    objLat = remote.location.lat,
+                    objLon = remote.location.lon,
+                    objBearingDeg = remote.location.bearingDeg,
+                    objVelocityMps = remote.location.velocityMps
+                )
 
-            val badges = remote.classification.evidenceSources.map {
-                EvidenceBadge(
-                    kind = it.kind,
-                    facetKey = it.facetKey,
-                    detail = it.detail,
-                    weight = it.weight,
-                    lastSeenMs = it.lastSeenMs
+                val posture = when {
+                    distM <= 300 || (remote.location.uncertaintyRadiusM <= 180 && distM <= 500) -> PostureColor.RED
+                    headingTowardUser -> PostureColor.ORANGE
+                    else -> PostureColor.YELLOW
+                }
+
+                val badges = remote.classification.evidenceSources.map {
+                    EvidenceBadge(
+                        kind = it.kind,
+                        facetKey = it.facetKey,
+                        detail = it.detail,
+                        weight = it.weight,
+                        lastSeenMs = it.lastSeenMs
+                    )
+                }
+
+                val uncertM = remote.location.uncertaintyRadiusM.roundToInt().coerceAtLeast(15)
+                val classConf = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99)
+                val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
+                val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+
+                evaluated[remote.uuid] = EvaluatedThreat(
+                    uuid = remote.uuid,
+                    trackUuid = remote.trackUuid,
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    posture = posture,
+                    overallConfidence = combinedConf,
+                    classificationConfidence = classConf,
+                    spatialConfidence = spatConf,
+                    estimatedDistanceM = distM,
+                    uncertaintyRadiusM = uncertM,
+                    bearingDeg = bearingFromUser,
+                    closingVelocityMps = remote.location.velocityMps,
+                    recurrenceSummary = remote.classification.recurrenceSummary,
+                    evidenceSources = badges,
+                    updatedAtMs = remote.updatedAtMs,
+                    lat = remote.location.lat,
+                    lon = remote.location.lon,
+                    isApproximatedPosition = true,
+                    isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
+                    isAircraft = isAir,
+                    aircraftTrackDeg = remote.location.bearingDeg
                 )
             }
-
-            evaluated[remote.uuid] = EvaluatedThreat(
-                uuid = remote.uuid,
-                trackUuid = remote.trackUuid,
-                agency = agency,
-                label = remote.classification.label,
-                posture = posture,
-                overallConfidence = (remote.confidence.overall * 100).roundToInt().coerceIn(1, 99),
-                classificationConfidence = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99),
-                spatialConfidence = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99),
-                estimatedDistanceM = distM,
-                uncertaintyRadiusM = remote.location.uncertaintyRadiusM.roundToInt(),
-                bearingDeg = bearingFromUser,
-                closingVelocityMps = remote.location.velocityMps,
-                recurrenceSummary = remote.classification.recurrenceSummary,
-                evidenceSources = badges,
-                updatedAtMs = remote.updatedAtMs,
-                lat = remote.location.lat,
-                lon = remote.location.lon
-            )
         }
 
-        // 2. Evaluate local RTL-SDR RF hits & P25 talkgroups, plus local watchlisted OUI devices
-        val localRfHits = RadioLog.current(nowMs).filter { nowMs - it.lastSeen <= ACTIVE_WINDOW_MS }
-        val localDevices = DeviceRegistry.snapshot(nowMs).filter { nowMs - it.lastSeen <= ACTIVE_WINDOW_MS }
+        // 2. Evaluate local RTL-SDR RF hits & P25 talkgroups, plus local watchlisted OUI devices within decayMs
+        val localRfHits = RadioLog.current(nowMs).filter { nowMs - it.lastSeen <= decayMs }
+        val localDevices = DeviceRegistry.snapshot(nowMs).filter { nowMs - it.lastSeen <= decayMs }
 
-        // Check for colocated Fleet OUI devices first so they can fuse with local RF hits
         data class LocalOuiCandidate(
             val mac: String,
             val sig: KokohoSignatures.FleetOuiSig,
@@ -193,7 +416,7 @@ object KokohoPostureEngine {
                     } else {
                         KokohoAgency.POLICE
                     }
-                    KokohoSignatures.FleetOuiSig(snap.mac.take(8), ag.id, best.label, best.confidence)
+                    KokohoSignatures.FleetOuiSig(snap.mac.take(8), ag.id, ag.friendlyLabel, best.confidence)
                 }
             val sig = matchedSig ?: return@mapNotNull null
             if (sig.agencyEnum !in enabled) return@mapNotNull null
@@ -203,8 +426,8 @@ object KokohoPostureEngine {
                 rssi = snap.rssi,
                 rising = snap.rssi >= snap.bestRssi - 3 && snap.sightings >= 3 && snap.rssi > -76,
                 lastSeen = snap.lastSeen,
-                lat = snap.located?.lat ?: userLoc?.latitude,
-                lon = snap.located?.lon ?: userLoc?.longitude
+                lat = snap.place?.lat ?: userLoc?.latitude,
+                lon = snap.place?.lon ?: userLoc?.longitude
             )
         }
 
@@ -223,14 +446,23 @@ object KokohoPostureEngine {
 
             val primaryFacet = if (colocatedOui != null) "hw:mac:${colocatedOui.mac}" else facetKey
             val uuid = deterministicUuidV5(primaryFacet)
-            val estDistM = estimateRfDistanceMeters(rf.peakSnrDb, sig?.role ?: "DIRECT_TACTICAL")
-            val uncertaintyM = (estDistM * 0.45).roundToInt().coerceAtLeast(45)
+            val rawEstDistM = estimateRfDistanceMeters(rf.peakSnrDb, sig?.role ?: "DIRECT_TACTICAL")
+
+            val tri = recordAndTriangulate(
+                uuid = uuid,
+                gpsLat = userLoc?.latitude ?: colocatedOui?.lat,
+                gpsLon = userLoc?.longitude ?: colocatedOui?.lon,
+                signalDb = rf.peakSnrDb,
+                estDistanceM = rawEstDistM,
+                nowMs = rf.lastSeen,
+                decayMs = decayMs
+            )
 
             val badges = mutableListOf(
                 EvidenceBadge(
                     kind = "RF_${sig?.mode ?: "SDR"}",
                     facetKey = facetKey,
-                    detail = "${sig?.alpha ?: "%.4f MHz".format(Locale.US, rf.freqHz / 1e6)} (${rf.peakSnrDb} dB SNR, ${rf.trend.name})",
+                    detail = "${sig?.alpha ?: "%.4f MHz".format(Locale.US, rf.freqHz / 1e6)} (${rf.peakSnrDb} dB SNR)",
                     weight = 0.65,
                     lastSeenMs = rf.lastSeen
                 )
@@ -239,44 +471,46 @@ object KokohoPostureEngine {
                 badges += EvidenceBadge(
                     kind = "WIFI_BLE_OUI",
                     facetKey = "hw:mac:${colocatedOui.mac}",
-                    detail = "${colocatedOui.sig.label} (${colocatedOui.mac}, ${colocatedOui.rssi} dBm)",
+                    detail = "${colocatedOui.sig.friendlyLabel} (${colocatedOui.rssi} dBm)",
                     weight = 0.35,
                     lastSeenMs = colocatedOui.lastSeen
                 )
             }
 
-            val isApproaching = rf.trend == RadioLog.Trend.CLOSER || colocatedOui?.rising == true
+            val isApproaching = rf.trend == RadioLog.Trend.CLOSER || colocatedOui?.rising == true || tri.isClosing
             val posture = when {
-                estDistM <= 250 || (colocatedOui != null && colocatedOui.rssi >= -65) -> PostureColor.RED
+                tri.estimatedDistanceM <= 250 || (colocatedOui != null && colocatedOui.rssi >= -65) -> PostureColor.RED
                 isApproaching -> PostureColor.ORANGE
                 else -> PostureColor.YELLOW
             }
 
-            val combinedLabel = if (colocatedOui != null) {
-                "${sig?.alpha ?: agency.shortName} + ${colocatedOui.sig.label} (Colocated)"
-            } else {
-                sig?.let { "${it.alpha} · ${it.description}" } ?: "${agency.fullName} (${"%.4f".format(Locale.US, rf.freqHz / 1e6)} MHz)"
-            }
+            val classConf = if (colocatedOui != null) 96 else 86
+            val spatConf = if (colocatedOui != null) max(tri.spatialConfidence, 76) else tri.spatialConfidence
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
 
-            evaluated[uuid] = EvaluatedThreat(
+            val threat = EvaluatedThreat(
                 uuid = uuid,
                 trackUuid = uuid,
                 agency = agency,
-                label = combinedLabel,
+                label = agency.friendlyLabel,
                 posture = posture,
-                overallConfidence = if (colocatedOui != null) 94 else 82,
-                classificationConfidence = if (colocatedOui != null) 96 else 85,
-                spatialConfidence = if (colocatedOui != null) 85 else 65,
-                estimatedDistanceM = estDistM,
-                uncertaintyRadiusM = uncertaintyM,
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = tri.estimatedDistanceM,
+                uncertaintyRadiusM = tri.uncertaintyRadiusM,
                 bearingDeg = null,
                 closingVelocityMps = null,
-                recurrenceSummary = "RF channel active (${rf.peakSnrDb} dB peak SNR)",
+                recurrenceSummary = "${agency.friendlyLabel} RF activity",
                 evidenceSources = badges,
                 updatedAtMs = rf.lastSeen,
-                lat = userLoc?.latitude,
-                lon = userLoc?.longitude
+                lat = tri.centerLat,
+                lon = tri.centerLon,
+                isApproximatedPosition = tri.isApproximatedPosition,
+                isPinpointed = tri.isPinpointed
             )
+            evaluated[uuid] = threat
+            localThreatCache[uuid] = threat
         }
 
         // 3. Remaining un-fused OUI candidates
@@ -286,145 +520,353 @@ object KokohoPostureEngine {
             val uuid = deterministicUuidV5(facetKey)
             if (uuid in evaluated) continue
 
-            val estDistM = estimateRssiDistanceMeters(oui.rssi)
+            val rawEstDistM = estimateRssiDistanceMeters(oui.rssi)
+            val tri = recordAndTriangulate(
+                uuid = uuid,
+                gpsLat = userLoc?.latitude ?: oui.lat,
+                gpsLon = userLoc?.longitude ?: oui.lon,
+                signalDb = oui.rssi,
+                estDistanceM = rawEstDistM,
+                nowMs = oui.lastSeen,
+                decayMs = decayMs
+            )
+
             val posture = when {
-                estDistM <= 60 || oui.rssi >= -65 -> PostureColor.RED
-                oui.rising -> PostureColor.ORANGE
+                tri.estimatedDistanceM <= 60 || oui.rssi >= -65 -> PostureColor.RED
+                oui.rising || tri.isClosing -> PostureColor.ORANGE
                 else -> PostureColor.YELLOW
             }
 
-            evaluated[uuid] = EvaluatedThreat(
+            val classConf = oui.sig.confidence
+            val spatConf = tri.spatialConfidence
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+
+            val threat = EvaluatedThreat(
                 uuid = uuid,
                 trackUuid = uuid,
                 agency = oui.sig.agencyEnum,
-                label = "${oui.sig.agencyEnum.shortName} · ${oui.sig.label}",
+                label = oui.sig.agencyEnum.friendlyLabel,
                 posture = posture,
-                overallConfidence = oui.sig.confidence,
-                classificationConfidence = oui.sig.confidence,
-                spatialConfidence = 70,
-                estimatedDistanceM = estDistM,
-                uncertaintyRadiusM = (estDistM * 0.4).roundToInt().coerceAtLeast(20),
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = tri.estimatedDistanceM,
+                uncertaintyRadiusM = tri.uncertaintyRadiusM,
                 bearingDeg = null,
                 closingVelocityMps = null,
-                recurrenceSummary = "Local OUI beacon (${oui.rssi} dBm)",
+                recurrenceSummary = "${oui.sig.agencyEnum.friendlyLabel} beacon",
                 evidenceSources = listOf(
                     EvidenceBadge(
                         kind = "WIFI_BLE_OUI",
                         facetKey = facetKey,
-                        detail = "${oui.sig.label} (${oui.mac}, ${oui.rssi} dBm)",
+                        detail = "${oui.sig.friendlyLabel} (${oui.rssi} dBm)",
                         weight = 0.75,
                         lastSeenMs = oui.lastSeen
                     )
                 ),
                 updatedAtMs = oui.lastSeen,
-                lat = oui.lat,
-                lon = oui.lon
+                lat = tri.centerLat,
+                lon = tri.centerLon,
+                isApproximatedPosition = tri.isApproximatedPosition,
+                isPinpointed = tri.isPinpointed
             )
+            evaluated[uuid] = threat
+            localThreatCache[uuid] = threat
         }
 
         // 4. Active P25 talkgroups matching enabled agencies
         for (tgRow in SdrRadio.p25Log.rows()) {
             val tgId = tgRow.tg ?: continue
-            if (nowMs - tgRow.lastAt > ACTIVE_WINDOW_MS) continue
+            if (nowMs - tgRow.lastAt > decayMs) continue
             val tgSig = KokohoSignatures.matchTalkgroup(tgId) ?: continue
             val agency = tgSig.agencyEnum
             if (agency !in enabled) continue
 
             val facetKey = "rf:tg:$tgId"
             val uuid = deterministicUuidV5(facetKey)
-            val inputHeardRecently = tgRow.inputAt > 0L && (nowMs - tgRow.inputAt <= ACTIVE_WINDOW_MS)
-            val estDistM = if (inputHeardRecently) {
+            val inputHeardRecently = tgRow.inputAt > 0L && (nowMs - tgRow.inputAt <= decayMs)
+            val rawEstDistM = if (inputHeardRecently) {
                 estimateRfDistanceMeters(if (tgRow.inputSnr > 0) tgRow.inputSnr else 25, "MOBILE_INPUT")
             } else {
                 3500
             }
+            val tri = recordAndTriangulate(
+                uuid = uuid,
+                gpsLat = userLoc?.latitude,
+                gpsLon = userLoc?.longitude,
+                signalDb = if (inputHeardRecently) tgRow.inputSnr else 15,
+                estDistanceM = rawEstDistM,
+                nowMs = tgRow.lastAt,
+                decayMs = decayMs
+            )
+
             val posture = when {
-                inputHeardRecently && estDistM <= 300 -> PostureColor.RED
-                inputHeardRecently -> PostureColor.ORANGE
+                inputHeardRecently && tri.estimatedDistanceM <= 300 -> PostureColor.RED
+                inputHeardRecently || tri.isClosing -> PostureColor.ORANGE
                 else -> PostureColor.YELLOW
             }
 
-            evaluated[uuid] = EvaluatedThreat(
+            val classConf = 90
+            val spatConf = if (inputHeardRecently) max(tri.spatialConfidence, 70) else 40
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+
+            val threat = EvaluatedThreat(
                 uuid = uuid,
                 trackUuid = uuid,
                 agency = agency,
-                label = "${agency.shortName} · ${tgSig.label} (TG $tgId)",
+                label = agency.friendlyLabel,
                 posture = posture,
-                overallConfidence = if (inputHeardRecently) 90 else 78,
-                classificationConfidence = 90,
-                spatialConfidence = if (inputHeardRecently) 80 else 40,
-                estimatedDistanceM = estDistM,
-                uncertaintyRadiusM = (estDistM * 0.5).roundToInt(),
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = tri.estimatedDistanceM,
+                uncertaintyRadiusM = tri.uncertaintyRadiusM,
                 bearingDeg = null,
                 closingVelocityMps = null,
-                recurrenceSummary = "${tgRow.calls} P25 call${if (tgRow.calls == 1) "" else "s"} decoded",
+                recurrenceSummary = "${tgRow.calls} P25 call${if (tgRow.calls == 1) "" else "s"}",
                 evidenceSources = listOf(
                     EvidenceBadge(
                         kind = "P25_TALKGROUP",
                         facetKey = facetKey,
-                        detail = "Talkgroup $tgId: ${tgSig.label}${if (inputHeardRecently) " (Close mobile input ${tgRow.inputSnr} dB)" else ""}",
+                        detail = "${agency.friendlyLabel} TG $tgId",
                         weight = 0.80,
                         lastSeenMs = tgRow.lastAt
                     )
                 ),
                 updatedAtMs = tgRow.lastAt,
-                lat = userLoc?.latitude,
-                lon = userLoc?.longitude
+                lat = tri.centerLat,
+                lon = tri.centerLon,
+                isApproximatedPosition = tri.isApproximatedPosition,
+                isPinpointed = tri.isPinpointed
             )
+            evaluated[uuid] = threat
+            localThreatCache[uuid] = threat
         }
 
-        val sorted = evaluated.values.sortedWith(
-            compareByDescending<EvaluatedThreat> { it.posture.ordinal }
+        // 5. Evaluate ADS-B Aircraft (on by default for DHS aircraft, with options for Police/TPD, Sheriff, SAR, Fire)
+        if (KokohoSignatures.isAdsbEnabled(context)) {
+            val enabledAirAgencies = KokohoSignatures.getEnabledAircraftAgencies(context)
+            for (seen in PoliceAircraft.all(nowMs)) {
+                val p = seen.plane
+                val hit = seen.hit
+                val agency = KokohoSignatures.classifyAircraftAgency(p.owner, p.registration, p.callsign, hit?.label)
+                    ?: continue
+                val allowed = if (agency.isDhs) enabledAirAgencies.any { it.isDhs } else agency in enabledAirAgencies
+                if (!allowed) continue
+
+                val facetKey = "adsb:icao:${p.hex.uppercase()}"
+                val uuid = deterministicUuidV5(facetKey)
+                val distM = if (userLoc != null) {
+                    haversineMeters(userLoc.latitude, userLoc.longitude, p.lat, p.lon).roundToInt()
+                } else {
+                    5000
+                }
+                val velMps = p.speedKt?.let { it * 0.514444 }
+                val headingToward = isHeadingTowardUser(
+                    userLat = userLoc?.latitude,
+                    userLon = userLoc?.longitude,
+                    objLat = p.lat,
+                    objLon = p.lon,
+                    objBearingDeg = p.trackDeg,
+                    objVelocityMps = velMps
+                )
+                val posture = when {
+                    distM <= 1500 -> PostureColor.RED
+                    headingToward || distM <= 4500 -> PostureColor.ORANGE
+                    else -> PostureColor.YELLOW
+                }
+                val classConf = hit?.confidence?.coerceIn(75, 98) ?: 90
+                val spatConf = 96
+                val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+
+                val threat = EvaluatedThreat(
+                    uuid = uuid,
+                    trackUuid = uuid,
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    posture = posture,
+                    overallConfidence = combinedConf,
+                    classificationConfidence = classConf,
+                    spatialConfidence = spatConf,
+                    estimatedDistanceM = distM,
+                    uncertaintyRadiusM = 25,
+                    bearingDeg = null,
+                    closingVelocityMps = velMps,
+                    recurrenceSummary = "ADS-B Aircraft",
+                    evidenceSources = listOf(
+                        EvidenceBadge(
+                            kind = "ADSB_AIR",
+                            facetKey = facetKey,
+                            detail = "${agency.friendlyLabel} (${p.registration ?: p.callsign ?: p.hex.uppercase()})",
+                            weight = 0.90,
+                            lastSeenMs = nowMs
+                        )
+                    ),
+                    updatedAtMs = nowMs,
+                    lat = p.lat,
+                    lon = p.lon,
+                    isApproximatedPosition = true,
+                    isPinpointed = true,
+                    isAircraft = true,
+                    aircraftTrackDeg = p.trackDeg
+                )
+                evaluated[uuid] = threat
+                localThreatCache[uuid] = threat
+            }
+        }
+
+        // 6. Include retained local detections still within the user's configured decay window
+        localThreatCache.entries.removeIf { nowMs - it.value.updatedAtMs > decayMs }
+        for ((uuid, cached) in localThreatCache) {
+            if (uuid !in evaluated && nowMs - cached.updatedAtMs <= decayMs) {
+                val allowed = if (cached.isAircraft) {
+                    val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
+                    KokohoSignatures.isAdsbEnabled(context) &&
+                        (if (cached.agency.isDhs) airEnabled.any { it.isDhs } else cached.agency in airEnabled)
+                } else {
+                    cached.agency in enabled
+                }
+                if (allowed) {
+                    evaluated[uuid] = cached
+                }
+            }
+        }
+
+        // Apply local custom classification labels and filter out locally whitelisted entities
+        val filtered = evaluated.values
+            .filter { !KokohoSignatures.isEntityWhitelisted(context, it.uuid) }
+            .map { t ->
+                val resolved = KokohoSignatures.resolveEntityLabel(context, t.uuid, t.agency.friendlyLabel)
+                val updated = if (resolved != t.label) t.copy(label = resolved) else t
+                if (localThreatCache.containsKey(t.uuid)) {
+                    localThreatCache[t.uuid] = updated
+                }
+                updated
+            }
+
+        val sorted = filtered.sortedWith(
+            compareByDescending<EvaluatedThreat> { KokohoSignatures.isEntityWatched(context, it.uuid) }
+                .thenByDescending { it.posture.ordinal }
                 .thenBy { it.estimatedDistanceM }
         )
 
         val primary = sorted.firstOrNull()
+        lastEvaluateNowMs = nowMs
         if (primary == null) {
+            lastPostureColor = PostureColor.GREEN
             return PostureSnapshot(
                 color = PostureColor.GREEN,
                 headline = "No threats detected",
-                subheadline = "Monitoring: $enabledScopeText",
-                distanceAndBearingText = if (ScanForegroundService.isRunning) {
-                    "Sensors active · Auxnet stream ${KokohoHubClient.statusLabel}"
-                } else {
-                    "Tap Start to begin passive RF + OUI monitoring"
-                },
+                subheadline = "",
+                distanceAndBearingText = "",
+                bottomConfidenceText = "",
                 primaryThreat = null,
                 activeThreats = emptyList(),
                 enabledScopeText = enabledScopeText
             )
         }
 
-        val distFormatted = formatDistance(primary.estimatedDistanceM, primary.uncertaintyRadiusM)
-        val brgFormatted = primary.bearingDeg?.let { " · Bearing $it° (${compassDir(it)})" } ?: ""
-        val velFormatted = primary.closingVelocityMps?.takeIf { it > 1.0 }
-            ?.let { " · %.1f m/s".format(Locale.US, it) } ?: ""
+        lastPostureColor = primary.posture
+        val distFormatted = formatUserDistance(context, primary.estimatedDistanceM)
+        val bottomConfidenceText =
+            "${primary.combinedConfidence}% confidence · ${primary.evidenceCount} ${if (primary.evidenceCount == 1) "signal" else "signals"}"
 
         return PostureSnapshot(
             color = primary.posture,
-            headline = primary.label,
-            subheadline = "${primary.posture.badgeLabel} · ${primary.agency.fullName}",
-            distanceAndBearingText = "Est. distance $distFormatted$brgFormatted$velFormatted",
+            headline = primary.friendlyLabel,
+            subheadline = "",
+            distanceAndBearingText = distFormatted,
+            bottomConfidenceText = bottomConfidenceText,
             primaryThreat = primary,
             activeThreats = sorted,
             enabledScopeText = enabledScopeText
         )
     }
 
-    private fun estimateRfDistanceMeters(snrDb: Int, role: String): Int {
-        val base = when (role) {
-            "MOBILE_INPUT", "DIRECT_TACTICAL" -> (1600.0 * 10.0.pow(-snrDb / 28.0)).roundToInt().coerceIn(35, 2500)
-            "AIR_ASSET" -> (8000.0 * 10.0.pow(-snrDb / 35.0)).roundToInt().coerceIn(400, 12000)
-            else -> (4500.0 * 10.0.pow(-snrDb / 32.0)).roundToInt().coerceIn(250, 8000)
+    private fun effectiveNowMs(explicitNowMs: Long?): Long {
+        if (explicitNowMs != null) return explicitNowMs
+        val sys = System.currentTimeMillis()
+        return if (lastEvaluateNowMs > 0L && kotlin.math.abs(sys - lastEvaluateNowMs) > 60_000L) {
+            lastEvaluateNowMs
+        } else {
+            sys
         }
-        return base
+    }
+
+    /** Returns the active posture background color ARGB so all activities maintain a stable status background color. */
+    fun currentPostureColorArgb(context: Context, nowMs: Long? = null): Int {
+        return evaluate(context, effectiveNowMs(nowMs)).color.colorArgb
+    }
+
+    /** Finds an active or recently cached [EvaluatedThreat] by its UUID (accepts `"kokoho:<uuid>"` or `<uuid>`). */
+    fun findThreatByUuid(context: Context, rawId: String, nowMs: Long? = null): EvaluatedThreat? {
+        val id = KokohoSignatures.normalizeEntityId(rawId)
+        val snap = evaluate(context, effectiveNowMs(nowMs))
+        val active = snap.activeThreats.firstOrNull { it.uuid.equals(id, ignoreCase = true) }
+        if (active != null) return active
+        val cached = localThreatCache[id]
+        if (cached != null) {
+            val resolved = KokohoSignatures.resolveEntityLabel(context, cached.uuid, cached.agency.friendlyLabel)
+            return if (resolved != cached.label) cached.copy(label = resolved) else cached
+        }
+        return null
+    }
+
+    /**
+     * Formats distance cleanly without bearing or internal math:
+     *  - Imperial (default): "Distance: ~1.2 mi" or "Distance: ~650 ft"
+     *  - Metric: "Distance: ~16.8 km" or "Distance: ~250 m"
+     */
+    fun formatUserDistance(context: Context, distM: Int): String {
+        val imperial = KokohoSignatures.isImperialUnits(context)
+        return formatDistanceValue(distM, imperial, withPrefix = true)
+    }
+
+    fun formatShortDistance(context: Context, distM: Int): String {
+        val imperial = KokohoSignatures.isImperialUnits(context)
+        return formatDistanceValue(distM, imperial, withPrefix = false, symbol = "~")
+    }
+
+    /** Formats accuracy radius using the ± symbol (e.g. "±0.6 mi" or "±500 ft"). */
+    fun formatAccuracyRadius(context: Context, radiusM: Int): String {
+        val imperial = KokohoSignatures.isImperialUnits(context)
+        return formatDistanceValue(radiusM, imperial, withPrefix = false, symbol = "±")
+    }
+
+    fun formatDistanceValue(distM: Int, imperial: Boolean, withPrefix: Boolean, symbol: String = "~"): String {
+        val prefix = if (withPrefix) "Distance: " else ""
+        return if (imperial) {
+            val miles = distM / 1609.344
+            if (miles >= 0.25) {
+                "${prefix}${symbol}${"%.1f".format(Locale.US, miles)} mi"
+            } else {
+                val feet = ((distM * 3.28084 / 50.0).roundToInt() * 50).coerceAtLeast(50)
+                "${prefix}${symbol}$feet ft"
+            }
+        } else {
+            if (distM >= 1000) {
+                "${prefix}${symbol}${"%.1f".format(Locale.US, distM / 1000.0)} km"
+            } else {
+                val meters = ((distM / 10.0).roundToInt() * 10).coerceAtLeast(10)
+                "${prefix}${symbol}$meters m"
+            }
+        }
+    }
+
+    private fun estimateRfDistanceMeters(snrDb: Int, role: String): Int {
+        val baseM = when (role.uppercase()) {
+            "REPEATER" -> 12000.0 * 10.0.pow(-(snrDb - 10) / 28.0)
+            "AIR_ASSET" -> 18000.0 * 10.0.pow(-(snrDb - 10) / 30.0)
+            else -> 1800.0 * 10.0.pow(-(snrDb - 10) / 22.0)
+        }
+        return baseM.roundToInt().coerceIn(35, 35_000)
     }
 
     private fun estimateRssiDistanceMeters(rssiDbm: Int): Int {
-        val txPower = -55.0
-        val n = 2.4
-        val d = 10.0.pow((txPower - rssiDbm) / (10.0 * n))
-        return d.roundToInt().coerceIn(5, 600)
+        val txPowerAt1m = -42.0
+        val pathLossExp = 2.7
+        val d = 10.0.pow((txPowerAt1m - rssiDbm) / (10.0 * pathLossExp))
+        return d.roundToInt().coerceIn(10, 800)
     }
 
     private fun isHeadingTowardUser(
@@ -435,32 +877,22 @@ object KokohoPostureEngine {
         objBearingDeg: Double?,
         objVelocityMps: Double?
     ): Boolean {
-        if (userLat == null || userLon == null || objBearingDeg == null || objVelocityMps == null) return false
-        if (objVelocityMps < 1.8) return false
-        val bearingToUser = bearingDeg(objLat, objLon, userLat, userLon)
-        val diff = abs(((objBearingDeg - bearingToUser + 540.0) % 360.0) - 180.0)
-        return diff <= 55.0
-    }
-
-    private fun formatDistance(distM: Int, uncertaintyM: Int): String =
-        if (distM >= 1000) {
-            "~%.1f km (±%dm)".format(Locale.US, distM / 1000.0, uncertaintyM)
-        } else {
-            "~%d m (±%dm)".format(Locale.US, distM, uncertaintyM)
+        if ((objVelocityMps ?: 0.0) < 1.2) return false
+        if (userLat == null || userLon == null || objBearingDeg == null) {
+            return (objVelocityMps ?: 0.0) >= 2.0
         }
-
-    private fun compassDir(deg: Int): String {
-        val dirs = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
-        return dirs[((deg + 22) % 360) / 45]
+        val bearingObjToUser = bearingDeg(objLat, objLon, userLat, userLon)
+        val diff = angularDiffDeg(objBearingDeg, bearingObjToUser)
+        return diff <= 45.0
     }
 
     fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val r = 6_371_008.8
+        val r = 6_371_000.0
         val dLat = Math.toRadians(lat2 - lat1)
         val dLon = Math.toRadians(lon2 - lon1)
         val a = sin(dLat / 2).pow(2.0) +
             cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2.0)
-        return r * 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
+        return 2.0 * r * atan2(sqrt(a), sqrt(1.0 - a))
     }
 
     fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -470,5 +902,10 @@ object KokohoPostureEngine {
         val y = sin(dLon) * cos(phi2)
         val x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLon)
         return (Math.toDegrees(atan2(y, x)) + 360.0) % 360.0
+    }
+
+    private fun angularDiffDeg(a: Double, b: Double): Double {
+        val d = abs(a - b) % 360.0
+        return if (d > 180.0) 360.0 - d else d
     }
 }

@@ -19,7 +19,8 @@ internal data class MapPin(
     val color: Int, val details: String,
     /** Pinpointed (see [com.rfsentinel.app.detect.Locator]): the circle it is very likely in. */
     val radiusM: Double? = null,
-    val whereNote: String = "Position = where your phone was when this device's signal was strongest (approximate)."
+    val whereNote: String = "Position = where your phone was when this device's signal was strongest (approximate).",
+    val showDot: Boolean = true
 )
 
 internal object MapPins {

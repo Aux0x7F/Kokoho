@@ -2,51 +2,47 @@ package com.rfsentinel.app.kokoho
 
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.text.InputType
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.button.MaterialButtonToggleGroup
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.rfsentinel.app.R
 import com.rfsentinel.app.databinding.ActivityMainBinding
 import com.rfsentinel.app.sdr.RadioLog
 import com.rfsentinel.app.sdr.SdrRadio
 import com.rfsentinel.app.service.ScanForegroundService
+import com.rfsentinel.app.settings.SettingsActivity
 import com.rfsentinel.app.ui.AntennaCheckActivity
-import com.rfsentinel.app.ui.CellTowersActivity
 import com.rfsentinel.app.ui.DetectionLogActivity
-import com.rfsentinel.app.ui.GnssActivity
+import com.rfsentinel.app.ui.DeviceDetailActivity
 import com.rfsentinel.app.ui.P25Activity
 import com.rfsentinel.app.ui.WaterfallActivity
-import com.rfsentinel.app.ui.WifiAnalyzerActivity
+import com.rfsentinel.app.util.UpdateChecker
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Manages Kokoho's 5 top-level activity categories:
- *  1. [Tab.MONITOR] (Default): Full-screen Green/Yellow/Orange/Red posture card ("No threats detected"
- *     when clear; agency classification, estimated distance/bearing, and hover/tap evidence sources when active),
- *     plus the Master DHS radio toggle (CBP, ICE, HSI, AMO, FPS) and optional Police, Sheriff, Fire, SAR toggles.
- *  2. [Tab.MAP]: Full-screen FOSS Map view.
- *  3. [Tab.LIST]: Integrated filterable raw list (including P25 talkgroups, RF channels, and OUI devices).
- *  4. [Tab.UTILITY]: Channel graph / waterfall, P25 talkgroup monitor, WiFi spectrum, Antenna check,
- *     Auxnet Room Link, and RadioReference / SDRTrunk channel importer.
- *  5. [Tab.LOGS]: Dedicated chronological detection & radio log view (relocated out of the map).
+ * Manages Kokoho's 3 top-level activity categories and full-bleed posture UI:
+ *  1. [Tab.MONITOR] (Default): Full-screen background color screen (Green / Yellow / Orange / Red)
+ *     displaying the status pill ("PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY", hidden when clear),
+ *     the concise friendly label ("No threats detected" or "CBP", "ICE", "DHS Air", "Federal Interop", etc.),
+ *     the estimated distance ("Distance: ~1.2 mi", default imperial, no bearing), and the combined
+ *     confidence + evidence count pinned at the bottom of the screen (clicking opens Entity Details).
+ *  2. [Tab.MAP]: Full-screen FOSS Map view showing radius circles for flagged signals (stable status background color).
+ *  3. [Tab.UTILITY]: P25 trunking monitor, radio waterfall, antenna check, Logs, Update App (when available), and Settings (last item).
  */
 class KokohoViews(
     private val activity: AppCompatActivity,
@@ -58,9 +54,7 @@ class KokohoViews(
     enum class Tab(val title: String) {
         MONITOR("Monitor"),
         MAP("Map"),
-        LIST("Raw List"),
-        UTILITY("Utility"),
-        LOGS("Logs")
+        UTILITY("Utility")
     }
 
     var currentTab: Tab = Tab.MONITOR
@@ -69,244 +63,235 @@ class KokohoViews(
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * density).toInt()
 
-    private val navBar: MaterialButtonToggleGroup
-    private val monitorContainer: ScrollView
-    private val postureCard: LinearLayout
+    private val topHeaderBar: LinearLayout
+    private val headerLogo: ImageView
+    private val headerTitle: TextView
+    private val headerSubtitle: TextView
+    val scanToggleButton: MaterialButton
+
+    private val tabRow: LinearLayout
+    private val tabButtons = LinkedHashMap<Tab, TextView>()
+
+    private val monitorContainer: LinearLayout
     private val postureBadge: TextView
     private val postureHeadline: TextView
-    private val postureSubheadline: TextView
     private val postureDistance: TextView
-    private val confidencePill: TextView
-    private val evidenceBox: LinearLayout
-    private val masterDhsButton: MaterialButton
-    private val agencyChipViews = LinkedHashMap<KokohoAgency, TextView>()
+    private val bottomConfidenceBar: TextView
+
     private val utilityContainer: ScrollView
     private val logsContainer: ScrollView
     private val logsText: TextView
 
     private var latestSnapshot: PostureSnapshot? = null
+    private var runningState: Boolean = ScanForegroundService.isRunning
 
     init {
         KokohoSignatures.ensureLoaded(activity)
         syncSdrTargets()
 
-        // 1. Build 5-category navigation bar at the top of contentArea's parent
-        navBar = MaterialButtonToggleGroup(activity).apply {
-            isSingleSelection = true
-            isSelectionRequired = true
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(4)
-                bottomMargin = dp(4)
-            }
-        }
-
-        val tabIds = LinkedHashMap<Tab, Int>()
-        for (tab in Tab.entries) {
-            val btnId = View.generateViewId()
-            tabIds[tab] = btnId
-            val btn = MaterialButton(activity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                id = btnId
-                text = tab.title
-                textSize = 12f
-                minHeight = dp(38)
-                minimumHeight = dp(38)
-                insetTop = 0
-                insetBottom = 0
-                setPadding(dp(6), 0, dp(6), 0)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            navBar.addView(btn)
-        }
-
-        // Hide legacy 3-icon pane toggle and tools button (relocated to the 5-tab bar and Utility view)
+        // Hide legacy RFSentinel top controls and filter chips so Kokoho has a clean, unified layout
+        binding.themedHeader.visibility = View.GONE
+        binding.threatBanner.visibility = View.GONE
+        binding.bannerClose.visibility = View.GONE
+        binding.statusText.visibility = View.GONE
+        (binding.startStopButton.parent as? View)?.visibility = View.GONE
         binding.viewToggle.visibility = View.GONE
         binding.toolsButton.visibility = View.GONE
+        (binding.filterChips.parent as? View)?.visibility = View.GONE
 
+        // Remove tight side paddings on root so full-screen background color is edge-to-edge
         val rootLinear = binding.root as LinearLayout
-        val statusIdx = rootLinear.indexOfChild(binding.statusText)
-        rootLinear.addView(navBar, (statusIdx + 2).coerceAtMost(rootLinear.childCount))
+        rootLinear.setPadding(0, 0, 0, 0)
 
-        // 2. Build Default MONITOR View (Full-screen background color posture + DHS/Agency controls)
+        // 1. Unified Top Header Bar (Theme-aware Kokoho icon + Title/Status + Scan/Stop Toggle Button)
+        headerLogo = ImageView(activity).apply {
+            setImageResource(R.drawable.ic_kokoho_logo)
+            contentDescription = "Kokoho"
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
+                marginEnd = dp(10)
+            }
+        }
+
+        headerTitle = TextView(activity).apply {
+            text = "KOKOHO"
+            textSize = 16f
+            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
+            letterSpacing = 0.06f
+            setSingleLine(true)
+        }
+
+        headerSubtitle = TextView(activity).apply {
+            text = "Standby · Tap Scan to monitor"
+            textSize = 11.5f
+            setSingleLine(true)
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+        val titleCol = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            addView(headerTitle)
+            addView(headerSubtitle)
+        }
+
+        scanToggleButton = MaterialButton(activity).apply {
+            minHeight = dp(38)
+            minimumHeight = dp(38)
+            insetTop = 0
+            insetBottom = 0
+            cornerRadius = dp(999)
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(14), 0, dp(16), 0)
+            iconSize = dp(16)
+            iconPadding = dp(6)
+            iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            setOnClickListener {
+                binding.startStopButton.performClick()
+            }
+        }
+
+        topHeaderBar = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(10), dp(16), dp(8))
+            addView(headerLogo)
+            addView(titleCol)
+            addView(scanToggleButton)
+        }
+
+        // 2. Clean 5-Category Segmented Tab Bar (Monitor | Map | List | Utility | Logs)
+        tabRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(2), dp(12), dp(8))
+        }
+
+        for (tab in Tab.entries) {
+            val tv = TextView(activity).apply {
+                text = tab.title
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setSingleLine(true)
+                setPadding(dp(6), dp(8), dp(6), dp(8))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(2)
+                    marginEnd = dp(2)
+                }
+                setOnClickListener { selectTab(tab) }
+            }
+            tabButtons[tab] = tv
+            tabRow.addView(tv)
+        }
+
+        rootLinear.addView(topHeaderBar, 0)
+        rootLinear.addView(tabRow, 1)
+
+        // 3. Build Full-Screen MONITOR View:
+        //    - No repeated logo in the body
+        //    - Status pill ("CLEAR", "PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY")
+        //    - Friendly title ("No threats detected" or "CBP", "ICE", "Federal Interop", etc.)
+        //    - Distance line ("Distance: ~1.2 mi", hidden when CLEAR)
+        //    - Bottom combined confidence & evidence count ("82% confidence · 2 signals", hidden when CLEAR)
         postureBadge = TextView(activity).apply {
-            textSize = 13f
+            text = PostureColor.GREEN.badgeLabel
+            textSize = 12.5f
+            letterSpacing = 0.08f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(4), dp(12), dp(4))
+            setPadding(dp(16), dp(6), dp(16), dp(6))
             background = GradientDrawable().apply {
                 cornerRadius = dp(999).toFloat()
-                setColor(0x33000000)
+                setColor(0x38000000)
+                setStroke(dp(1), 0x44FFFFFF)
             }
         }
 
         postureHeadline = TextView(activity).apply {
             text = "No threats detected"
-            textSize = 28f
-            typeface = Typeface.DEFAULT_BOLD
+            textSize = 38f
+            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(14), dp(8), dp(6))
-        }
-
-        postureSubheadline = TextView(activity).apply {
-            text = "Monitoring: DHS (All: CBP, ICE, HSI, AMO, FPS)"
-            textSize = 15f
-            setTextColor(0xFFE0E6ED.toInt())
-            gravity = Gravity.CENTER
+            setPadding(dp(20), dp(16), dp(20), dp(8))
         }
 
         postureDistance = TextView(activity).apply {
-            textSize = 16f
+            textSize = 19f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
+            setTextColor(0xF2FFFFFF.toInt())
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-
-        confidencePill = TextView(activity).apply {
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(dp(14), dp(8), dp(14), dp(8))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(0x44000000)
-                setStroke(dp(1), 0x66FFFFFF)
-            }
-            visibility = View.GONE
-            setOnClickListener { showEvidenceDialog() }
-            setOnHoverListener { _, _ ->
-                evidenceBox.visibility = View.VISIBLE
-                false
-            }
-        }
-
-        evidenceBox = LinearLayout(activity).apply {
-            orientation = Vertical
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(10).toFloat()
-                setColor(0x55000000)
-            }
+            setPadding(dp(20), dp(4), dp(20), dp(4))
             visibility = View.GONE
         }
 
-        postureCard = LinearLayout(activity).apply {
+        val heroZone = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            minimumHeight = dp(290)
-            setPadding(dp(20), dp(28), dp(20), dp(28))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(18).toFloat()
-                setColor(PostureColor.GREEN.colorArgb)
-            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            setPadding(dp(20), dp(16), dp(20), dp(16))
             addView(postureBadge, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             addView(postureHeadline)
-            addView(postureSubheadline)
             addView(postureDistance)
-            addView(confidencePill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(8)
-            })
-            addView(evidenceBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(10)
-            })
         }
 
-        // Agency Filter Panel (Master DHS + sub-items CBP, ICE, HSI, AMO, FPS + optional Police, Sheriff, Fire, SAR)
-        val agencyPanel = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(14).toFloat()
-                setColor(0x22FFFFFF)
-                setStroke(dp(1), 0x33FFFFFF)
-            }
-        }
-
-        val dhsHeaderRow = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val dhsTitle = TextView(activity).apply {
-            text = "Master Radio Filter: DHS"
+        bottomConfidenceBar = TextView(activity).apply {
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        masterDhsButton = MaterialButton(activity).apply {
-            text = "DHS Master: ON"
-            textSize = 12f
-            minHeight = dp(36)
-            minimumHeight = dp(36)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(0x3D000000)
+                setStroke(dp(1), 0x55FFFFFF)
+            }
+            visibility = View.GONE
             setOnClickListener {
-                val next = !KokohoSignatures.isMasterDhsEnabled(activity)
-                KokohoSignatures.setMasterDhs(activity, next)
-                syncSdrTargets()
-                refreshAgencyChips()
-                onFilterChanged()
+                val primary = latestSnapshot?.primaryThreat ?: return@setOnClickListener
+                activity.startActivity(
+                    Intent(activity, DeviceDetailActivity::class.java)
+                        .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${primary.uuid}")
+                )
             }
         }
 
-        dhsHeaderRow.addView(dhsTitle)
-        dhsHeaderRow.addView(masterDhsButton)
-        agencyPanel.addView(dhsHeaderRow)
+        val bottomFooterWrapper = FrameLayout(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(dp(16), dp(8), dp(16), dp(24))
+            addView(
+                bottomConfidenceBar,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER
+                )
+            )
+        }
 
-        val dhsChipsScroll = HorizontalScrollView(activity).apply {
-            isHorizontalScrollBarEnabled = false
-            setPadding(0, dp(6), 0, dp(8))
-        }
-        val dhsChipsRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-        for (ag in KokohoAgency.DHS_AGENCIES) {
-            val chip = createAgencyChip(ag)
-            agencyChipViews[ag] = chip
-            dhsChipsRow.addView(chip)
-        }
-        dhsChipsScroll.addView(dhsChipsRow)
-        agencyPanel.addView(dhsChipsScroll)
-
-        val optTitle = TextView(activity).apply {
-            text = "Additional Agencies (Default Ignored / Off):"
-            textSize = 12f
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        agencyPanel.addView(optTitle)
-
-        val optChipsScroll = HorizontalScrollView(activity).apply {
-            isHorizontalScrollBarEnabled = false
-        }
-        val optChipsRow = LinearLayout(activity).apply { orientation = LinearLayout.HORIZONTAL }
-        for (ag in KokohoAgency.OPTIONAL_AGENCIES) {
-            val chip = createAgencyChip(ag)
-            agencyChipViews[ag] = chip
-            optChipsRow.addView(chip)
-        }
-        optChipsScroll.addView(optChipsRow)
-        agencyPanel.addView(optChipsScroll)
-
-        val monitorInner = LinearLayout(activity).apply {
+        monitorContainer = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, dp(16))
-            addView(postureCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                bottomMargin = dp(12)
-            })
-            addView(agencyPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            addView(heroZone)
+            addView(bottomFooterWrapper)
         }
 
-        monitorContainer = ScrollView(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            addView(monitorInner)
-        }
-
-        // 3. Build UTILITY View
+        // 4. Build UTILITY View (with Settings as the last item)
         utilityContainer = buildUtilityView()
 
-        // 4. Build LOGS View
+        // 5. Build LOGS View
         val logsPair = buildLogsView()
         logsContainer = logsPair.first
         logsText = logsPair.second
@@ -315,57 +300,45 @@ class KokohoViews(
         binding.contentArea.addView(utilityContainer)
         binding.contentArea.addView(logsContainer)
 
-        refreshAgencyChips()
-
-        navBar.check(tabIds[Tab.MONITOR]!!)
-        navBar.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
-            val chosen = tabIds.entries.firstOrNull { it.value == checkedId }?.key ?: Tab.MONITOR
-            selectTab(chosen)
-        }
-
+        syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
     }
 
-    private fun createAgencyChip(agency: KokohoAgency): TextView {
-        return TextView(activity).apply {
-            text = agency.shortName
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(12), dp(6), dp(12), dp(6))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = dp(8)
-            }
-            setOnClickListener {
-                KokohoSignatures.toggleAgency(activity, agency)
-                syncSdrTargets()
-                refreshAgencyChips()
-                onFilterChanged()
-            }
-        }
-    }
+    fun syncRunningState(running: Boolean) {
+        runningState = running
+        // Hide legacy RFSentinel status bars & filter chips that MainActivity might re-show
+        binding.threatBanner.visibility = View.GONE
+        binding.bannerClose.visibility = View.GONE
+        binding.statusText.visibility = View.GONE
+        (binding.startStopButton.parent as? View)?.visibility = View.GONE
+        (binding.filterChips.parent as? View)?.visibility = View.GONE
 
-    private fun refreshAgencyChips() {
-        val enabled = KokohoSignatures.getEnabledAgencies(activity)
-        val masterOn = enabled.any { it.isDhs }
-        masterDhsButton.text = if (masterOn) "DHS Master: ON" else "DHS Master: OFF"
-        masterDhsButton.backgroundTintList = ColorStateList.valueOf(
-            if (masterOn) 0xFF2E7D32.toInt() else 0xFF455A64.toInt()
-        )
-        masterDhsButton.setTextColor(Color.WHITE)
-
-        for ((ag, view) in agencyChipViews) {
-            val isOn = ag in enabled
-            view.background = GradientDrawable().apply {
-                cornerRadius = dp(999).toFloat()
-                setColor(if (isOn) 0xFF2E7D32.toInt() else 0x33455A64)
-                setStroke(dp(1), if (isOn) 0xFF81C784.toInt() else 0x55FFFFFF)
-            }
-            view.setTextColor(if (isOn) Color.WHITE else 0xFFB0BEC5.toInt())
+        val auxStatus = if (KokohoSignatures.isAuxnetEnabled(activity)) {
+            "Auxnet ${KokohoHubClient.statusLabel}"
+        } else {
+            "Offline mode"
         }
+
+        if (running) {
+            scanToggleButton.text = "Stop"
+            scanToggleButton.setIconResource(R.drawable.ic_car_stop)
+            scanToggleButton.backgroundTintList = ColorStateList.valueOf(0xFFC62828.toInt())
+            scanToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
+            scanToggleButton.strokeWidth = dp(1)
+            scanToggleButton.setTextColor(Color.WHITE)
+            scanToggleButton.iconTint = ColorStateList.valueOf(Color.WHITE)
+            headerSubtitle.text = "Scanning · $auxStatus"
+        } else {
+            scanToggleButton.text = "Scan"
+            scanToggleButton.setIconResource(R.drawable.ic_car_play)
+            scanToggleButton.backgroundTintList = ColorStateList.valueOf(0xFF2E7D32.toInt())
+            scanToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
+            scanToggleButton.strokeWidth = dp(1)
+            scanToggleButton.setTextColor(Color.WHITE)
+            scanToggleButton.iconTint = ColorStateList.valueOf(Color.WHITE)
+            headerSubtitle.text = "Standby · Tap Scan to monitor"
+        }
+        updatePosture()
     }
 
     fun syncSdrTargets() {
@@ -375,9 +348,11 @@ class KokohoViews(
 
     fun selectTab(tab: Tab) {
         currentTab = tab
+        // Never show legacy filter chips in any tab
+        (binding.filterChips.parent as? View)?.visibility = View.GONE
+
         when (tab) {
             Tab.MONITOR -> {
-                binding.filterChips.parent.let { (it as? View)?.visibility = View.GONE }
                 onSwitchPanes(emptySet())
                 binding.mapPane.visibility = View.GONE
                 binding.radarPane.visibility = View.GONE
@@ -387,21 +362,12 @@ class KokohoViews(
                 logsContainer.visibility = View.GONE
             }
             Tab.MAP -> {
-                binding.filterChips.parent.let { (it as? View)?.visibility = View.VISIBLE }
                 monitorContainer.visibility = View.GONE
                 utilityContainer.visibility = View.GONE
                 logsContainer.visibility = View.GONE
                 onSwitchPanes(setOf("map"))
             }
-            Tab.LIST -> {
-                binding.filterChips.parent.let { (it as? View)?.visibility = View.VISIBLE }
-                monitorContainer.visibility = View.GONE
-                utilityContainer.visibility = View.GONE
-                logsContainer.visibility = View.GONE
-                onSwitchPanes(setOf("list"))
-            }
             Tab.UTILITY -> {
-                binding.filterChips.parent.let { (it as? View)?.visibility = View.GONE }
                 onSwitchPanes(emptySet())
                 binding.mapPane.visibility = View.GONE
                 binding.radarPane.visibility = View.GONE
@@ -410,83 +376,71 @@ class KokohoViews(
                 utilityContainer.visibility = View.VISIBLE
                 logsContainer.visibility = View.GONE
             }
-            Tab.LOGS -> {
-                binding.filterChips.parent.let { (it as? View)?.visibility = View.GONE }
-                onSwitchPanes(emptySet())
-                binding.mapPane.visibility = View.GONE
-                binding.radarPane.visibility = View.GONE
-                binding.listFrame.visibility = View.GONE
-                monitorContainer.visibility = View.GONE
-                utilityContainer.visibility = View.GONE
-                logsContainer.visibility = View.VISIBLE
-                refreshLogsText()
+        }
+        applySurfaceThemeColors()
+    }
+
+    private fun applySurfaceThemeColors() {
+        val snapColor = (latestSnapshot?.color ?: PostureColor.GREEN).colorArgb
+
+        // Stable status color background across Monitor, Map, List, and Utility
+        binding.root.setBackgroundColor(snapColor)
+        monitorContainer.setBackgroundColor(snapColor)
+        utilityContainer.setBackgroundColor(snapColor)
+        logsContainer.setBackgroundColor(snapColor)
+        binding.listFrame.setBackgroundColor(snapColor)
+        headerLogo.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        headerTitle.setTextColor(Color.WHITE)
+        headerSubtitle.setTextColor(0xDDFFFFFF.toInt())
+
+        for ((t, btn) in tabButtons) {
+            val selected = t == currentTab
+            btn.background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                if (selected) {
+                    setColor(Color.WHITE)
+                } else {
+                    setColor(0x33000000)
+                    setStroke(dp(1), 0x44FFFFFF)
+                }
             }
+            btn.setTextColor(if (selected) snapColor else Color.WHITE)
         }
     }
 
     fun updatePosture(nowMs: Long = System.currentTimeMillis()) {
-        if (ScanForegroundService.isRunning) {
+        if (ScanForegroundService.isRunning && KokohoSignatures.isAuxnetEnabled(activity)) {
             KokohoHubClient.start(activity)
         }
         val snap = KokohoPostureEngine.evaluate(activity, nowMs)
         latestSnapshot = snap
 
-        (postureCard.background as? GradientDrawable)?.setColor(snap.color.colorArgb)
-        postureBadge.text = snap.color.badgeLabel
         postureHeadline.text = snap.headline
-        postureSubheadline.text = snap.subheadline
-        postureDistance.text = snap.distanceAndBearingText
 
         val primary = snap.primaryThreat
         if (primary != null) {
-            confidencePill.visibility = View.VISIBLE
-            confidencePill.text =
-                "Confidence ${primary.overallConfidence}% (Class ${primary.classificationConfidence}% / Spatial ${primary.spatialConfidence}%) · Tap for Evidence (${primary.evidenceSources.size})"
-            evidenceBox.removeAllViews()
-            evidenceBox.visibility = View.VISIBLE
-            for (ev in primary.evidenceSources) {
-                val tv = TextView(activity).apply {
-                    text = "• [${ev.kind}] ${ev.detail}"
-                    textSize = 12.5f
-                    setTextColor(Color.WHITE)
-                    setPadding(0, dp(2), 0, dp(2))
-                }
-                evidenceBox.addView(tv)
-            }
+            postureBadge.text = snap.color.badgeLabel
+            postureBadge.visibility = View.VISIBLE
+            postureDistance.text = snap.distanceAndBearingText
+            postureDistance.visibility = View.VISIBLE
+            bottomConfidenceBar.text = snap.bottomConfidenceText
+            bottomConfidenceBar.visibility = View.VISIBLE
         } else {
-            confidencePill.visibility = View.GONE
-            evidenceBox.visibility = View.GONE
+            postureBadge.text = ""
+            postureBadge.visibility = View.GONE
+            postureDistance.text = ""
+            postureDistance.visibility = View.GONE
+            bottomConfidenceBar.text = ""
+            bottomConfidenceBar.visibility = View.GONE
         }
 
-        if (currentTab == Tab.LOGS) {
-            refreshLogsText()
-        }
-    }
-
-    private fun showEvidenceDialog() {
-        val primary = latestSnapshot?.primaryThreat ?: return
-        val lines = primary.evidenceSources.joinToString("\n\n") { ev ->
-            "${ev.kind} (${(ev.weight * 100).toInt()}% weight)\nFacet: ${ev.facetKey}\n${ev.detail}"
-        }
-        MaterialAlertDialogBuilder(activity)
-            .setTitle("${primary.label} — Evidence Sources")
-            .setMessage(
-                "Entity UUID: ${primary.uuid}\n" +
-                    "Track UUID: ${primary.trackUuid}\n" +
-                    "Overall Confidence: ${primary.overallConfidence}%\n" +
-                    "Classification Confidence: ${primary.classificationConfidence}%\n" +
-                    "Spatial Confidence: ${primary.spatialConfidence}%\n" +
-                    "Recurrence: ${primary.recurrenceSummary}\n\n" +
-                    lines
-            )
-            .setPositiveButton("Close", null)
-            .show()
+        applySurfaceThemeColors()
     }
 
     private fun buildUtilityView(): ScrollView {
         val list = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, dp(20))
+            setPadding(dp(14), dp(8), dp(14), dp(20))
         }
 
         fun addCard(title: String, subtitle: String, onClick: () -> Unit) {
@@ -495,8 +449,8 @@ class KokohoViews(
                 setPadding(dp(16), dp(14), dp(16), dp(14))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(12).toFloat()
-                    setColor(0x22FFFFFF)
-                    setStroke(dp(1), 0x33FFFFFF)
+                    setColor(0x38000000)
+                    setStroke(dp(1), 0x55FFFFFF)
                 }
                 val outValue = TypedValue()
                 activity.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
@@ -504,12 +458,14 @@ class KokohoViews(
             }
             val t = TextView(activity).apply {
                 text = title
-                textSize = 16f
+                textSize = 15.5f
                 typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
             }
             val s = TextView(activity).apply {
                 text = subtitle
                 textSize = 13f
+                setTextColor(0xDDFFFFFF.toInt())
                 setPadding(0, dp(4), 0, 0)
             }
             card.addView(t)
@@ -518,16 +474,6 @@ class KokohoViews(
                 bottomMargin = dp(10)
             })
         }
-
-        addCard(
-            "Auxnet Hub & Detection Room Link",
-            "Configure kokoho.tucsoncommunity.online stream, 5-min background check-in, and trusted Sensor Room triangulation"
-        ) { showAuxnetConfigDialog() }
-
-        addCard(
-            "Import Channel List (RadioReference / SDRTrunk)",
-            "Import RadioReference TSV/CSV frequency tables or SDRTrunk XML playlists into Kokoho"
-        ) { showChannelImportDialog() }
 
         addCard(
             "P25 Trunking & Talkgroup Monitor",
@@ -540,27 +486,66 @@ class KokohoViews(
         ) { activity.startActivity(Intent(activity, WaterfallActivity::class.java)) }
 
         addCard(
-            "WiFi Channel Graph & Spectrum",
-            "2.4 / 5 / 6 GHz channel occupancy and signal graph"
-        ) { activity.startActivity(Intent(activity, WifiAnalyzerActivity::class.java)) }
-
-        addCard(
             "Antenna & NOAA Weather Check",
             "Verify RTL-SDR receive sensitivity against 162.400–162.550 MHz NOAA weather stations"
         ) { activity.startActivity(Intent(activity, AntennaCheckActivity::class.java)) }
 
         addCard(
-            "Cell Towers & GNSS Diagnostics",
-            "Inspect nearby cellular base stations and satellite navigation integrity"
-        ) {
-            MaterialAlertDialogBuilder(activity)
-                .setTitle("Diagnostics")
-                .setItems(arrayOf("Cell Towers", "GNSS Satellites")) { _, which ->
-                    if (which == 0) activity.startActivity(Intent(activity, CellTowersActivity::class.java))
-                    else activity.startActivity(Intent(activity, GnssActivity::class.java))
-                }
-                .show()
+            "Logs",
+            "Chronological detection & telemetry log with archive export"
+        ) { activity.startActivity(Intent(activity, DetectionLogActivity::class.java)) }
+
+        // Dynamic "Update App" item — visible in Utility whenever an update is available
+        val updateCardTitle = TextView(activity).apply {
+            text = "Update App"
+            textSize = 15.5f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
         }
+        val updateCardSubtitle = TextView(activity).apply {
+            text = "Download and install the latest Kokoho release"
+            textSize = 13f
+            setTextColor(0xDDFFFFFF.toInt())
+            setPadding(0, dp(4), 0, 0)
+        }
+        val updateCard = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0x44000000)
+                setStroke(dp(1), Color.WHITE)
+            }
+            addView(updateCardTitle)
+            addView(updateCardSubtitle)
+            visibility = View.GONE
+            setOnClickListener {
+                val rel = UpdateChecker.availableUpdate
+                if (rel != null) {
+                    UpdateChecker.installNow(activity, rel)
+                } else {
+                    UpdateChecker.check(activity, silent = false)
+                }
+            }
+        }
+        list.addView(updateCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(10)
+        })
+
+        UpdateChecker.addListener { rel ->
+            if (rel != null) {
+                updateCardTitle.text = "Update App (v${rel.version})"
+                updateCardSubtitle.text = "Kokoho ${rel.version} is available — tap to install"
+                updateCard.visibility = View.VISIBLE
+            } else {
+                updateCard.visibility = View.GONE
+            }
+        }
+
+        addCard(
+            "Settings",
+            "Agencies (DHS, ICE, CBP, Police, Sheriff, SAR, Fire), ADS-B aircraft, decay time, privacy, channel import, and units"
+        ) { activity.startActivity(Intent(activity, SettingsActivity::class.java)) }
 
         return ScrollView(activity).apply {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -572,7 +557,7 @@ class KokohoViews(
     private fun buildLogsView(): Pair<ScrollView, TextView> {
         val wrapper = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, dp(16))
+            setPadding(dp(14), dp(8), dp(14), dp(16))
         }
 
         val headerRow = LinearLayout(activity).apply {
@@ -588,7 +573,7 @@ class KokohoViews(
         }
 
         val fullLogBtn = MaterialButton(activity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = "Full Archive / Export"
+            text = "Archive / Export"
             textSize = 12f
             setOnClickListener {
                 activity.startActivity(Intent(activity, DetectionLogActivity::class.java))
@@ -608,7 +593,7 @@ class KokohoViews(
             background = GradientDrawable().apply {
                 cornerRadius = dp(10).toFloat()
                 setColor(0x22000000)
-                setStroke(dp(1), 0x33FFFFFF)
+                setStroke(dp(1), 0x4490A4AE)
             }
             text = "No events logged in current session."
         }
@@ -626,103 +611,32 @@ class KokohoViews(
         val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
         val lines = mutableListOf<String>()
         val now = System.currentTimeMillis()
+        val snap = latestSnapshot ?: KokohoPostureEngine.evaluate(activity, now)
 
-        for (obj in KokohoHubClient.activeObjects(now)) {
-            val t = fmt.format(Date(obj.updatedAtMs))
-            lines += "[$t] [AUXNET] [${obj.classification.category}] ${obj.classification.label} (±${obj.location.uncertaintyRadiusM.toInt()}m, UUID ${obj.uuid.take(8)})"
+        for (threat in snap.activeThreats) {
+            val t = fmt.format(Date(threat.updatedAtMs))
+            val dist = KokohoPostureEngine.formatShortDistance(activity, threat.estimatedDistanceM)
+            val mode = if (threat.isApproximatedPosition) "triangulated" else "radius"
+            lines += "[$t] [${threat.friendlyLabel}] $dist · ${threat.combinedConfidence}% conf (${threat.evidenceCount} signals, $mode)"
         }
         for (rf in RadioLog.current(now)) {
             val t = fmt.format(Date(rf.lastSeen))
             val sig = KokohoSignatures.matchFrequency(rf.freqHz)
-            val tag = sig?.let { "[${it.agency}] ${it.alpha}" } ?: "%.4f MHz".format(Locale.US, rf.freqHz / 1e6)
-            lines += "[$t] [RF-SDR] $tag · peak ${rf.peakSnrDb} dB SNR (${rf.trend.name})"
+            val tag = sig?.friendlyLabel ?: "%.4f MHz".format(Locale.US, rf.freqHz / 1e6)
+            lines += "[$t] [RF] $tag · peak ${rf.peakSnrDb} dB SNR"
         }
         for (tg in SdrRadio.p25Log.rows().take(25)) {
             val tgId = tg.tg ?: continue
             val t = fmt.format(Date(tg.lastAt))
             val sig = KokohoSignatures.matchTalkgroup(tgId)
-            val tag = sig?.let { "[${it.agency}] ${it.label}" } ?: "Unmapped Talkgroup"
-            lines += "[$t] [P25-TG] TG $tgId ($tag) · ${tg.calls} calls"
+            val tag = sig?.friendlyLabel ?: "TG $tgId"
+            lines += "[$t] [P25] $tag (TG $tgId) · ${tg.calls} calls"
         }
 
         logsText.text = if (lines.isEmpty()) {
-            "No RF, P25, OUI, or Auxnet detections logged yet in this session.\nActive filter scope: ${latestSnapshot?.enabledScopeText ?: "DHS"}"
+            "No active detections in current window.\nMonitoring: ${snap.enabledScopeText}"
         } else {
             lines.joinToString("\n")
         }
-    }
-
-    private fun showAuxnetConfigDialog() {
-        val layout = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(4))
-        }
-        val urlInput = EditText(activity).apply {
-            hint = "Auxnet Hub URL"
-            setText(KokohoHubClient.hubUrl(activity))
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val contributeCheck = CheckBox(activity).apply {
-            text = "Contribute detections to trusted Sensor Room"
-            isChecked = KokohoHubClient.isSensorContributor(activity)
-        }
-        val roomInput = EditText(activity).apply {
-            hint = "Detection Room ID (e.g. tucson-sector-1)"
-            setText(KokohoHubClient.roomId(activity))
-        }
-        val keyInput = EditText(activity).apply {
-            hint = "Room Capability Key (optional)"
-            setText(KokohoHubClient.roomKey(activity))
-        }
-        layout.addView(urlInput)
-        layout.addView(contributeCheck)
-        layout.addView(roomInput)
-        layout.addView(keyInput)
-
-        MaterialAlertDialogBuilder(activity)
-            .setTitle("Auxnet Hub & Room Link")
-            .setView(layout)
-            .setPositiveButton("Save & Check In") { _, _ ->
-                KokohoHubClient.setHubUrl(activity, urlInput.text.toString())
-                KokohoHubClient.setSensorContributor(
-                    activity,
-                    contributeCheck.isChecked,
-                    roomInput.text.toString(),
-                    keyInput.text.toString()
-                )
-                KokohoHubClient.checkinNow(activity)
-                Toast.makeText(activity, "Auxnet Hub configuration saved", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showChannelImportDialog() {
-        val input = EditText(activity).apply {
-            hint = "Paste RadioReference TSV/CSV lines or SDRTrunk <playlist> XML…"
-            minLines = 6
-            maxLines = 12
-            gravity = Gravity.TOP or Gravity.START
-        }
-        val pad = dp(18)
-        val container = FrameLayout(activity).apply {
-            setPadding(pad, dp(8), pad, 0)
-            addView(input)
-        }
-        MaterialAlertDialogBuilder(activity)
-            .setTitle("Import Channels (RadioReference / SDRTrunk)")
-            .setMessage("Bundled catalog already includes 51 AZ CBP/ICE/AMO channels + PCWIN talkgroups. Paste additional RadioReference CSV/TSV or SDRTrunk XML below:")
-            .setView(container)
-            .setPositiveButton("Import") { _, _ ->
-                val text = input.text?.toString().orEmpty()
-                val count = KokohoSignatures.importChannelText(activity, text, "User Import")
-                Toast.makeText(activity, "Imported $count channel entries", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    companion object {
-        private const val Vertical = LinearLayout.VERTICAL
     }
 }

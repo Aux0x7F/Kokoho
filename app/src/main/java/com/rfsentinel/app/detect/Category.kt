@@ -24,8 +24,8 @@ enum class Category(
     CELL_ANOMALY("Fake cell tower signs (IMSI catcher)", "CELL", 0xFF7B1FA2.toInt(), true),
     GNSS("GPS / satellite jamming or spoofing signs", "GNSS", 0xFF00838F.toInt(), true),
     RADIO("Two-way radio transmitting nearby (needs an RTL-SDR)", "RADIO", 0xFF0277BD.toInt(), true),
-    /** Online (ADS-B feeds): off by default, it sends a rounded position to adsb.fi / adsb.lol. */
-    AIRCRAFT("Police / government aircraft overhead (online: adsb.fi, adsb.lol)", "AIRCRAFT", 0xFF5E35B1.toInt(), false),
+    /** Online & local ADS-B aircraft: on by default in Kokoho for DHS aircraft. */
+    AIRCRAFT("Aircraft overhead (ADS-B)", "AIRCRAFT", 0xFF5E35B1.toInt(), true),
     /** Online (the user's OpenWeb Ninja key): off by default, third-party service used at the user's own risk. */
     POLICE_REPORT("Waze reports (online: OpenWeb Ninja key or Waze direct)", "WAZE", 0xFF1E88E5.toInt(), false),
     /** Off by default: action cameras (GoPro, Insta360, DJI Osmo...) and WiFi spy cameras in setup mode. */

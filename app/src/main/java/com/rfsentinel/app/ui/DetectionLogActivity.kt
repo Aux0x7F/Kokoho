@@ -42,22 +42,36 @@ class DetectionLogActivity : AppCompatActivity() {
         binding = ActivityLogBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.root.applySystemBarInsets()
-        title = if (falseAlerts) "False alerts" else "Match history"
+        binding.root.setBackgroundColor(com.rfsentinel.app.kokoho.KokohoPostureEngine.currentPostureColorArgb(this))
+        (binding.filterChips.parent as? View)?.visibility = View.GONE
+        title = if (falseAlerts) "False alerts" else "Logs"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        adapter = DetectionAdapter(onClick = { DeviceActions.openDetection(this, it) },
-            onLongClick = if (!falseAlerts) null else { d ->
-                MaterialAlertDialogBuilder(this).setTitle(d.label)
-                    .setItems(arrayOf("Show details", "Remove from false alerts (alerts back on)")) { _, which ->
-                        if (which == 0) DeviceActions.openDetection(this, d)
-                        else DeviceActions.unmarkFalseAlert(this, d.mac) { buildChips(); search(now = true) }
-                    }.show()
-            })
+        adapter = DetectionAdapter(
+            onClick = { DeviceActions.openDetection(this, it) },
+            onLongClick = { d ->
+                if (falseAlerts) {
+                    MaterialAlertDialogBuilder(this).setTitle(d.label)
+                        .setItems(arrayOf("Details", "Remove from false alerts (alerts back on)")) { _, which ->
+                            if (which == 0) DeviceActions.openDetection(this, d)
+                            else DeviceActions.unmarkFalseAlert(this, d.mac) { buildChips(); search(now = true) }
+                        }.show()
+                } else {
+                    DeviceActions.showQuickActions(this, d.mac) { search(now = true) }
+                }
+            }
+        )
         adapter.size = com.rfsentinel.app.util.Prefs.listSize(this)
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
         binding.recyclerView.adapter = adapter
         binding.searchInput.doAfterTextChanged { search(now = false) }
         buildChips()
+        search(now = true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        binding.root.setBackgroundColor(com.rfsentinel.app.kokoho.KokohoPostureEngine.currentPostureColorArgb(this))
         search(now = true)
     }
 
@@ -98,7 +112,34 @@ class DetectionLogActivity : AppCompatActivity() {
             }
             AppDatabase.getInstance(this@DetectionLogActivity).detectionDao()
                 .search(q, KnownDeviceDao.like(q), KnownDeviceDao.likeHex(q), category, since)
-                .collect { list -> show(list, filtered, "No watchlist matches logged yet.") }
+                .collect { dbList ->
+                    val activeRows = com.rfsentinel.app.kokoho.KokohoPostureEngine.evaluate(this@DetectionLogActivity)
+                        .activeThreats
+                        .map { t ->
+                            val customLabel = com.rfsentinel.app.kokoho.KokohoSignatures.getCustomEntityLabel(this@DetectionLogActivity, t.uuid)
+                            com.rfsentinel.app.data.DetectionEntity(
+                                id = -t.uuid.hashCode().toLong(),
+                                mac = t.uuid,
+                                timestamp = t.updatedAtMs,
+                                rssi = -65,
+                                label = customLabel ?: t.friendlyLabel,
+                                category = t.agency.friendlyLabel,
+                                vendor = t.agency.id,
+                                deviceName = t.friendlyLabel,
+                                source = "KOKOHO",
+                                evidence = "${t.combinedConfidence}% confidence · ${t.evidenceCount} ${if (t.evidenceCount == 1) "signal" else "signals"}",
+                                latitude = t.lat,
+                                longitude = t.lon
+                            )
+                        }
+                        .filter { r ->
+                            r.timestamp >= since && (q.isEmpty() ||
+                                listOf(r.mac, r.label, r.vendor, r.deviceName, r.evidence).any { it?.contains(q, ignoreCase = true) == true })
+                        }
+                    val seenMacs = activeRows.map { it.mac.uppercase() }.toSet()
+                    val merged = activeRows + dbList.filter { it.mac.uppercase() !in seenMacs }
+                    show(merged, filtered, "No detections logged yet.")
+                }
         }
     }
 

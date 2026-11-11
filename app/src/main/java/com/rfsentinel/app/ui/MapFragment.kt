@@ -969,7 +969,7 @@ class MapFragment : Fragment() {
         val bars = androidx.core.view.WindowCompat.getInsetsController(act.window, b.root)
         bars.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         if (on || Prefs.fullscreen(act)) bars.hide(WindowInsetsCompat.Type.systemBars()) else bars.show(WindowInsetsCompat.Type.systemBars())
-        b.mapFilterScroll.visibility = if (on) View.GONE else View.VISIBLE
+        b.mapFilterScroll.visibility = View.GONE
         b.controls.visibility = if (on || Navigator.active) View.GONE else View.VISIBLE
         layoutBottomInset()
         renderLive()
@@ -1325,36 +1325,8 @@ class MapFragment : Fragment() {
     // ---- Filter chips ---------------------------------------------------------------------------------
 
     private fun setupFilterChips() {
-        if (embedded) {
-            binding.mapFilterScroll.visibility = View.GONE
-            filter = DeviceFilter.ALL
-            return
-        }
-        // The main screen's order; the choice is shared with it (a trace starts on it, then keeps its own).
-        val options = if (tripId == null) DeviceFilter.MAIN_ORDER.filter { it != DeviceFilter.RADIO && it != DeviceFilter.TALKGROUPS } else DeviceFilter.SAVED_ORDER
-        filter = DeviceFilter.parse(Prefs.mapFilter(act)).takeIf { it in options } ?: DeviceFilter.ALL
-        val group = binding.mapFilterChips
-        for (f in options) {
-            val chip = FitChip(act).apply {
-                id = View.generateViewId()
-                text = f.label
-                isCheckable = true
-                isCheckedIconVisible = false
-                ChipStyle.apply(this, overMap = true)
-            }
-            filterChips[f] = chip
-            group.addView(chip)
-            if (f == filter) chip.isChecked = true
-        }
-        group.setOnCheckedStateChangeListener { _, ids ->
-            val picked = filterChips.entries.firstOrNull { it.value.id == ids.firstOrNull() }?.key ?: return@setOnCheckedStateChangeListener
-            filter = picked
-            rf?.filter = picked
-            if (tripId == null) Prefs.setMapFilter(act, picked.name)
-            if (tripId != null) loadTrip() else renderLive()
-            rf?.safe("static") { rf?.maybeRedrawStatic(force = true) }
-            if (picked == DeviceFilter.AIRCRAFT && tripId == null) frameAircraft()
-        }
+        binding.mapFilterScroll.visibility = View.GONE
+        filter = DeviceFilter.FLAGGED
     }
 
     /** The Aircraft filter: stops following you and zooms out to show every aircraft (and you). */

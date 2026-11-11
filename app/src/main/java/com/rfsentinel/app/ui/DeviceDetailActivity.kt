@@ -1,155 +1,578 @@
 package com.rfsentinel.app.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Typeface
-import android.net.Uri
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.text.SpannableStringBuilder
-import android.text.style.TypefaceSpan
-import android.util.TypedValue
+import android.text.InputType
+import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.text.bold
-import androidx.core.text.buildSpannedString
-import androidx.core.text.color
-import androidx.core.text.inSpans
-import androidx.core.text.scale
-import androidx.lifecycle.lifecycleScope
-import com.google.android.material.button.MaterialButton
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.rfsentinel.app.data.AppDatabase
-import com.rfsentinel.app.data.DetectionEntity
 import com.rfsentinel.app.data.DeviceNames
 import com.rfsentinel.app.data.Favorites
-import com.rfsentinel.app.data.KnownDeviceEntity
 import com.rfsentinel.app.data.WhitelistCache
-import com.rfsentinel.app.databinding.ActivityDeviceDetailBinding
-import com.rfsentinel.app.detect.DeviceIntel
-import com.rfsentinel.app.detect.Tier
-import com.rfsentinel.app.detect.VendorDb
-import com.rfsentinel.app.oui.OuiWatchlist
+import com.rfsentinel.app.kokoho.EvaluatedThreat
+import com.rfsentinel.app.kokoho.EvidenceBadge
+import com.rfsentinel.app.kokoho.KokohoAgency
+import com.rfsentinel.app.kokoho.KokohoPostureEngine
+import com.rfsentinel.app.kokoho.KokohoSignatures
+import com.rfsentinel.app.kokoho.PostureColor
 import com.rfsentinel.app.service.DeviceRegistry
-import com.rfsentinel.app.util.MacUtil
-import com.rfsentinel.app.util.ProximityUtil
+import com.rfsentinel.app.service.ScanForegroundService
 import com.rfsentinel.app.util.applySystemBarInsets
-import com.rfsentinel.app.util.Prefs
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Everything RF Sentinel knows about one device, from passive observation
- * only: why it was flagged, decoded identifiers, live signal with a locate
- * mode, long-term history, drone Remote ID, and the raw advertisement.
+ * Kokoho Entity Details Activity — opened by tapping an item in List or tapping the confidence pill
+ * at the bottom of Monitor:
+ *  1. Entity classification row with a right-aligned pencil icon that edits in-place (turning into a
+ *     checkmark symbol while editing; saved locally only).
+ *  2. Full-width 1/4-screen Map of the current supposed radius position.
+ *  3. Center radius coordinates (clicking copies coords to clipboard) and accuracy radius.
+ *  4. Section for details of all evidence.
+ *  5. Top-right '...' overflow menu (replacing the chart icon and action pills) with items limited to:
+ *     Whitelist (local only), Watch (equivalent to Favorite), and Share.
  */
 class DeviceDetailActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_MAC = "mac"
-        /** Two radio frequencies this close are the same channel (half the sweep's 12.5 kHz step). */
-        private const val RADIO_SAME_HZ = 6_250L
         private val RADIO_KEY = Regex("""^RADIO (\d+(?:\.\d+)?) MHz$""")
+
+        private const val MENU_WHITELIST = 101
+        private const val MENU_WATCH = 102
+        private const val MENU_SHARE = 103
 
         /** The frequency in a radio transmission's log key ("RADIO 154.4300 MHz"), else null. */
         fun radioHz(key: String): Long? =
             RADIO_KEY.find(key)?.groupValues?.get(1)?.toDoubleOrNull()?.let { Math.round(it * 1_000_000) }
     }
 
-    private lateinit var binding: ActivityDeviceDetailBinding
-    private lateinit var mac: String
+    private lateinit var rawKey: String
+    private lateinit var entityUuid: String
 
-    /** A LoRa node's distance comes from the GPS position it shares; any other device's is a rough signal estimate. */
-    private fun distanceLine(m: Double): String =
-        if (m.isNaN() || com.rfsentinel.app.esp.isLoRaNode(mac, DeviceRegistry.get(mac)?.name))
-            if (m.isNaN()) "Distance unknown: no GPS position shared" else DeviceIntel.formatDistance(m) + " by GPS"
-        else DeviceIntel.formatDistance(m) + " (rough)"
-    private var sectionsKey = ""
-    private var known: KnownDeviceEntity? = null
-    /** The saved record's type as this version names it. */
-    private val knownType get() = known?.let { DeviceIntel.savedType(it.deviceType, it.vendor, it.mac) }
-    private var pastMatches: List<DetectionEntity> = emptyList()
-    /** The newest saved match of each kind, as hits: what the page shows while the device isn't heard. */
-    private var pastHits: List<com.rfsentinel.app.detect.Hit> = emptyList()
-    /** Its page as it was when last heard: what the page shows while the device isn't heard. */
-    private var saved: com.rfsentinel.app.data.LastHeard.Saved? = null
-    /** The saved page, while the device isn't heard here now. */
-    private fun savedNow(s: DeviceRegistry.Snapshot?) = if (s == null) saved else null
-    private val dateFmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
-    private val timeFmt = DateFormat.getTimeInstance(DateFormat.MEDIUM)
+    private lateinit var rootLayout: LinearLayout
+    lateinit var classificationText: TextView
+        private set
+    lateinit var classificationEdit: EditText
+        private set
+    lateinit var editCheckButton: ImageButton
+        private set
+    lateinit var mapContainer: FrameLayout
+        private set
+    lateinit var coordsText: TextView
+        private set
+    lateinit var accuracyRadiusText: TextView
+        private set
+    lateinit var evidenceContainer: LinearLayout
+        private set
+
+    var isEditingClassification: Boolean = false
+        private set
+
+    private var mapEngine: MapEngine? = null
+    private var rfMap: RfMap? = null
+
+    private var currentClassification: String = "CBP"
+    private var currentLat: Double = 32.2226
+    private var currentLon: Double = -110.9747
+    private var currentRadiusM: Int = 450
+    private var currentIsPinpointed: Boolean = false
+    private var currentPostureColor: Int = PostureColor.YELLOW.colorArgb
+    private var currentEvidence: List<EvidenceBadge> = emptyList()
+
+    private val density get() = resources.displayMetrics.density
+    private fun dp(v: Int): Int = (v * density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityDeviceDetailBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.root.applySystemBarInsets()
-        mac = intent.getStringExtra(EXTRA_MAC) ?: run { finish(); return }
-        title = "Details" // short: stays clear of a camera hole in Fullscreen
+        KokohoSignatures.ensureLoaded(this)
+
+        rawKey = intent.getStringExtra(EXTRA_MAC) ?: run {
+            finish()
+            return
+        }
+        entityUuid = KokohoSignatures.normalizeEntityId(rawKey)
+
+        title = "Details"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
-        radioHz = radioHz(mac)
-        binding.locateButton.setOnClickListener { if (radioHz != null) locateRadio() else toggleLocate() }
-        // The main action in the theme's highlight colour (faded while the device isn't heard).
-        ChipStyle.accent(this).let { (accent, onAccent) ->
-            val off = intArrayOf(-android.R.attr.state_enabled)
-            val on = intArrayOf()
-            binding.locateButton.backgroundTintList = android.content.res.ColorStateList(arrayOf(off, on), intArrayOf((accent and 0x00FFFFFF) or 0x55000000, accent))
-            binding.locateButton.setTextColor(android.content.res.ColorStateList(arrayOf(off, on), intArrayOf((onAccent and 0x00FFFFFF) or 0x99000000.toInt(), onAccent)))
-        }
-        binding.actionWatchlist.setOnClickListener { if (radioHz != null) toggleWatchedFrequency() else onWatchlistAction() }
-        binding.actionWhitelist.setOnClickListener {
-            val s = DeviceRegistry.get(mac)
-            when {
-                com.rfsentinel.app.data.TrackerMutes.isMuted(mac) -> {
-                    com.rfsentinel.app.data.TrackerMutes.unmute(this, mac)
-                    Toast.makeText(this, "Tracker no longer ignored", Toast.LENGTH_SHORT).show()
-                    refresh()
-                }
-                WhitelistCache.inTable(mac) -> DeviceActions.unwhitelist(this, mac)
-                com.rfsentinel.app.data.TrustedNetworks.contains(mac) -> { DeviceActions.untrustNetwork(this, DeviceActions.ssidOf(s) ?: com.rfsentinel.app.data.TrustedNetworks.ssidOf(mac)); refresh() }
-                com.rfsentinel.app.data.TrustRules.ruleOf(mac) != null -> { DeviceActions.untrustRule(this, com.rfsentinel.app.data.TrustRules.ruleOf(mac)!!); refresh() }
-                isRotatingTracker(s) -> DeviceActions.ignoreTracker(this, mac)
-                else -> DeviceActions.whitelist(this, mac, s?.let { it.best?.label ?: it.name } ?: "", DeviceActions.ssidOf(s))
-            }
-        }
-        binding.actionFavorite.setOnClickListener {
-            val s = DeviceRegistry.get(mac)
-            val fav = Favorites.contains(mac)
-            lifecycleScope.launch {
-                Favorites.set(this@DeviceDetailActivity, mac, !fav, s?.name ?: known?.name, s?.vendor ?: known?.vendor, s?.deviceType)
-                refresh()
-            }
-        }
-        binding.actionFalseAlert.setOnClickListener {
-            if (com.rfsentinel.app.data.FalseAlerts.contains(this, mac)) DeviceActions.unmarkFalseAlert(this, mac) { refresh() }
-            else DeviceActions.markFalseAlert(this, mac) { refresh() }
-        }
-        binding.actionRename.setOnClickListener { rename() }
-        binding.actionNote.setOnClickListener { editNote() }
-        binding.noteText.setOnClickListener { editNote() }
-        binding.actionSightings.setOnClickListener {
-            startActivity(Intent(this, HistoryActivity::class.java).putExtra(HistoryActivity.EXTRA_MAC, mac))
-        }
-        binding.actionCopy.setOnClickListener { DeviceActions.copy(this, mac) }
-        binding.actionShare.setOnClickListener { share() }
-        binding.actionLearn.setOnClickListener { DeviceActions.learn(this, mac) }
+        val statusBgColor = KokohoPostureEngine.currentPostureColorArgb(this)
 
-        lifecycleScope.launch {
-            val db = AppDatabase.getInstance(this@DeviceDetailActivity)
-            known = db.knownDeviceDao().get(mac)
-            pastMatches = db.detectionDao().forMac(mac)
-            saved = db.deviceDetailsDao().get(mac)?.let { com.rfsentinel.app.data.LastHeard.fromJson(it.json) }
-            pastHits = pastMatches.distinctBy { it.label }.take(5).map { m ->
-                com.rfsentinel.app.detect.Hit(com.rfsentinel.app.detect.Category.parse(m.category) ?: com.rfsentinel.app.detect.Category.CUSTOM,
-                    m.label, m.confidence, m.evidence, "")
-            }
-            sectionsKey = ""
-            refresh()
+        rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(statusBgColor)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
-        refreshWhileStarted(1000) { refresh() }
+        rootLayout.applySystemBarInsets()
+
+        // 1. Entity Classification Row (Left: Classification label / inline EditText; Right: Pencil <-> Checkmark icon)
+        val classificationRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(14), dp(14), dp(12))
+        }
+
+        classificationText = TextView(this).apply {
+            textSize = 26f
+            typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        classificationEdit = EditText(this).apply {
+            textSize = 24f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setHintTextColor(0xAAFFFFFF.toInt())
+            hint = "Entity classification"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setSingleLine(true)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(0x44000000)
+                setStroke(dp(1), Color.WHITE)
+            }
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            }
+            setOnEditorActionListener { _, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    commitClassificationEdit()
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        editCheckButton = ImageButton(this).apply {
+            contentDescription = "Edit classification"
+            background = GradientDrawable().apply {
+                cornerRadius = dp(999).toFloat()
+                setColor(0x38000000)
+                setStroke(dp(1), 0x66FFFFFF)
+            }
+            setImageDrawable(createPencilDrawable())
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
+            setOnClickListener {
+                if (isEditingClassification) {
+                    commitClassificationEdit()
+                } else {
+                    beginClassificationEdit()
+                }
+            }
+        }
+
+        classificationRow.addView(classificationText)
+        classificationRow.addView(classificationEdit)
+        classificationRow.addView(editCheckButton)
+        rootLayout.addView(classificationRow)
+
+        // 2. Full-Width 1/4-Screen Map of Current Supposed Radius Position
+        val quarterScreenPx = (resources.displayMetrics.heightPixels / 4).coerceAtLeast(dp(180))
+        mapContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                quarterScreenPx
+            )
+            setBackgroundColor(0xFF101820.toInt())
+        }
+        rootLayout.addView(mapContainer)
+
+        runCatching {
+            val engine = MapEngine.create(this)
+            mapContainer.addView(
+                engine.view,
+                0,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            engine.onCreate(savedInstanceState)
+            mapEngine = engine
+            engine.whenReady {
+                if (isFinishing || isDestroyed || mapEngine !== engine) return@whenReady
+                engine.setMinZoom(2.0)
+                val map = RfMap(this, engine).also { rfMap = it }
+                engine.jumpTo(currentLat, currentLon, zoomForRadius(currentRadiusM))
+                map.loadStyle(dark = true) {
+                    if (!isFinishing && !isDestroyed) {
+                        renderMapPosition()
+                    }
+                }
+            }
+        }
+
+        // 3. Scrollable lower pane: Center Radius Coordinates (click to copy) + Accuracy Radius + Evidence Details
+        val lowerScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+
+        val lowerContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(24))
+        }
+
+        val coordsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0x38000000)
+                setStroke(dp(1), 0x55FFFFFF)
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(14)
+            }
+            setOnClickListener {
+                copyCoordsToClipboard()
+            }
+        }
+
+        coordsText = TextView(this).apply {
+            textSize = 15.5f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                copyCoordsToClipboard()
+            }
+        }
+
+        accuracyRadiusText = TextView(this).apply {
+            visibility = View.GONE
+        }
+
+        coordsCard.addView(coordsText)
+        coordsCard.addView(accuracyRadiusText)
+        lowerContent.addView(coordsCard)
+
+        // 4. Section for Details of All Evidence
+        val evidenceHeader = TextView(this).apply {
+            text = "Evidence Details"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(dp(2), 0, dp(2), dp(8))
+        }
+        lowerContent.addView(evidenceHeader)
+
+        evidenceContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        lowerContent.addView(evidenceContainer)
+
+        lowerScroll.addView(lowerContent)
+        rootLayout.addView(lowerScroll)
+
+        setContentView(rootLayout)
+        refreshDetails()
+    }
+
+    private fun beginClassificationEdit() {
+        isEditingClassification = true
+        classificationEdit.setText(currentClassification)
+        classificationEdit.setSelection(classificationEdit.text.length)
+        classificationText.visibility = View.GONE
+        classificationEdit.visibility = View.VISIBLE
+        editCheckButton.setImageDrawable(createCheckmarkDrawable())
+        editCheckButton.contentDescription = "Save classification"
+        classificationEdit.requestFocus()
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(classificationEdit, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    fun commitClassificationEdit() {
+        val edited = classificationEdit.text?.toString()?.trim().orEmpty()
+        if (edited.isNotEmpty()) {
+            KokohoSignatures.setCustomEntityLabel(this, entityUuid, edited)
+            CoroutineScope(Dispatchers.Main).launch {
+                runCatching { DeviceNames.set(this@DeviceDetailActivity, rawKey, edited, null, null, null) }
+            }
+            currentClassification = edited
+        }
+        isEditingClassification = false
+        classificationEdit.visibility = View.GONE
+        classificationText.text = currentClassification
+        classificationText.visibility = View.VISIBLE
+        editCheckButton.setImageDrawable(createPencilDrawable())
+        editCheckButton.contentDescription = "Edit classification"
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(classificationEdit.windowToken, 0)
+    }
+
+    private fun copyCoordsToClipboard() {
+        val formatted = String.format(Locale.US, "%.5f, %.5f", currentLat, currentLon)
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText("Center coordinates", formatted))
+        Toast.makeText(this, "Coordinates copied: $formatted", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun refreshDetails() {
+        val statusColor = KokohoPostureEngine.currentPostureColorArgb(this)
+        rootLayout.setBackgroundColor(statusColor)
+
+        val threat: EvaluatedThreat? = KokohoPostureEngine.findThreatByUuid(this, entityUuid)
+        val userFix = ScanForegroundService.lastFix
+
+        if (threat != null) {
+            currentClassification = KokohoSignatures.resolveEntityLabel(this, entityUuid, threat.friendlyLabel)
+            currentLat = threat.lat ?: userFix?.latitude ?: 32.2226
+            currentLon = threat.lon ?: userFix?.longitude ?: -110.9747
+            currentRadiusM = threat.mapCircleRadiusM
+            currentIsPinpointed = threat.isPinpointed
+            currentPostureColor = threat.posture.colorArgb
+            currentEvidence = threat.evidenceSources
+        } else {
+            val snap = DeviceRegistry.get(rawKey)
+            val fallbackLabel = snap?.best?.label ?: snap?.name ?: "CBP"
+            currentClassification = KokohoSignatures.resolveEntityLabel(
+                this,
+                entityUuid,
+                DeviceNames.of(rawKey) ?: fallbackLabel
+            )
+            val place = snap?.place
+            currentLat = place?.lat ?: userFix?.latitude ?: 32.2226
+            currentLon = place?.lon ?: userFix?.longitude ?: -110.9747
+            currentRadiusM = 400
+            currentIsPinpointed = false
+            currentPostureColor = statusColor
+            currentEvidence = if (snap != null) {
+                snap.hits.map { h ->
+                    EvidenceBadge(
+                        kind = h.category.shortTag,
+                        facetKey = snap.mac,
+                        detail = "${h.label} · ${h.evidence} (${snap.rssi} dBm)",
+                        weight = h.confidence / 100.0,
+                        lastSeenMs = snap.lastSeen
+                    )
+                }
+            } else {
+                emptyList()
+            }
+        }
+
+        if (!isEditingClassification) {
+            classificationText.text = currentClassification
+        }
+
+        val coordStr = String.format(Locale.US, "%.5f, %.5f", currentLat, currentLon)
+        val radiusStr = KokohoPostureEngine.formatAccuracyRadius(this, currentRadiusM)
+        coordsText.text = "$coordStr ($radiusStr)"
+        accuracyRadiusText.text = radiusStr
+
+        renderEvidenceList()
+        renderMapPosition()
+    }
+
+    private fun renderEvidenceList() {
+        evidenceContainer.removeAllViews()
+        val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+        if (currentEvidence.isEmpty()) {
+            val emptyTv = TextView(this).apply {
+                text = "No raw evidence frames retained."
+                textSize = 14f
+                setTextColor(0xDDFFFFFF.toInt())
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(10).toFloat()
+                    setColor(0x28000000)
+                    setStroke(dp(1), 0x44FFFFFF)
+                }
+            }
+            evidenceContainer.addView(emptyTv)
+            return
+        }
+
+        for (ev in currentEvidence) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(14), dp(12), dp(14), dp(12))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(10).toFloat()
+                    setColor(0x33000000)
+                    setStroke(dp(1), 0x55FFFFFF)
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = dp(8)
+                }
+            }
+
+            val timeStr = if (ev.lastSeenMs > 0) fmt.format(Date(ev.lastSeenMs)) else "live"
+            val weightPct = (ev.weight * 100).toInt().coerceIn(1, 99)
+
+            val topLine = TextView(this).apply {
+                text = "${ev.kind} · ${ev.facetKey} ($weightPct% weight · $timeStr)"
+                textSize = 12.5f
+                typeface = Typeface.MONOSPACE
+                setTextColor(0xDDFFFFFF.toInt())
+            }
+
+            val detailLine = TextView(this).apply {
+                text = ev.detail
+                textSize = 14.5f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
+                setPadding(0, dp(4), 0, 0)
+            }
+
+            card.addView(topLine)
+            card.addView(detailLine)
+            evidenceContainer.addView(card)
+        }
+    }
+
+    private fun zoomForRadius(radiusM: Int): Double = when {
+        radiusM >= 5000 -> 9.8
+        radiusM >= 2000 -> 11.0
+        radiusM >= 800 -> 12.0
+        radiusM >= 300 -> 13.2
+        else -> 14.2
+    }
+
+    private fun renderMapPosition() {
+        val map = rfMap ?: return
+        val pin = MapPin(
+            mac = "kokoho:$entityUuid",
+            lat = currentLat,
+            lon = currentLon,
+            label = currentClassification,
+            flagged = true,
+            color = currentPostureColor,
+            details = "Accuracy radius: ${KokohoPostureEngine.formatShortDistance(this, currentRadiusM)}",
+            radiusM = if (currentIsPinpointed) null else currentRadiusM.toDouble().coerceAtLeast(35.0),
+            showDot = currentIsPinpointed
+        )
+        map.drawPins(listOf(pin))
+        map.map.jumpTo(currentLat, currentLon, zoomForRadius(currentRadiusM))
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        // Only '...' overflow items: Whitelist (local only), Watch (Favorite), and Share. No chart icon.
+        menu.clear()
+        val whitelisted = KokohoSignatures.isEntityWhitelisted(this, entityUuid) || WhitelistCache.contains(rawKey)
+        val watched = KokohoSignatures.isEntityWatched(this, entityUuid) || Favorites.contains(rawKey)
+
+        menu.add(0, MENU_WHITELIST, 0, if (whitelisted) "Remove from Whitelist" else "Whitelist")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        menu.add(0, MENU_WATCH, 1, if (watched) "Unwatch" else "Watch")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        menu.add(0, MENU_SHARE, 2, "Share")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        return true
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        val whitelisted = KokohoSignatures.isEntityWhitelisted(this, entityUuid) || WhitelistCache.contains(rawKey)
+        val watched = KokohoSignatures.isEntityWatched(this, entityUuid) || Favorites.contains(rawKey)
+        menu.findItem(MENU_WHITELIST)?.title = if (whitelisted) "Remove from Whitelist" else "Whitelist"
+        menu.findItem(MENU_WATCH)?.title = if (watched) "Unwatch" else "Watch"
+        return super.onPrepareOptionsMenu(menu)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            android.R.id.home -> {
+                finish()
+                true
+            }
+            MENU_WHITELIST -> {
+                val nowWhitelisted = !KokohoSignatures.isEntityWhitelisted(this, entityUuid)
+                KokohoSignatures.setEntityWhitelisted(this, entityUuid, nowWhitelisted)
+                Toast.makeText(
+                    this,
+                    if (nowWhitelisted) "Whitelisted locally" else "Removed from local whitelist",
+                    Toast.LENGTH_SHORT
+                ).show()
+                invalidateOptionsMenu()
+                refreshDetails()
+                true
+            }
+            MENU_WATCH -> {
+                val nowWatched = !KokohoSignatures.isEntityWatched(this, entityUuid)
+                KokohoSignatures.setEntityWatched(this, entityUuid, nowWatched)
+                CoroutineScope(Dispatchers.Main).launch {
+                    runCatching { Favorites.set(this@DeviceDetailActivity, rawKey, nowWatched, currentClassification, null, null) }
+                }
+                Toast.makeText(
+                    this,
+                    if (nowWatched) "Watching $currentClassification" else "Stopped watching $currentClassification",
+                    Toast.LENGTH_SHORT
+                ).show()
+                invalidateOptionsMenu()
+                true
+            }
+            MENU_SHARE -> {
+                val coordStr = String.format(Locale.US, "%.5f, %.5f", currentLat, currentLon)
+                val radiusStr = KokohoPostureEngine.formatAccuracyRadius(this, currentRadiusM)
+                val evLines = currentEvidence.joinToString("\n") { "- [${it.kind}] ${it.detail}" }
+                val shareBody = buildString {
+                    appendLine("Kokoho Detection: $currentClassification")
+                    appendLine("$coordStr ($radiusStr)")
+                    if (evLines.isNotBlank()) {
+                        appendLine("Evidence:")
+                        append(evLines)
+                    }
+                }
+                startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, shareBody)
+                        },
+                        "Share detection"
+                    )
+                )
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
     }
 
     override fun onSupportNavigateUp(): Boolean {
@@ -157,495 +580,86 @@ class DeviceDetailActivity : AppCompatActivity() {
         return true
     }
 
-    override fun onCreateOptionsMenu(menu: android.view.Menu): Boolean {
-        VisualMode.addMenu(menu, this, VisualMode.Screen.DEVICE_DETAIL); return true
+    override fun onStart() {
+        super.onStart()
+        mapEngine?.onStart()
     }
 
-    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean =
-        VisualMode.handle(item, this, VisualMode.Screen.DEVICE_DETAIL) { invalidateOptionsMenu(); refresh() } ||
-            super.onOptionsItemSelected(item)
-
-    private val visual get() = VisualMode.on(this, VisualMode.Screen.DEVICE_DETAIL)
-
-    // ---- Rendering ------------------------------------------------------------
-
-    private fun isRotatingTracker(s: DeviceRegistry.Snapshot?) =
-        s?.best?.category == com.rfsentinel.app.detect.Category.TRACKER &&
-            s.addressType != com.rfsentinel.app.detect.AddressType.PUBLIC
-
-    private fun refresh() {
-        val s = DeviceRegistry.get(mac)
-        // The same device under a newer address (it rotated): its live signal is heard there now.
-        val liveMac = DeviceRegistry.currentAddress(mac)
-        val live = if (liveMac != mac) DeviceRegistry.get(liveMac) ?: s else s
-        val now = System.currentTimeMillis()
-        val whitelisted = WhitelistCache.contains(mac)
-        val best = s?.best
-        val last = savedNow(s)
-        // Not heard now: its strongest match as last heard, else from the match history, like the list showed it.
-        val pastBest = last?.best ?: pastHits.maxByOrNull { it.confidence }
-
-        // Header
-        if (whitelisted) {
-            binding.tagText.visibility = View.VISIBLE
-            binding.tagText.text = "WHITELISTED"
-            binding.tagText.background.mutate().setTint(0xFF6B7B80.toInt())
-        } else if (best != null) {
-            binding.tagText.visibility = View.VISIBLE
-            binding.tagText.text = (if (s.following) "FOLLOWING · " else "") + DeviceRows.matchTag(best.category.shortTag, best.confidence)
-            binding.tagText.background.mutate().setTint(ThemeManager.ink(this, if (best.tier == Tier.WEAK) 0xFFB26A00.toInt() else best.category.colorArgb))
-        } else if (s == null && pastBest != null) {
-            val h = pastBest
-            binding.tagText.visibility = View.VISIBLE
-            binding.tagText.text = DeviceRows.matchTag(h.category.shortTag, h.confidence)
-            binding.tagText.background.mutate().setTint(ThemeManager.ink(this, if (h.tier == Tier.WEAK) 0xFFB26A00.toInt() else h.category.colorArgb))
-        } else if (s != null) {
-            binding.tagText.visibility = View.VISIBLE
-            binding.tagText.text = "NOT FLAGGED"
-            binding.tagText.background.mutate().setTint(0xFF6B7B80.toInt())
-        } else {
-            binding.tagText.visibility = View.GONE
-        }
-        val heardAs = best?.label ?: s?.name ?: pastBest?.label ?: known?.name ?: s?.deviceType ?: knownType ?: "Device"
-        val alias = DeviceNames.of(mac)
-        // Your own name in place of what it's heard as; that stays on the line below.
-        binding.titleText.text = alias ?: heardAs
-        binding.subtitleText.text = buildSpannedString {
-            if (alias != null) append("$heardAs\n")
-            color(secondaryText) { inSpans(TypefaceSpan("monospace")) { append(mac) } }
-            (s?.vendor ?: known?.vendor ?: VendorDb.macVendor(mac))?.let { append("\n$it") }
-        }
-        val note = known?.note?.takeIf { it.isNotBlank() }
-        binding.noteText.visibility = if (note != null) View.VISIBLE else View.GONE
-        binding.noteText.text = note?.let { "\uD83D\uDCDD $it" }
-        binding.presenceText.text = buildSpannedString {
-            when {
-                liveMac != mac && live != null -> { lead("In range under a new address"); append(" · heard ${ago(now - live.lastSeen)}") }
-                s == null -> {
-                    lead("Not in range right now")
-                    known?.let { append(" · last heard ${dateFmt.format(Date(it.lastSeen))}") }
-                    if (last?.following == true) { append("\n"); lead("⚠ Was moving with you", warning) }
-                }
-                s.following -> { lead("⚠ Has been moving with you", warning); append(" · heard ${ago(now - s.lastSeen)}") }
-                else -> { lead("In range"); append(" · heard ${ago(now - s.lastSeen)} · ${s.sightings} " + if (s.sightings == 1) "packet" else "packets") }
-            }
-        }
-
-        // Visual style: the dial and ring take the place of the big number.
-        val visual = this.visual
-        binding.visualTop.visibility = if (visual) View.VISIBLE else View.GONE
-        binding.rssiText.visibility = if (visual) View.GONE else View.VISIBLE
-        val ringHit = (best ?: last?.best)?.takeIf { !whitelisted }
-        binding.ring.visibility = if (ringHit != null) View.VISIBLE else View.GONE
-        if (ringHit != null) binding.ring.set(ringHit.confidence,
-            ThemeManager.ink(this, if (ringHit.tier == Tier.WEAK) 0xFFB26A00.toInt() else ringHit.category.colorArgb),
-            ringHit.tier.label.lowercase() + " match")
-
-        // Live signal (from the newest address when it rotated)
-        if (live != null) {
-            binding.rssiText.text = buildSpannedString { append("${live.rssi}"); scale(0.4f) { append(" dBm") } }
-            val trendDir = LiveRead.trend(live)
-            val trend = if (live.history.size < 2) "" else when (trendDir) {
-                1 -> " · ↑ getting closer"; -1 -> " · ↓ moving away"; else -> " · → steady"
-            }
-            binding.gauge.set(live.rssi, live.bestRssi, trendDir)
-            binding.rssiDetail.text = signalLines(ProximityUtil.band(live.rssi) + if (visual) "" else trend,
-                "${distanceLine(live.distanceM)} · best ${live.bestRssi} dBm" +
-                    (if (liveMac != mac) "\nNow heard as $liveMac" else "") +
-                    (if (locatingThis()) LiveRead.sweepText()?.let { "\n$it" }.orEmpty() else ""))
-            binding.graph.setSamples(live.history)
-            binding.locateButton.isEnabled = true
-            binding.locateButton.text = if (locatingThis()) "Stop" else "Locate"
-        } else {
-            binding.rssiText.text = "--"
-            binding.gauge.set(null, null, 0)
-            // As last heard: its last reading, best and the signal graph then.
-            binding.rssiDetail.text = if (last == null) signalLines("Not currently heard", null) else
-                signalLines("Last ${last.rssi} dBm · ${ProximityUtil.band(last.rssi)}",
-                    "${distanceLine(last.distanceM)} · best ${last.bestRssi} dBm")
-            binding.graph.setSamples(last?.samples.orEmpty())
-            binding.locateButton.isEnabled = false
-            stopLocate()
-        }
-
-        // Action labels
-        val watched = DeviceActions.watchEntries(mac, s?.name ?: known?.name).isNotEmpty()
-        binding.actionWatchlist.text = if (watched) "Watchlist..." else "Add to watchlist"
-        radioHz?.let { hz ->
-            // A radio transmission (RTL-SDR / HackRF): found with the waterfall, watched as a frequency.
-            binding.locateButton.isEnabled = true // without an SDR it says what it needs
-            binding.actionWatchlist.text = if (watchedTarget(hz) != null) "Stop watching frequency" else "Watch this frequency"
-        }
-        binding.actionWhitelist.text = when {
-            com.rfsentinel.app.data.TrackerMutes.isMuted(mac) -> "Stop ignoring"
-            whitelisted -> "Un-whitelist"
-            isRotatingTracker(s) -> "Ignore tracker"
-            else -> "Whitelist"
-        }
-        binding.actionFavorite.text = if (Favorites.contains(mac)) "★ Favorite" else "☆ Favorite"
-        val falseAlert = com.rfsentinel.app.data.FalseAlerts.contains(this, mac)
-        binding.actionFalseAlert.text = if (falseAlert) "Not a false alert" else "False alert"
-        binding.actionFalseAlert.visibility = if (falseAlert || s?.best != null || pastMatches.isNotEmpty()) View.VISIBLE else View.GONE
-        binding.actionNote.text = if (known?.note.isNullOrBlank()) "Add note" else "Edit note"
-
-        // Sections: rebuilt only when their content changes (keeps scroll & selection stable).
-        val content = buildSections(s)
-        val key = visual.toString() + content.joinToString("|") { it.first + it.second.joinToString { r -> r.first + r.second } }
-        if (key != sectionsKey) {
-            sectionsKey = key
-            renderSections(content)
-        }
+    override fun onResume() {
+        super.onResume()
+        mapEngine?.onResume()
+        refreshDetails()
     }
 
-    private val primaryText by lazy { com.google.android.material.color.MaterialColors.getColor(this, android.R.attr.textColorPrimary, 0xFF888888.toInt()) }
-    private val secondaryText by lazy { com.google.android.material.color.MaterialColors.getColor(this, android.R.attr.textColorSecondary, 0xFF888888.toInt()) }
-    private val warning by lazy { ThemeManager.ink(this, 0xFFD32F2F.toInt()) }
-
-    /** The part of a line to catch on a quick look. */
-    private fun SpannableStringBuilder.lead(text: String, ink: Int = primaryText) = bold { color(ink) { append(text) } }
-
-    /** How close it is on a line that stands out, the numbers quieter below it. */
-    private fun signalLines(main: String, more: String?) = buildSpannedString {
-        scale(1.15f) { lead(main) }
-        more?.let { color(secondaryText) { append("\n$it") } }
+    override fun onPause() {
+        mapEngine?.onPause()
+        super.onPause()
     }
 
-    private fun buildSections(s: DeviceRegistry.Snapshot?): List<DeviceSection> {
-        val last = savedNow(s) ?: return DeviceSections.build(this, mac, s, known, pastMatches, pastHits)
-        // Not heard now: its page as last heard, with the saved record and match history as they are now.
-        return last.sections.map { (title, rows) ->
-            when (title) {
-                DeviceSections.FLAGGED, DeviceSections.NOT_FLAGGED ->
-                    if (last.hits.isEmpty() && pastHits.isEmpty()) DeviceSections.NOT_FLAGGED to rows
-                    else DeviceSections.WAS_FLAGGED to if (last.hits.isEmpty()) DeviceSections.pastMatchRows(pastMatches, pastHits) else rows
-                DeviceSections.HISTORY -> title to listOf(
-                    "Last heard" to dateFmt.format(Date(last.firstSeen)) + " - " + timeFmt.format(Date(last.at)) +
-                        " · ${last.sightings} packets received"
-                ) + DeviceSections.savedRows(known, pastMatches) + rows
-                else -> title to rows
-            }
-        }
-    }
-
-    /** Sections folded on this page: the raw bytes until asked for. */
-    private val folded = mutableSetOf(DeviceSections.RAW)
-
-    private fun renderSections(sections: List<DeviceSection>) {
-        val container = binding.sections
-        container.removeAllViews()
-        val dp = resources.displayMetrics.density
-        val hits = DeviceRegistry.get(mac)?.hits ?: saved?.hits.orEmpty()
-        val ripple = TypedValue().also { theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true) }.resourceId
-        for ((title, rows) in sections) {
-            val open = title !in folded
-            container.addHairline((8 * dp).toInt())
-            // Folds like the sections in Settings.
-            container.addView(TextView(this).apply {
-                text = (if (open) "▾  " else "▸  ") + title
-                contentDescription = "$title, ${if (open) "expanded" else "collapsed"}"
-                setTypeface(typeface, Typeface.BOLD)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                // The accent of the list's group headers and the Settings sections.
-                setTextColor(com.google.android.material.color.MaterialColors.getColor(context, com.google.android.material.R.attr.colorSecondary, primaryText))
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                minHeight = (48 * dp).toInt()
-                setBackgroundResource(ripple)
-                setOnClickListener {
-                    if (!folded.remove(title)) folded += title
-                    renderSections(sections)
-                }
-            })
-            if (!open) continue
-            if (visual && (title == DeviceSections.FLAGGED || title == DeviceSections.WAS_FLAGGED) && hits.isNotEmpty()) {
-                hits.forEach { container.addView(hitCard(it)) }
-                continue
-            }
-            // Facts as a two-column table; a match's reasons and raw bytes need the whole width.
-            val table = title != DeviceSections.RAW && title != DeviceSections.FLAGGED &&
-                title != DeviceSections.WAS_FLAGGED && title != DeviceSections.NOT_FLAGGED
-            val rowPad = ((if (table) 5 else 3) * dp).toInt()
-            for ((i, row) in rows.withIndex()) {
-                val (k, v) = row
-                // What it matched is the headline of its rows.
-                val match = k.startsWith("●")
-                // A line under every fact ties its value to its label across the gap between the columns.
-                if (i > 0 && (table || match)) container.addHairline()
-                container.addView(LinearLayout(this).apply {
-                    orientation = if (table) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-                    setPadding(0, rowPad, 0, rowPad)
-                    addView(TextView(context).apply {
-                        text = k
-                        if (match) setTypeface(typeface, Typeface.BOLD)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (match) 14f else 12f)
-                        setTextColor(if (match) primaryText else secondaryText)
-                    }, if (table) LinearLayout.LayoutParams(0, -2, 2f).apply { marginEnd = (8 * dp).toInt() } else LinearLayout.LayoutParams(-1, -2))
-                    addView(TextView(context).apply {
-                        text = v
-                        setTextIsSelectable(true)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                        setTextColor(primaryText)
-                        // Grey labels, heavier values: the eye lands on the facts. Weight 500 needs Android 9.
-                        if (title == DeviceSections.RAW) typeface = Typeface.MONOSPACE
-                        else if (android.os.Build.VERSION.SDK_INT >= 28) typeface = Typeface.create(typeface, 500, false)
-                    }, if (table) LinearLayout.LayoutParams(0, -2, 3f) else LinearLayout.LayoutParams(-1, -2))
-                })
-            }
-            if (title.startsWith("Drone")) addDroneButtons(container)
-        }
-        val tagged = pastMatches.firstOrNull { it.latitude != null }
-        if (tagged != null) {
-            container.addView(mapButton("Show last logged location on map", tagged.latitude!!, tagged.longitude!!, "Logged match"))
-        }
-    }
-
-    private fun LinearLayout.addHairline(marginTop: Int = 0) = addView(View(context).apply {
-        setBackgroundColor(com.google.android.material.color.MaterialColors.getColor(context, com.google.android.material.R.attr.colorOnSurface, 0xFF888888.toInt()))
-        alpha = 0.12f
-    }, LinearLayout.LayoutParams(-1, resources.displayMetrics.density.toInt().coerceAtLeast(1)).apply { topMargin = marginTop })
-
-    /** Visual style: one card per match, with its confidence as a bar and what it rests on as chips. */
-    private fun hitCard(h: com.rfsentinel.app.detect.Hit): View {
-        val dp = resources.displayMetrics.density
-        val color = ThemeManager.ink(this, if (h.tier == Tier.WEAK) 0xFFB26A00.toInt() else h.category.colorArgb)
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = VisualMode.card(this@DeviceDetailActivity, color, 0x18, 0x77, 14f)
-            val p = (12 * dp).toInt(); setPadding(p, p, p, p)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = (4 * dp).toInt(); bottomMargin = (4 * dp).toInt() }
-            addView(LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL; gravity = android.view.Gravity.CENTER_VERTICAL
-                addView(TextView(context).apply {
-                    text = h.label; setTypeface(typeface, Typeface.BOLD); setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                }, LinearLayout.LayoutParams(0, -2, 1f))
-                addView(TextView(context).apply {
-                    text = "${h.confidence}%"; setTypeface(typeface, Typeface.BOLD); setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f); setTextColor(color)
-                })
-            })
-            addView(LevelBarView(context).apply { set(h.confidence / 100f, color) },
-                LinearLayout.LayoutParams(-1, (6 * dp).toInt()).apply { topMargin = (6 * dp).toInt(); bottomMargin = (8 * dp).toInt() })
-            addView(com.google.android.material.chip.ChipGroup(context).apply {
-                chipSpacingVertical = (4 * dp).toInt()
-                addView(VisualMode.chip(context, "${h.category.title} · ${h.tier.label}", color))
-                evidenceKinds(h.evidence).forEach { addView(VisualMode.chip(context, it, ChipStyle.accent(context).first)) }
-            })
-            addView(TextView(context).apply {
-                text = h.evidence; setTextIsSelectable(true); setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                setPadding(0, (8 * dp).toInt(), 0, 0)
-            })
-            addView(TextView(context).apply {
-                text = "Source: ${h.source}"; setTextIsSelectable(true); setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f); alpha = 0.7f
-                setPadding(0, (4 * dp).toInt(), 0, 0)
-            })
-        }
-    }
-
-    /** What a match's evidence rests on, as short chip labels. */
-    private fun evidenceKinds(evidence: String): List<String> {
-        val e = evidence.lowercase()
-        return buildList {
-            if ("service uuid" in e || "uuid" in e) add("Service UUID")
-            if ("company id" in e || "manufacturer data" in e) add("Company ID")
-            if ("payload" in e || "tag" in e) add("Payload")
-            if ("name" in e) add("Name")
-            if ("oui" in e || "address prefix" in e || "mac prefix" in e || "registrant" in e) add("Address prefix")
-            if ("probe" in e || "fingerprint" in e) add("Probe")
-            if ("remote id" in e) add("Remote ID")
-            if ("following" in e || "moving with you" in e || "with you" in e) add("Follows you")
-            if ("corroborated" in e) add("Corroborated")
-            if ("ssid" in e || "network" in e) add("WiFi")
-        }.distinct()
-    }
-
-    private fun addDroneButtons(container: LinearLayout) {
-        val r = DeviceRegistry.get(mac)?.remoteId
-        if (r == null) {
-            // Not heard now: where it and its operator were when last heard.
-            val last = saved ?: return
-            last.drone?.let { (lat, lon) -> container.addView(mapButton("Drone on map", lat, lon, "Drone ${last.uasId ?: ""}")) }
-            last.operator?.let { (lat, lon) -> container.addView(mapButton("Operator / takeoff on map", lat, lon, "Drone operator")) }
-            return
-        }
-        if (r.hasPosition) container.addView(mapButton("Drone on map", r.latitude!!, r.longitude!!, "Drone ${r.uasId ?: ""}"))
-        if (r.hasOperatorPosition) container.addView(mapButton("Operator / takeoff on map", r.operatorLatitude!!, r.operatorLongitude!!, "Drone operator"))
-    }
-
-    /** Hands the point to the user's own maps app. */
-    private fun mapButton(label: String, lat: Double, lon: Double, pinName: String) =
-        MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-            text = label
-            setOnClickListener {
-                val uri = Uri.parse(String.format(Locale.US, "geo:%.7f,%.7f?q=%.7f,%.7f(%s)", lat, lon, lat, lon, Uri.encode(pinName)))
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, uri))
-                } catch (e: Exception) {
-                    Toast.makeText(this@DeviceDetailActivity, "No maps app installed", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-    /** Your own name for the device, shown in place of the name it broadcasts. */
-    private fun rename() {
-        val s = DeviceRegistry.get(mac)
-        val heardAs = s?.best?.label ?: s?.name ?: known?.name ?: s?.deviceType ?: knownType
-        ask("Name this device", DeviceNames.of(mac).orEmpty(), heardAs ?: "Name", multiLine = false,
-            clear = DeviceNames.of(mac)?.let { "Use its own name" }) { text ->
-            lifecycleScope.launch {
-                DeviceNames.set(this@DeviceDetailActivity, mac, text, s?.name ?: known?.name, s?.vendor ?: known?.vendor, s?.deviceType,
-                    DeviceRegistry.fingerprintOf(mac))
-                known = AppDatabase.getInstance(this@DeviceDetailActivity).knownDeviceDao().get(mac)
-                refresh()
-            }
-        }
-    }
-
-    /** Your own note on the device: kept with its history, searchable there. */
-    private fun editNote() {
-        val s = DeviceRegistry.get(mac)
-        val old = known?.note.orEmpty()
-        ask(if (old.isBlank()) "Add a note" else "Edit note", old, "Where you saw it, what it is…", multiLine = true,
-            clear = old.takeIf { it.isNotBlank() }?.let { "Delete note" }) { text ->
-            lifecycleScope.launch {
-                DeviceNames.setNote(this@DeviceDetailActivity, mac, text, s?.name ?: known?.name, s?.vendor ?: known?.vendor, s?.deviceType)
-                known = AppDatabase.getInstance(this@DeviceDetailActivity).knownDeviceDao().get(mac)
-                refresh()
-            }
-        }
-    }
-
-    /** A text box with Save, Cancel and (when there is something to clear) [clear]; [done] gets the text, blank when cleared. */
-    private fun ask(title: String, value: String, hint: String, multiLine: Boolean, clear: String?, done: (String) -> Unit) {
-        val dp = resources.displayMetrics.density
-        val input = android.widget.EditText(this).apply {
-            setText(value); this.hint = hint
-            if (multiLine) { isSingleLine = false; minLines = 2; maxLines = 6 } else { isSingleLine = true; setSelectAllOnFocus(true) }
-            setSelection(text.length)
-        }
-        val box = android.widget.FrameLayout(this).apply {
-            val side = (20 * dp).toInt(); setPadding(side, (8 * dp).toInt(), side, 0); addView(input)
-        }
-        MaterialAlertDialogBuilder(this)
-            .setTitle(title)
-            .setView(box)
-            .setPositiveButton("Save") { _, _ -> done(input.text.toString()) }
-            .setNegativeButton("Cancel", null)
-            .apply { if (clear != null) setNeutralButton(clear) { _, _ -> done("") } }
-            .show()
-            .window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
-        input.requestFocus()
-    }
-
-    private fun ago(ms: Long) = DeviceRows.ago(ms / 1000)
-
-    // ---- Actions --------------------------------------------------------------
-
-    private fun onWatchlistAction() {
-        DeviceActions.watchlistMenu(this, mac, DeviceRegistry.get(mac)?.name ?: known?.name,
-            DeviceRegistry.get(mac)?.advert?.isWifi == true) { refresh() }
-    }
-
-    private fun share() {
-        val s = DeviceRegistry.get(mac)
-        if (s?.advert != null && s.best == null) {
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Share")
-                .setItems(arrayOf("Full device report", "Report unknown device (signature only)")) { _, which ->
-                    if (which == 0) shareFull(s) else DeviceActions.reportUnknown(this, mac)
-                }
-                .show()
-            return
-        }
-        shareFull(s)
-    }
-
-    private fun shareFull(s: DeviceRegistry.Snapshot?) {
-        val text = buildString {
-            appendLine("RF Sentinel device report")
-            appendLine(binding.titleText.text)
-            appendLine(binding.subtitleText.text)
-            buildSections(s).forEach { (title, rows) ->
-                appendLine()
-                appendLine("== $title ==")
-                rows.forEach { (k, v) -> appendLine("$k: $v") }
-            }
-        }
-        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, text)
-        }, "Share device report"))
-    }
-
-    // ---- Radio transmissions (logged as "RADIO 154.4300 MHz") -----------------------
-
-    /** The frequency of a radio transmission's page, null for a Wi-Fi / Bluetooth device. */
-    private var radioHz: Long? = null
-
-    /** Locate for a radio: the waterfall zoomed in on its frequency, live, to walk towards the strongest trace. */
-    private fun locateRadio() {
-        val hz = radioHz ?: return
-        if (!com.rfsentinel.app.sdr.SdrRadio.running) {
-            Toast.makeText(this, "Plug in an RTL-SDR or HackRF and start scanning to follow this frequency", Toast.LENGTH_LONG).show()
-            return
-        }
-        startActivity(Intent(this, WaterfallActivity::class.java).putExtra(WaterfallActivity.EXTRA_TUNE_HZ, hz))
-    }
-
-    /** The watched-frequency line for [hz] (Settings > RTL-SDR radio > Watch these frequencies), if any. */
-    private fun watchedTarget(hz: Long): String? = Prefs.radioTargets(this).lines().firstOrNull { line ->
-        com.rfsentinel.app.sdr.RadioSettings.targets(line).firstOrNull()?.let { kotlin.math.abs(it.freqHz - hz) < RADIO_SAME_HZ } == true
-    }
-
-    /** Adds the frequency to the watched ones (always reported when active, whatever the sensitivity), or takes it off. */
-    private fun toggleWatchedFrequency() {
-        val hz = radioHz ?: return
-        val before = Prefs.radioTargets(this)
-        val line = watchedTarget(hz)
-        val after = if (line != null) before.lines().filterNot { it == line }.joinToString("\n")
-        else {
-            val name = com.rfsentinel.app.sdr.FreqNames.lookup(hz, Prefs.radioMatchKhz(this) * 1000L)?.name ?: DeviceNames.of(mac)
-            val add = String.format(java.util.Locale.US, "%.4f", hz / 1e6) + (name?.let { " $it" } ?: "")
-            before.trimEnd().let { if (it.isEmpty()) add else "$it\n$add" }
-        }
-        applyRadioTargets(after)
-        com.rfsentinel.app.util.Undo.show(this,
-            if (line != null) "No longer watching this frequency" else "Watching this frequency: always reported when active") {
-            applyRadioTargets(before)
-        }
-    }
-
-    private fun applyRadioTargets(text: String) {
-        Prefs.setRadioTargets(this, text)
-        // A running SDR picks it up at once (the scanner reads the settings again only on its next refresh).
-        if (com.rfsentinel.app.sdr.SdrRadio.running) com.rfsentinel.app.sdr.SdrRadio.config = com.rfsentinel.app.sdr.RadioSettings.config(this)
-        refresh()
-    }
-
-    // ---- Locate (Geiger-counter beeps) ------------------------------------------
-
-    // Locate runs in LiveRead, so it keeps going while you look at the map (its live read card shows there).
-    private fun locatingThis() = LiveRead.locating == mac
-
-    private fun toggleLocate() {
-        if (locatingThis()) stopLocate() else startLocate()
-    }
-
-    private var sweepGuide: SweepGuide? = null
-
-    private fun startLocate() {
-        LiveRead.startLocate(this, mac)
-        binding.locateButton.text = "Stop"
-        // With a compass: the chest sweep guide, for its direction. Without one only the beeps can lead you.
-        if (Compass(this).available) sweepGuide = SweepGuide(this).also { it.show() }
-        else Toast.makeText(this, "Walk around: beeps speed up as the signal gets stronger", Toast.LENGTH_LONG).show()
+    override fun onStop() {
+        mapEngine?.onStop()
+        super.onStop()
     }
 
     override fun onDestroy() {
-        sweepGuide?.dismiss()
+        mapEngine?.onDestroy()
         super.onDestroy()
     }
 
-    private fun stopLocate() {
-        sweepGuide?.dismiss(); sweepGuide = null
-        if (locatingThis()) LiveRead.stopLocate()
-        if (::binding.isInitialized) binding.locateButton.text = "Locate"
+    private fun createPencilDrawable(): Drawable = object : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 2.1f * density
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            val path = Path().apply {
+                // Classic angled edit pencil icon (bottom-left tip to top-right eraser)
+                moveTo(w * 0.26f, h * 0.74f)
+                lineTo(w * 0.30f, h * 0.58f)
+                lineTo(w * 0.64f, h * 0.24f)
+                lineTo(w * 0.76f, h * 0.36f)
+                lineTo(w * 0.42f, h * 0.70f)
+                close()
+                // Ferrule collar line near eraser
+                moveTo(w * 0.57f, h * 0.31f)
+                lineTo(w * 0.69f, h * 0.43f)
+            }
+            canvas.drawPath(path, paint)
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
+    private fun createCheckmarkDrawable(): Drawable = object : Drawable() {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 2.6f * density
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            canvas.drawLine(w * 0.26f, h * 0.52f, w * 0.44f, h * 0.70f, paint)
+            canvas.drawLine(w * 0.44f, h * 0.70f, w * 0.75f, h * 0.32f, paint)
+        }
+
+        override fun setAlpha(alpha: Int) { paint.alpha = alpha }
+        override fun setColorFilter(colorFilter: ColorFilter?) { paint.colorFilter = colorFilter }
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
     }
 }

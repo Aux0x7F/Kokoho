@@ -83,6 +83,7 @@ class P25Activity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = logScreen("P25 talkgroups", adapter)
+        binding.root.setBackgroundColor(com.rfsentinel.app.kokoho.KokohoPostureEngine.currentPostureColorArgb(this))
         binding.searchInput.doAfterTextChanged { refresh() }
         binding.root.addView(header, 2)
         refreshWhileStarted(1_000) { refresh() }
