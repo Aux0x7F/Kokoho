@@ -1,1 +1,1 @@
-Passive scanner for body cams, plate cameras, trackers, drones and fake cells
+Offline-first RF, P25, OUI, and ADS-B community situational awareness for Android

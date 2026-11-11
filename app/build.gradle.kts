@@ -17,17 +17,6 @@ val keystoreProps = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
-// Mapbox public token (Settings > Map > Map provider) from local.properties (git-ignored), never the repo.
-// Without it the Mapbox choice is unavailable and the map stays on OpenFreeMap.
-val mapboxToken: String = Properties().run {
-    val f = rootProject.file("local.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
-    getProperty("MAPBOX_ACCESS_TOKEN", "").trim()
-}
-
-// True for a FOSS-only build (see settings.gradle.kts): no full flavor, no Mapbox SDK, no Mapbox server.
-val fossOnly = (gradle as ExtensionAware).extra["fossOnly"] as Boolean
-
 // APKs come out as Kokoho-v<versionName>-<buildType>.apk
 base.archivesName.set("Kokoho-v$appVersionName")
 
@@ -56,15 +45,9 @@ android {
         }
     }
 
-    // full: everything, with the optional Mapbox map. foss: only free software (no Mapbox SDK), for F-Droid and
-    // anyone who wants it; the map is OpenFreeMap. Same app ID, so either one replaces the other.
+    // FOSS-only build: free software only (MapLibre + OpenFreeMap, zero Google Play Services).
     flavorDimensions += "maps"
     productFlavors {
-        if (!fossOnly) create("full") {
-            dimension = "maps"
-            buildConfigField("String", "MAPBOX_TOKEN", "\"$mapboxToken\"")
-        }
-        // No token in the FOSS build: it has no Mapbox map, and F-Droid's build of it must match ours byte for byte.
         create("foss") {
             dimension = "maps"
             buildConfigField("String", "MAPBOX_TOKEN", "\"\"")
@@ -151,10 +134,6 @@ dependencies {
     // where the phone has it and OpenGL ES everywhere else (the plain build is Vulkan-only and crashes the app on phones
     // without Vulkan, e.g. Android 9 phones with a PowerVR GE8320).
     implementation("org.maplibre.gl:android-sdk-vulkan-opengl:13.6.1")
-    // Optional Mapbox map (Settings > Map > Map provider), full build only; needs MAPBOX_ACCESS_TOKEN in local.properties.
-    if (!fossOnly) "fullImplementation"("com.mapbox.maps:android-ndk27:11.32.0")
-    // Locate's camera view (ARCore: where the phone is, to the centimetre, while it looks around), full build only.
-    if (!fossOnly) "fullImplementation"("com.google.ar:core:1.57.0")
 
     // Android Auto (Car App Library, template-based UI; "projected" = phone-driven Android Auto)
     implementation("androidx.car.app:app:1.7.0")
