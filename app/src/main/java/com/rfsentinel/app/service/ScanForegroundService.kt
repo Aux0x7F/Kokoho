@@ -481,11 +481,17 @@ class ScanForegroundService : Service() {
         com.rfsentinel.app.sdr.SdrRadio.onAircraft = { planes, unlocated -> onlineWatch.localAircraft(planes, unlocated) }
         if (sdrModes.isNotEmpty() || radioOn) {
             // Settings > RTL-SDR radio: bands, excluded ranges, watched frequencies, sensitivity (re-read on every refresh).
-            com.rfsentinel.app.sdr.SdrRadio.config = com.rfsentinel.app.sdr.RadioSettings.config(this)
+            com.rfsentinel.app.kokoho.KokohoSignatures.ensureLoaded(this)
+            val baseCfg = com.rfsentinel.app.sdr.RadioSettings.config(this)
+            val kokohoTargets = com.rfsentinel.app.kokoho.KokohoSignatures.watchedTargetsForEnabled(this)
+            com.rfsentinel.app.sdr.SdrRadio.config = baseCfg.copy(
+                targets = (baseCfg.targets + kokohoTargets).distinctBy { it.freqHz }
+            )
             com.rfsentinel.app.sdr.FreqNames.load(this)
             com.rfsentinel.app.sdr.SdrRadio.start(this) { e -> pipeline.post { onRadio(e) } }
         }
         else com.rfsentinel.app.sdr.SdrRadio.stop(this)
+        com.rfsentinel.app.kokoho.KokohoHubClient.start(this)
         // An OUI-SPY board paired over Bluetooth (App-Controlled firmware).
         Prefs.ouiSpyBoard(this)?.let { addr ->
             // On the main thread, like every other start / stop of the phone's scan.
@@ -858,6 +864,26 @@ class ScanForegroundService : Service() {
         }
 
         if (via == null) remoteId?.let { info -> if (loc != null) maybeAlertDroneOverhead(a, info, loc, now) }
+        if (via == null && loc != null && !WhitelistCache.contains(mac)) {
+            val ouiMatch = com.rfsentinel.app.kokoho.KokohoSignatures.matchOuiOrSsid(mac, a.name, c.vendor)
+            if (ouiMatch != null && ouiMatch.first in com.rfsentinel.app.kokoho.KokohoSignatures.getEnabledAgencies(this)) {
+                val cleanHex = mac.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
+                val primaryFacet = if (!a.randomBle && cleanHex.length >= 12) "hw:mac:$cleanHex" else "hw:oui:${cleanHex.take(6)}"
+                val extraFacets = if (cleanHex.length >= 6) listOf("hw:oui:${cleanHex.take(6)}") else emptyList()
+                com.rfsentinel.app.kokoho.KokohoHubClient.publishSensorReportIfEnabled(
+                    context = this,
+                    lat = loc.latitude,
+                    lon = loc.longitude,
+                    snrDb = (a.rssi + 95).coerceAtLeast(3).toDouble(),
+                    modality = "WIFI_BLE_OUI",
+                    primaryFacet = primaryFacet,
+                    additionalFacets = extraFacets,
+                    agency = ouiMatch.first,
+                    label = ouiMatch.second,
+                    propagationClass = "SHORT_RANGE_OUI"
+                )
+            }
+        }
 
         val best = c.hits.firstOrNull() ?: return
         // Ignored trackers (their address changes, so they can't be whitelisted); this is
@@ -1706,8 +1732,32 @@ class ScanForegroundService : Service() {
             e.band.kind.name, e.confidence, e.target?.label, e.repeat, e.tdma, now))
         if (!Prefs.categoryEnabled(this, Category.RADIO)) return
         // Who uses this frequency: a watched frequency's own label, the imported list, or RadioReference.
+        val kokohoFreq = com.rfsentinel.app.kokoho.KokohoSignatures.matchFrequency(e.freqHz)
         val named = com.rfsentinel.app.sdr.FreqNames.lookup(e.freqHz, Prefs.radioMatchKhz(this) * 1000L)
-        val name = e.target?.label ?: named?.name
+        val name = kokohoFreq?.let { "${it.alpha} (${it.description})" } ?: e.target?.label ?: named?.name
+        if (via == null && kokohoFreq != null && kokohoFreq.agencyEnum in com.rfsentinel.app.kokoho.KokohoSignatures.getEnabledAgencies(this)) {
+            (lastLocation ?: lastFix)?.let { fix ->
+                val nacFacet = kokohoFreq.nac ?: "ANY"
+                val propClass = when (kokohoFreq.role.uppercase()) {
+                    "REPEATER" -> "REPEATER_OUTPUT"
+                    "MOBILE_INPUT", "DIRECT_TACTICAL" -> "GROUND_DIRECT"
+                    "AIR_ASSET" -> "AIR_TO_GROUND"
+                    else -> "GROUND_DIRECT"
+                }
+                com.rfsentinel.app.kokoho.KokohoHubClient.publishSensorReportIfEnabled(
+                    context = this,
+                    lat = fix.latitude,
+                    lon = fix.longitude,
+                    snrDb = e.snrDb.toDouble(),
+                    modality = "RF_P25",
+                    primaryFacet = "rf:chan:${e.freqHz}:$nacFacet",
+                    additionalFacets = emptyList(),
+                    agency = kokohoFreq.agencyEnum,
+                    label = "${kokohoFreq.alpha} — ${kokohoFreq.description}",
+                    propagationClass = propClass
+                )
+            }
+        }
         if (named == null && com.rfsentinel.app.sdr.RadioReference.ready(this)) (lastLocation ?: lastFix)?.let { l ->
             serviceScope.launch { com.rfsentinel.app.sdr.RadioReference.refreshAround(this@ScanForegroundService, l.latitude, l.longitude) }
         }
@@ -2134,6 +2184,7 @@ class ScanForegroundService : Service() {
         com.rfsentinel.app.esp.OuiSpyBle.onLiveChanged = null // its stop must not restart the phone's scan here
         com.rfsentinel.app.esp.OuiSpyBle.stop()
         com.rfsentinel.app.esp.MeshBle.stop()
+        com.rfsentinel.app.kokoho.KokohoHubClient.stop(this)
         stopLink()
         // External hardware is gone with the scan: its "heard by" marks (External filter, badges) go too.
         com.rfsentinel.app.esp.HeardBy.esp.clear()

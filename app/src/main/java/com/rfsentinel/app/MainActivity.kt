@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var adapter: DeviceAdapter
     private lateinit var panes: com.rfsentinel.app.ui.MainPanes
+    private lateinit var kokohoViews: com.rfsentinel.app.kokoho.KokohoViews
     private var filter = com.rfsentinel.app.ui.DeviceFilter.ALL
     private val filterChips = HashMap<com.rfsentinel.app.ui.DeviceFilter, com.google.android.material.chip.Chip>()
     private var query = ""
@@ -260,6 +261,21 @@ class MainActivity : AppCompatActivity() {
         filter = com.rfsentinel.app.ui.DeviceFilter.parse(Prefs.mapFilter(this))
         setupFilterChips()
         panes.setFilter(filter)
+        kokohoViews = com.rfsentinel.app.kokoho.KokohoViews(
+            activity = this,
+            binding = binding,
+            onSwitchPanes = { chosen ->
+                if (chosen.isNotEmpty()) {
+                    panes.setPanes(chosen)
+                    applyViewMode()
+                    render()
+                }
+            },
+            onFilterChanged = {
+                render()
+                kokohoViews.updatePosture()
+            }
+        )
 
         // Debug builds only: made-up devices for screenshots (see DemoData).
         if (BuildConfig.DEBUG && intent.getBooleanExtra("demo", false)) {
@@ -370,6 +386,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyViewMode() {
         panes.apply()
+        if (::kokohoViews.isInitialized &&
+            kokohoViews.currentTab != com.rfsentinel.app.kokoho.KokohoViews.Tab.MAP &&
+            kokohoViews.currentTab != com.rfsentinel.app.kokoho.KokohoViews.Tab.LIST
+        ) {
+            binding.mapPane.visibility = View.GONE
+            binding.radarPane.visibility = View.GONE
+            binding.listFrame.visibility = View.GONE
+            return
+        }
         // The "nothing heard" note sits over the list, or over the radar when there is no list.
         val home = if (!panes.listShown && panes.radarShown) binding.radarPane else binding.listFrame
         if (binding.emptyState.parent !== home) {
@@ -761,6 +786,7 @@ class MainActivity : AppCompatActivity() {
         flaggedCount = all.count { com.rfsentinel.app.ui.DeviceFilter.FLAGGED.matches(it) } + aircraft.count { it.hit != null }
         updateBanner(flagged, threshold)
         updateStatus()
+        if (::kokohoViews.isInitialized) kokohoViews.updatePosture(now)
 
         // Live counts on the chips ("Trackers 2"); empty filters stay unlabelled.
         val visualChips = com.rfsentinel.app.ui.VisualMode.on(this, com.rfsentinel.app.ui.VisualMode.Screen.STATUS)

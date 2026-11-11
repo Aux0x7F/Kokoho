@@ -1,7 +1,7 @@
 <resources>
-    <string name="app_name">RF Sentinel</string>
-    <string name="tile_label">RF Sentinel</string>
-    <string name="tile_scanning">Scanning</string>
+    <string name="app_name">Kokoho</string>
+    <string name="tile_label">Kokoho</string>
+    <string name="tile_scanning">Monitoring</string>
     <string name="tile_idle">Idle</string>
-    <string name="widget_description">Scanner status with a start / stop button</string>
+    <string name="widget_description">Kokoho posture status with a start / stop button</string>
 </resources>

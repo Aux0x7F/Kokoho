@@ -28,8 +28,8 @@ val mapboxToken: String = Properties().run {
 // True for a FOSS-only build (see settings.gradle.kts): no full flavor, no Mapbox SDK, no Mapbox server.
 val fossOnly = (gradle as ExtensionAware).extra["fossOnly"] as Boolean
 
-// APKs come out as RFSentinel-v<versionName>-<buildType>.apk
-base.archivesName.set("RFSentinel-v$appVersionName")
+// APKs come out as Kokoho-v<versionName>-<buildType>.apk
+base.archivesName.set("Kokoho-v$appVersionName")
 
 android {
     namespace = "com.rfsentinel.app"
