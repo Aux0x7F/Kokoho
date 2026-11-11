@@ -6,7 +6,7 @@ import com.google.gson.JsonObject
 import java.util.Locale
 
 /**
- * A shareable "please add this device" report for devices RF Sentinel doesn't
+ * A shareable "please add this device" report for devices Kokoho doesn't
  * recognise yet. It keeps only what a signature is built from (vendor prefix,
  * name pattern, service UUIDs, manufacturer IDs, WiFi security / vendor IEs)
  * and leaves out everything that could identify the device or you: no full
@@ -15,7 +15,7 @@ import java.util.Locale
  */
 object SignatureReport {
 
-    const val ISSUE_URL = "https://github.com/CIS-C0/RFSentinel/issues/new"
+    const val ISSUE_URL = "https://github.com/Aux0x7F/Kokoho/issues/new"
 
     /** Payload bytes kept per manufacturer / service-data entry (enough for a type byte, not a serial). */
     private const val HEADER_BYTES = 2

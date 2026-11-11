@@ -45,10 +45,10 @@ import kotlin.math.abs
 
 /**
  * A small floating map drawn over other apps (Google Maps, Waze...) while scanning:
- * centred on you, with the same device dots as RF Sentinel's map (flagged ones larger,
+ * centred on you, with the same device dots as Kokoho's map (flagged ones larger,
  * on top), a border in the threat colour and the flagged count. Drag to move, tap to
  * open the full map, ✕ to turn it off. Needs "Display over other apps"; hidden while
- * RF Sentinel itself is on screen. While it shows, location runs in precise mode, like
+ * Kokoho itself is on screen. While it shows, location runs in precise mode, like
  * the full map. Always OpenFreeMap (MapLibre), whichever map Settings picks for the app: a window
  * this small has no room for another provider's logo and info button.
  */
@@ -295,7 +295,7 @@ object FloatingMap {
         }
         val cover = View(context).apply {
             setOnTouchListener(onTouch)
-            contentDescription = "RF Sentinel map: tap to open, drag to move, pinch to zoom"
+            contentDescription = "Kokoho map: tap to open, drag to move, pinch to zoom"
         }
         frame.addView(cover, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         close.bringToFront()

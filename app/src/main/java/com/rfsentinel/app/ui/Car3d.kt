@@ -407,7 +407,7 @@ internal object Car3d {
             }
             while (bin.size() % 4 != 0) bin.write(0)
             val json = JSONObject()
-                .put("asset", JSONObject().put("version", "2.0").put("generator", "RF Sentinel"))
+                .put("asset", JSONObject().put("version", "2.0").put("generator", "Kokoho"))
                 .put("scene", 0)
                 .put("scenes", JSONArray().put(JSONObject().put("nodes", JSONArray().put(0))))
                 .put("nodes", JSONArray().put(JSONObject().put("mesh", 0)))

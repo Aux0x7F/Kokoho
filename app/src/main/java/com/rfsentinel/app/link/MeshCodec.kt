@@ -20,8 +20,8 @@ import javax.crypto.spec.SecretKeySpec
  * older versions drop) starts the same way, then has one record per aircraft instead.
  */
 object MeshCodec {
-    /** The Meshtastic channel RF Sentinel adds to the node; its key comes from the group key. */
-    const val CHANNEL_NAME = "RFSentinel"
+    /** The Meshtastic channel Kokoho adds to the node; its key comes from the group key. */
+    const val CHANNEL_NAME = "Kokoho"
     private const val MAGIC = 0x52
     private const val VERSION = 1
     private const val AIRCRAFT = 2
@@ -36,7 +36,7 @@ object MeshCodec {
     private const val TYPE_MAX = 4
     private const val NO_POS = Int.MIN_VALUE
 
-    private val SALT = "RF Sentinel mesh".toByteArray()
+    private val SALT = "Kokoho mesh".toByteArray()
     fun messageKey(groupKey: ByteArray) = LinkCrypto.hkdf(groupKey, SALT, "message key")
     fun channelKey(groupKey: ByteArray) = LinkCrypto.hkdf(groupKey, SALT, "channel key")
     private fun groupTag(key: ByteArray) = LinkCrypto.hmac(key, "group".toByteArray()).copyOf(4)

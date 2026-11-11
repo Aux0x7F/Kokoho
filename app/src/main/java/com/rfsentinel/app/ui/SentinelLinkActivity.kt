@@ -75,7 +75,7 @@ class SentinelLinkActivity : AppCompatActivity() {
         val intro = TextView(this).apply {
             textSize = 14f
             setLineSpacing(0f, 1.2f)
-            text = "Link RF Sentinel phones near each other over Bluetooth: each one shows the same devices on its list, " +
+            text = "Link Kokoho phones near each other over Bluetooth: each one shows the same devices on its list, " +
                 "radar and map - with what any phone's external hardware hears - whichever phone heard them first. " +
                 "Linked phones share while they scan. A Meshtastic node and an internet relay below reach Sentinels " +
                 "further away, each on its own switch, with Bluetooth sharing on or off."
@@ -175,11 +175,11 @@ class SentinelLinkActivity : AppCompatActivity() {
             textSize = 14f
             setLineSpacing(0f, 1.2f)
             text = "Reach Sentinels kilometres away through a Meshtastic node: a LoRa board with the official firmware, " +
-                "paired with this phone over Bluetooth. RF Sentinel adds a private channel named ${com.rfsentinel.app.link.MeshCodec.CHANNEL_NAME} " +
+                "paired with this phone over Bluetooth. Kokoho adds a private channel named ${com.rfsentinel.app.link.MeshCodec.CHANNEL_NAME} " +
                 "to the node, made from the group's key, so only your group reads it. It goes in an empty slot (1 to 7) and " +
-                "RF Sentinel only sends on it: never on the primary channel 0 or a channel you set up, and never to MQTT. " +
+                "Kokoho only sends on it: never on the primary channel 0 or a channel you set up, and never to MQTT. " +
                 "Others only see encrypted packets. LoRa is slow: watchlist matches go " +
-                "first, then flagged devices, then every other device, a few per packet. While RF Sentinel uses the node, " +
+                "first, then flagged devices, then every other device, a few per packet. While Kokoho uses the node, " +
                 "the Meshtastic app on this phone can't."
         }
         meshSwitch = SwitchMaterial(this).apply {
@@ -455,7 +455,7 @@ class SentinelLinkActivity : AppCompatActivity() {
             !ScanForegroundService.isRunning -> "Starts while scanning"
             else -> MeshNode.status.ifBlank { "Starting…" } +
                 (MeshNode.lastSent.takeIf { it > 0 }?.let { " · sent " + DateUtils.getRelativeTimeSpanString(it, System.currentTimeMillis(), DateUtils.SECOND_IN_MILLIS) } ?: "") +
-                // Heard: an RF Sentinel packet came in on the channel (sent but never heard: the other node isn't reached).
+                // Heard: a Kokoho packet came in on the channel (sent but never heard: the other node isn't reached).
                 (MeshNode.lastHeard.takeIf { it > 0 }?.let { " · heard " + DateUtils.getRelativeTimeSpanString(it, System.currentTimeMillis(), DateUtils.SECOND_IN_MILLIS) } ?: if (!MeshNode.canSend) "" else if (MeshNode.lastAnyHeard > 0) " · nothing from the group yet (the node hears other traffic)" else " · nothing heard yet") +
                 (PhoneLink.meshForeign.takeIf { it > 0 }?.let { " · $it from another group or version" } ?: "") +
                 (PhoneLink.meshStale.takeIf { it > 0 }?.let { " · $it too old (check the phones' clocks)" } ?: "")

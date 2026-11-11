@@ -228,7 +228,7 @@ object AlertPlayer {
 
     /** The Settings "Test voice" button: speaks right away with the chosen voice and speed. */
     fun testVoice(context: Context, short: Boolean = Prefs.shortVoice(context)) {
-        Voice.test(context.applicationContext, if (short) "Body cam" else "RF Sentinel voice alerts. Axon body camera nearby.",
+        Voice.test(context.applicationContext, if (short) "Body cam" else "Kokoho voice alerts. Axon body camera nearby.",
             alertSpeech(context))
     }
 

@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
             "Location (precise) and Nearby devices" else "Location (precise)"
         com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
             .setTitle("Permissions needed to scan")
-            .setMessage("RF Sentinel needs $what to scan, and Android won't ask again. " +
+            .setMessage("Kokoho needs $what to scan, and Android won't ask again. " +
                 "Open the app's settings, then Permissions, and allow them.")
             .setPositiveButton("Open app settings") { _, _ ->
                 runCatching {
@@ -1416,7 +1416,7 @@ class MainActivity : AppCompatActivity() {
         try {
             ScanForegroundService.start(this)
         } catch (e: Exception) {
-            android.util.Log.w("RFSentinel", "Scan didn't start", e)
+            android.util.Log.w("Kokoho", "Scan didn't start", e)
             binding.statusText.text = "Couldn't start scanning. Check that Bluetooth and Location are on, then tap Start again."
             return
         }

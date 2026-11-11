@@ -62,7 +62,7 @@ class DeviceHistoryImportTest {
 
     @Test
     fun theEverythingExportAndTheCsvAreReadToo() {
-        val everything = """{"exportedBy":"RF Sentinel 2.20.0","sessionDevices":[{"mac":"11:11:11:11:11:11"}],"deviceHistory":[
+        val everything = """{"exportedBy":"Kokoho 2.20.0","sessionDevices":[{"mac":"11:11:11:11:11:11"}],"deviceHistory":[
             {"mac":"DE:AD:BE:EF:00:01","name":"Cam","vendor":"V","deviceType":"Camera","firstSeen":"2026-03-01T10:00:00Z","lastSeen":"2026-03-02T10:00:00Z","sessions":2,"detectCount":3,"favorite":false,"note":"a, \"quoted\" note"}],"matchLog":[]}"""
         assertEquals(1, run(everything).added)
         assertNull("the live session list is not history", runBlocking { db.knownDeviceDao().get("11:11:11:11:11:11") })

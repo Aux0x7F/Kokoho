@@ -18,7 +18,7 @@ import java.text.DateFormat
 import java.util.Date
 
 /**
- * Android Auto (car API 7+): RF Sentinel's own map, which the driver can drag
+ * Android Auto (car API 7+): Kokoho's own map, which the driver can drag
  * and zoom freely - every device heard around you in the list / radar colours,
  * the known cameras and your position, nothing to select. Beside it: a summary,
  * or turn-by-turn guidance to a destination found in OpenStreetMap.

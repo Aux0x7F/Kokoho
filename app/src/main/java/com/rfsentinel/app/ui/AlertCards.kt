@@ -21,7 +21,7 @@ import com.rfsentinel.app.util.Prefs
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * Alerts as they come in, for screens that want to show them (the full screen map): every alert RF Sentinel
+ * Alerts as they come in, for screens that want to show them (the full screen map): every alert Kokoho
  * raises - a flagged device, a known camera, a Waze report, a cell warning - is published here once.
  */
 object AlertCards {

@@ -262,7 +262,7 @@ class ThemeMakerActivity : AppCompatActivity() {
             }
         })
         page.addView(EditText(this).apply {
-            hint = "Title (leave empty for \"RF Sentinel\")"; setText(t.title.orEmpty()); maxLines = 1
+            hint = "Title (leave empty for \"Kokoho\")"; setText(t.title.orEmpty()); maxLines = 1
             filters = arrayOf(android.text.InputFilter.LengthFilter(40))
             doAfterTextChanged { t = t.copy(title = it?.toString()?.takeIf { s -> s.isNotBlank() }); updatePreview() }
         })
@@ -396,7 +396,7 @@ class ThemeMakerActivity : AppCompatActivity() {
         bannerBitmap()?.let { b ->
             root.addView(ImageView(ctx).apply { setImageBitmap(b); scaleType = ImageView.ScaleType.CENTER_CROP }, LinearLayout.LayoutParams(-1, px(40f)).apply { topMargin = px(4f) })
         }
-        root.addView(text(t.title?.takeIf { it.isNotBlank() } ?: "RF Sentinel", 17f, bold = true, c = primary).apply { setPadding(0, px(4f), 0, px(4f)) })
+        root.addView(text(t.title?.takeIf { it.isNotBlank() } ?: "Kokoho", 17f, bold = true, c = primary).apply { setPadding(0, px(4f), 0, px(4f)) })
         val card = MaterialCardView(ctx).apply {
             radius = px(12f).toFloat(); cardElevation = 0f
             setCardBackgroundColor(p["surface_container"] ?: bg); strokeWidth = 0

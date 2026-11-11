@@ -181,7 +181,7 @@ object SdrRadio {
             val r = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, intent: Intent) {
                     when (intent.action) {
-                        // Just plugged in: Android's "Open RF Sentinel?" prompt comes first; ask ourselves only if it didn't help.
+                        // Just plugged in: Android's "Open Kokoho?" prompt comes first; ask ourselves only if it didn't help.
                         UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                             connect(app, ask = false)
                             main.postDelayed({ if (receiver != null) connect(app) }, com.rfsentinel.app.usb.UsbAttachActivity.ATTACH_GRACE_MS)

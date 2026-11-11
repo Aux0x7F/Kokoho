@@ -13,7 +13,7 @@ import kotlin.math.abs
  * Reports from Waze users (police by default, other event types if the user enables them),
  * read either through OpenWeb Ninja's Waze API with the user's own API key, or (opt-in)
  * straight from Waze over the app's own protocol (see [WazeRtFetcher]). Off by default;
- * third-party services RF Sentinel doesn't run or endorse.
+ * third-party services Kokoho doesn't run or endorse.
  * Scored by distance and age: a fresh report next to you is a probable sign, one far away
  * or 40 minutes old only a weak one.
  */

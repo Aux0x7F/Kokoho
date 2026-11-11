@@ -1,21 +1,21 @@
 ---
 name: Bug report
-about: Something isn't working right in RF Sentinel
+about: Something isn't working right in Kokoho
 title: ''
 labels: bug
 assignees: ''
 ---
 
-**Bug report template, please follow the template so we can sort out your issue as quickly as possible.**
+**Please describe the issue in detail so we can investigate and fix it quickly.**
 
-Tell us about your issue in detail, does it re-occur often?
+What happened, and does it re-occur often?
 [REPLACE WITH ISSUE]
 
-Device Information (Android Version, Device Model):
+Device Information (Android Version, Phone Model, Optional SDR/Hardware):
 [REPLACE WITH YOUR DEVICE INFO]
 
-Upload your crash if you're able to (Settings > Lists, tools & about > Export crash log)
-[Paste Crash log here]
+Logs or crash details (if available, from Utility > Logs > Export):
+[Paste log details here]
 
-Screenshot(s) of your in-application screen/device
+Screenshot(s) of your screen/device:
 [Place Screenshot]

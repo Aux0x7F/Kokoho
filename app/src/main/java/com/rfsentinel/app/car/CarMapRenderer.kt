@@ -33,7 +33,7 @@ import org.osmdroid.views.overlay.TilesOverlay
 import kotlin.math.ln
 
 /**
- * Draws RF Sentinel's own OpenStreetMap map on the car screen (Android Auto
+ * Draws Kokoho's own OpenStreetMap map on the car screen (Android Auto
  * "map with content", car API 7+): every device heard around you as a dot in
  * the list / radar colours, the known cameras, your position and, while
  * navigating, the route. The driver drags, flings and pinches it freely;
@@ -85,7 +85,7 @@ class CarMapRenderer(private val carContext: CarContext, private val scope: Coro
         try {
             MapIcons.configureOsm(carContext)
             val vd = carContext.getSystemService(DisplayManager::class.java).createVirtualDisplay(
-                "RFSentinelMap", container.width, container.height, container.dpi, surface,
+                "KokohoMap", container.width, container.height, container.dpi, surface,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
             )
             val p = Presentation(carContext, vd.display)

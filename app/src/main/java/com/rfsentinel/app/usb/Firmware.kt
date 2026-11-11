@@ -113,7 +113,7 @@ object Firmware {
             if (target.isFile) continue
             val c = URL(url(b)).openConnection() as HttpURLConnection
             c.connectTimeout = 15_000; c.readTimeout = 30_000
-            c.setRequestProperty("User-Agent", "RFSentinel")
+            c.setRequestProperty("User-Agent", "Kokoho")
             val bytes = try {
                 if (c.responseCode != 200) throw IOException("kernel.org answered ${c.responseCode} for ${b.name}")
                 c.inputStream.use { input ->

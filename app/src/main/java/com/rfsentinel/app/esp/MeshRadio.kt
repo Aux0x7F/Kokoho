@@ -125,7 +125,7 @@ class MeshCoreLog(private val nowMs: () -> Long = System::currentTimeMillis) {
         private const val PUSH_NEW_ADVERT = 0x8A
         private const val CONTACT_LEN = 148
         /** CMD_APP_START: the command, 7 reserved bytes, the app's name. */
-        val APP_START = byteArrayOf(1, 0, 0, 0, 0, 0, 0, 0) + "RF Sentinel".toByteArray()
+        val APP_START = byteArrayOf(1, 0, 0, 0, 0, 0, 0, 0) + "Kokoho".toByteArray()
         val GET_CONTACTS = byteArrayOf(4)
         fun isSelfInfo(f: ByteArray) = f.size >= 36 && f[0].toInt() == RESP_SELF_INFO
     }

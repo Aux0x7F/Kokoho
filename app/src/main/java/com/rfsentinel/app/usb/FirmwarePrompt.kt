@@ -75,7 +75,7 @@ object FirmwarePrompt {
         MaterialAlertDialogBuilder(activity)
             .setTitle("Download the ${chip.name} firmware?")
             .setMessage("This adapter needs its maker's firmware to run. That firmware isn't free software, so this " +
-                "build of RF Sentinel doesn't include it.\n\nRF Sentinel can download it once (about $kb KB) from the " +
+                "build of Kokoho doesn't include it.\n\nKokoho can download it once (about $kb KB) from the " +
                 "Linux firmware repository at kernel.org, check it against a fixed fingerprint, and keep it on this " +
                 "phone:\n$files\n\nkernel.org sees your IP address, nothing else. The files stay under their maker's " +
                 "redistribution licence.")

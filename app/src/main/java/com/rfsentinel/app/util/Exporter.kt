@@ -335,7 +335,7 @@ object Exporter {
     fun gpx(rows: List<DetectionEntity>): String {
         val sb = StringBuilder()
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-        sb.append("<gpx version=\"1.1\" creator=\"RF Sentinel\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n")
+        sb.append("<gpx version=\"1.1\" creator=\"Kokoho\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n")
         rows.forEach { r ->
             sb.append(String.format(Locale.US, "  <wpt lat=\"%.7f\" lon=\"%.7f\">\n", r.latitude, r.longitude))
             sb.append("    <time>").append(ExportText.iso(r.timestamp)).append("</time>\n")
@@ -351,7 +351,7 @@ object Exporter {
     fun kml(rows: List<DetectionEntity>): String {
         val sb = StringBuilder()
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n")
-        sb.append("  <name>RF Sentinel matches</name>\n")
+        sb.append("  <name>Kokoho matches</name>\n")
         rows.forEach { r ->
             sb.append("  <Placemark>\n")
             sb.append("    <name>").append(x(r.label)).append("</name>\n")

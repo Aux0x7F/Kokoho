@@ -20,7 +20,7 @@ internal object ArSupport {
             .setTitle("Camera view uses Google")
             .setMessage("This runs on Google Play Services for AR (ARCore), which is provided by Google and governed by " +
                 "the Google Privacy Policy. Google may collect usage data from it.\n\n" +
-                "RF Sentinel keeps the camera picture on the phone and saves nothing from it.")
+                "Kokoho keeps the camera picture on the phone and saves nothing from it.")
             .setPositiveButton("Continue") { _, _ -> prefs.edit().putBoolean(NOTICE_SEEN, true).apply(); start(activity) }
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Privacy Policy") { _, _ ->

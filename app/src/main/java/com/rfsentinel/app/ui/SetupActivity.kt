@@ -128,8 +128,8 @@ class SetupActivity : AppCompatActivity() {
     // ---- Pages ----------------------------------------------------------------------
 
     private fun welcome() {
-        header("Welcome to RF Sentinel", "A quick setup - about a minute. You can change everything later in Settings.")
-        para("RF Sentinel listens - passively - to the Bluetooth and WiFi signals devices around you already broadcast, and flags equipment such as body cameras, license-plate cameras, drones, trackers following you and camera glasses.")
+        header("Welcome to Kokoho", "A quick setup - about a minute. You can change everything later in Settings.")
+        para("Kokoho listens - passively - to the Bluetooth and WiFi signals devices around you already broadcast, and flags equipment such as body cameras, license-plate cameras, drones, trackers following you and camera glasses.")
         bullet("It never transmits to, connects to or interferes with any device.")
         val cameras = if (com.rfsentinel.app.BuildConfig.FLAVOR == "foss") "Only once you allow it." else "You can turn this off in Settings."
         bullet("Scans, detections and history stay on this phone.")
@@ -205,7 +205,7 @@ class SetupActivity : AppCompatActivity() {
     }
 
     private fun alerts() {
-        header("Alerts", "How loud should RF Sentinel be when it spots something?")
+        header("Alerts", "How loud should Kokoho be when it spots something?")
         label("Sound an alert for matches that are at least...")
         val group = RadioGroup(this)
         val threshold = Prefs.alertThreshold(this)
@@ -244,7 +244,7 @@ class SetupActivity : AppCompatActivity() {
         switch("Discreet mode - hide details on the lock screen and in notifications", Prefs.discreetMode(this)) {
             Prefs.setDiscreetMode(this, it)
         }
-        label("Screen while RF Sentinel is open")
+        label("Screen while Kokoho is open")
         val screen = RadioGroup(this)
         val mode = Prefs.screenMode(this)
         listOf(
@@ -320,7 +320,7 @@ class SetupActivity : AppCompatActivity() {
                 para("Nearby WiFi devices is off - drones sending their Remote ID over Wi-Fi Aware won't be heard.", small = true)
             button(if (noAlerts && optionalMissing.size == 1) "Allow notifications" else "Allow") { permissionLauncher.launch(optionalMissing.toTypedArray()) }
         }
-        para("Tip: in Android's battery settings, set RF Sentinel to \"Unrestricted\" so scanning keeps running in your pocket.", small = true)
+        para("Tip: in Android's battery settings, set Kokoho to \"Unrestricted\" so scanning keeps running in your pocket.", small = true)
         knownCamerasNearMe()
         check("Start scanning when I tap Finish", startAfter) { startAfter = it }
     }

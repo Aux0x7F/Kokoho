@@ -8,7 +8,7 @@ import java.io.ByteArrayOutputStream
  * official firmware needs nothing added. Unknown fields are skipped, as protobuf readers do.
  */
 object MeshProto {
-    /** Meshtastic's port for apps' own data: RF Sentinel's messages, which other apps leave alone. */
+    /** Meshtastic's port for apps' own data: Kokoho's messages, which other apps leave alone. */
     const val PORT_PRIVATE_APP = 256
     const val PORT_ADMIN_APP = 6
     const val BROADCAST = 0xFFFFFFFFL

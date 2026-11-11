@@ -10,7 +10,7 @@ import java.util.UUID
 /**
  * The Bluetooth protocol of OUI-SPY "App-Controlled" firmware
  * (lukeswitz/oui-spy-unified-blue, src/protocol.h + ble_gatt.cpp), as far as
- * RF Sentinel uses it: switching detection engines on/off and decoding the
+ * Kokoho uses it: switching detection engines on/off and decoding the
  * detection notifications. Pure Kotlin; unit-tested with packets laid out like
  * the firmware's packDetection().
  */
@@ -34,19 +34,19 @@ object OuiSpyBleProtocol {
     /** Survey mode: reports every Wi-Fi network and Bluetooth device the board hears. */
     const val ENGINE_WARDRIVE = 6
 
-    /** Detection engines; RF Sentinel never touches the others (UniPwn, PCAP, Foxhunter). */
+    /** Detection engines; Kokoho never touches the others (UniPwn, PCAP, Foxhunter). */
     val ENGINES = listOf(ENGINE_FLOCK_BLE, ENGINE_FLOCK_WIFI, ENGINE_SKYSPY, ENGINE_DETECTOR)
 
     /** The detection engines by name, for Settings and the status line. */
     val ENGINE_NAMES = linkedMapOf(ENGINE_FLOCK_BLE to "Flock BLE", ENGINE_FLOCK_WIFI to "Flock WiFi",
         ENGINE_SKYSPY to "Sky Spy", ENGINE_DETECTOR to "Detector")
 
-    /** Engines to switch on: [chosen] of [ENGINES]; [relayAll] adds the survey engine so RF Sentinel's own rules see everything. */
+    /** Engines to switch on: [chosen] of [ENGINES]; [relayAll] adds the survey engine so Kokoho's own rules see everything. */
     fun engines(relayAll: Boolean, chosen: List<Int> = ENGINES) = if (relayAll) chosen + ENGINE_WARDRIVE else chosen
 
     fun enable(engine: Int): ByteArray = byteArrayOf(0x01, engine.toByte())
     fun disable(engine: Int): ByteArray = byteArrayOf(0x00, engine.toByte())
-    /** DISABLE_ALL (0x0F): the board goes quiet when RF Sentinel stops scanning. */
+    /** DISABLE_ALL (0x0F): the board goes quiet when Kokoho stops scanning. */
     fun disableAll(): ByteArray = byteArrayOf(0x0F, 0x00)
 
     const val SOURCE = "OUI-SPY board over Bluetooth"
@@ -55,7 +55,7 @@ object OuiSpyBleProtocol {
     fun isSpoolHeader(d: ByteArray) = d.size == 9 && d[0] == 0xFF.toByte()
     fun isSpoolEnd(d: ByteArray) = d.size == 1 && d[0] == 0xFE.toByte()
 
-    /** Decodes one Detection Events notification, or null for frames RF Sentinel doesn't use. */
+    /** Decodes one Detection Events notification, or null for frames Kokoho doesn't use. */
     fun decode(d: ByteArray): EspSighting? {
         if (d.size < 19) return null
         val raw = d[0].toInt() and 0xFF
@@ -79,7 +79,7 @@ object OuiSpyBleProtocol {
     private val AUTH = listOf("[ESS]", "[WEP][ESS]", "[WPA-PSK][ESS]", "[WPA2-PSK][ESS]",
         "[WPA-PSK][WPA2-PSK][ESS]", "[WPA2-EAP][ESS]", "[RSN-SAE][ESS]")
 
-    /** A plain sighting with no verdict: RF Sentinel's own watchlist and rules judge it. */
+    /** A plain sighting with no verdict: Kokoho's own watchlist and rules judge it. */
     private fun survey(d: ByteArray, mac: String, rssi: Int, channel: Int, method: Int): EspSighting? {
         if (d.size < 74) return null
         return when (method) {
@@ -155,7 +155,7 @@ object OuiSpyBleProtocol {
             8 -> Hit(Category.BODY_CAM, "Axon equipment", 75, "Reported by OUI-SPY Detector (Axon signature)", SOURCE)
             0, 1 -> Hit(Category.CUSTOM, "OUI-SPY target" + (desc?.let { ": $it" } ?: ""), 70,
                 "Matched the watchlist set on the OUI-SPY board", SOURCE)
-            else -> null // Flipper, Pwnagotchi, deauth / probe floods: outside RF Sentinel's scope
+            else -> null // Flipper, Pwnagotchi, deauth / probe floods: outside Kokoho's scope
         }
         val wifi = method == 1 || method == 4 || method == 5
         return EspSighting(mac = mac, rssi = rssi, ble = !wifi,

@@ -166,7 +166,7 @@ object DeviceExport {
 
     /** KML of devices that have a GPS position (needs location while scanning). */
     fun sessionKml(devices: List<DeviceRegistry.Snapshot>): String {
-        val sb = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n  <name>RF Sentinel - nearby devices</name>\n")
+        val sb = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n  <name>Kokoho - nearby devices</name>\n")
         devices.filter { it.path.isNotEmpty() }.forEach { s ->
             val p = s.path.last()
             sb.append("  <Placemark>\n    <name>").append(x(s.best?.label ?: s.name ?: s.deviceType)).append("</name>\n")
@@ -245,7 +245,7 @@ object DeviceExport {
     ) {
         val w = gson.newJsonWriter(out)
         w.beginObject()
-        w.name("exportedBy").value("RF Sentinel $appVersion")
+        w.name("exportedBy").value("Kokoho $appVersion")
         w.name("exportedAt").value(iso(System.currentTimeMillis()))
         w.name("sessionDevices").beginArray()
         session.forEach { gson.toJson(sessionItem(it, flags), w) }

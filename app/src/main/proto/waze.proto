@@ -1,6 +1,6 @@
 // Vendored from highway-radar-sabre-plus (MIT, (c) 2026 highway-radar-sabre-plus
 // contributors) — see app/src/main/java/com/rfsentinel/app/online/wazert/LICENSE.
-// Adapted for RF Sentinel's read-only fetch path and Java package.
+// Adapted for Kokoho's read-only fetch path and Java package.
 //
 // Minimal, wire-compatible description of the Waze mobile RT protocol, limited
 // to the messages this plugin exchanges. Field numbers and wire types match

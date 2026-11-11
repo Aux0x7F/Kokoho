@@ -98,7 +98,7 @@ abstract class SafeScreen(carContext: CarContext) : Screen(carContext) {
         Log.w("CarScreen", "${javaClass.simpleName} failed to render", e)
         lastError = "${javaClass.simpleName}: ${e.javaClass.simpleName}"
         MessageTemplate.Builder("Something went wrong showing this screen. Go back and try again.")
-            .setTitle("RF Sentinel")
+            .setTitle("Kokoho")
             .setHeaderAction(Action.BACK)
             .build()
     }

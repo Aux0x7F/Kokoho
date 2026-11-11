@@ -20,7 +20,7 @@ import com.rfsentinel.app.receiver.CarMessageReceiver
  * A real car only runs Car App Library screens installed from a trusted store (Google
  * Play, ONE store), but Android Auto's "Unknown sources" setting does cover messaging
  * notifications. So the GitHub APK still gets every alert onto the car screen this way,
- * and RF Sentinel shows in the car's launcher as a messaging app.
+ * and Kokoho shows in the car's launcher as a messaging app.
  * developer.android.com/training/cars/communication/notification-messaging
  */
 object CarMessages {
@@ -68,14 +68,14 @@ object CarMessages {
     private fun show(context: Context) {
         val user = Person.Builder().setName("You").setKey("rfsentinel-user").build()
         val sender = Person.Builder()
-            .setName("RF Sentinel")
+            .setName("Kokoho")
             .setKey("rfsentinel")
             .setIcon(runCatching {
                 IconCompat.createWithBitmap(ContextCompat.getDrawable(context, R.mipmap.ic_launcher)!!.toBitmap(128, 128))
             }.getOrNull())
             .build()
         val style = NotificationCompat.MessagingStyle(user)
-            .setConversationTitle("RF Sentinel")
+            .setConversationTitle("Kokoho")
             .setGroupConversation(false)
         unread.forEach { style.addMessage(it.text, it.time, sender) }
 

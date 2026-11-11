@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Android PackageInstaller session and committed. Android then shows its usual "Update this app?" card
  * (or none, where it lets the app that installed it update itself), and replaces the app.
  *
- * Needs Android's "Install unknown apps" allowed for RF Sentinel ([canInstall], [allowInstallsIntent]).
+ * Needs Android's "Install unknown apps" allowed for Kokoho ([canInstall], [allowInstallsIntent]).
  */
 object UpdateInstaller {
 

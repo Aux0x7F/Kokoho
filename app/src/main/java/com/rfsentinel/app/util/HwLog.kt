@@ -56,7 +56,7 @@ class HwLog(val title: String, val file: String) {
     /** The text file to send: app, phone, [status], [extra] (the USB devices plugged in, say) and the log, oldest first. */
     fun report(context: Context, status: String, extra: String? = null): String {
         val sb = StringBuilder()
-        sb.append("RF Sentinel - $title log\n")
+        sb.append("Kokoho - $title log\n")
         sb.append("App ${com.rfsentinel.app.BuildConfig.VERSION_NAME} (${com.rfsentinel.app.BuildConfig.VERSION_CODE})")
             .append(if (com.rfsentinel.app.BuildConfig.DEBUG) " debug\n" else "\n")
         sb.append("Phone ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})\n")

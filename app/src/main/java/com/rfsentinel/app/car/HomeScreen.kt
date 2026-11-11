@@ -123,7 +123,7 @@ class HomeScreen(carContext: CarContext) : LiveScreen(carContext) {
             toast(if (nowMuted) "Alert sound muted" else "Alert sound on. Plays through the car speakers.")
             invalidate()
         }
-        return listTemplate("RF Sentinel", shown, header = Action.APP_ICON,
+        return listTemplate("Kokoho", shown, header = Action.APP_ICON,
             actions = ActionStrip.Builder().addAction(startStop).addAction(muteButton).build())
     }
 
@@ -137,7 +137,7 @@ class HomeScreen(carContext: CarContext) : LiveScreen(carContext) {
                     else toast("Grant location and nearby-devices on your phone")
                 }
             } catch (e: Exception) {
-                toast("Open RF Sentinel on your phone to grant permissions")
+                toast("Open Kokoho on your phone to grant permissions")
             }
             return
         }
@@ -146,7 +146,7 @@ class HomeScreen(carContext: CarContext) : LiveScreen(carContext) {
             // Android cuts Bluetooth scanning back while the phone screen is off: say so up front.
             toast(if (phoneScreenOn(carContext)) "Scanning started" else SCREEN_OFF_WARNING)
         } catch (e: Exception) {
-            toast("Couldn't start - open RF Sentinel on your phone")
+            toast("Couldn't start - open Kokoho on your phone")
         }
         invalidate()
     }

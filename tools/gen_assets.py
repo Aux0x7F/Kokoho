@@ -1,4 +1,4 @@
-"""Generates RF Sentinel's offline vendor-lookup assets and verifies every
+"""Generates Kokoho's offline vendor-lookup assets and verifies every
 hard-coded prefix the signature tables use against the IEEE registry data.
 
 Put these downloads in tools/data/ first (not committed):

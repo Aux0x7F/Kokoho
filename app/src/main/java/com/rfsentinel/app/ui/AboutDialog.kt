@@ -11,10 +11,10 @@ import com.rfsentinel.app.BuildConfig
 object AboutDialog {
     fun show(activity: AppCompatActivity) {
         val html = """
-            <b>RF Sentinel ${BuildConfig.VERSION_NAME}</b><br/>
-            Copyright &copy; 2026 CIS-C0. Free software under the GNU General Public
-            License v3.0: you may share and modify it under its terms. It comes with
-            ABSOLUTELY NO WARRANTY. Source code: github.com/CIS-C0/RFSentinel<br/><br/>
+            <b>Kokoho ${BuildConfig.VERSION_NAME}</b><br/>
+            Free software under the GNU General Public License v3.0 (forked from upstream RFSentinel, Copyright &copy; 2026 CIS-C0):
+            you may share and modify it under its terms. It comes with
+            ABSOLUTELY NO WARRANTY. Source code: github.com/Aux0x7F/Kokoho<br/><br/>
             Passive, receive-only Bluetooth LE and WiFi scanner. It never transmits to,
             connects to, jams or spoofs any device. Scans, detections, history and traces stay
             on this phone. Internet is used only for map data: the map (OpenFreeMap${if (MapEngine.mapboxAvailable) ", or Mapbox if you choose it in Settings" else ""}),

@@ -21,7 +21,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * RF Sentinel's map on its [MapEngine] (OpenFreeMap or Mapbox): the light or night style, and every
+ * Kokoho's map on its [MapEngine] (OpenFreeMap or Mapbox): the light or night style, and every
  * layer drawn on it - devices and their pinpoint circles, plate / speed / red-light cameras, CCTV
  * with their view, cell towers, drones, police aircraft, Waze reports and the trace - with the same
  * details on a tap as before. The screen around it ([MapFragment]) owns the buttons, the camera

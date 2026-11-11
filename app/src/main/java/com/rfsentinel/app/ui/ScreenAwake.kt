@@ -13,7 +13,7 @@ import androidx.core.content.ContextCompat
 import com.rfsentinel.app.util.Prefs
 
 /**
- * Keeps the screen on while an RF Sentinel screen is open: always, only while
+ * Keeps the screen on while a Kokoho screen is open: always, only while
  * the phone is charging (car mount, desk - the default), or never (normal
  * timeout), as chosen in Settings.
  */

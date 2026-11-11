@@ -114,12 +114,12 @@ class CustomThemeTest {
     fun aFileThatIsNotAThemeIsRefusedWithAReason() {
         fun why(text: String) = try { CustomThemes.parseShared(text); fail("accepted"); "" } catch (e: CustomThemes.BadThemeFile) { e.message!! }
         assertTrue(why("hello").contains("not valid JSON"))
-        assertTrue(why("""{"app":"Other","type":"theme","format":1}""").contains("isn't an RF Sentinel theme"))
-        assertTrue(why("""{"app":"RF Sentinel","type":"backup","format":1}""").contains("isn't an RF Sentinel theme"))
-        assertTrue(why("""{"app":"RF Sentinel","type":"theme","format":9,"theme":{}}""").contains("newer version"))
-        assertTrue(why("""{"app":"RF Sentinel","type":"theme","format":1}""").contains("no theme"))
+        assertTrue(why("""{"app":"Other","type":"theme","format":1}""").contains("isn't a Kokoho theme"))
+        assertTrue(why("""{"app":"Kokoho","type":"backup","format":1}""").contains("isn't a Kokoho theme"))
+        assertTrue(why("""{"app":"Kokoho","type":"theme","format":9,"theme":{}}""").contains("newer version"))
+        assertTrue(why("""{"app":"Kokoho","type":"theme","format":1}""").contains("no theme"))
         // A picture that is not a picture offers no banner to take.
-        val s = CustomThemes.parseShared("""{"app":"RF Sentinel","type":"theme","format":1,"theme":{"name":"p","banner":"banner"},"assets":{"banner":"AAAA"}}""")
+        val s = CustomThemes.parseShared("""{"app":"Kokoho","type":"theme","format":1,"theme":{"name":"p","banner":"banner"},"assets":{"banner":"AAAA"}}""")
         assertNull(s.banner); assertFalse(ThemePart.BANNER in CustomThemes.partsIn(s))
     }
 

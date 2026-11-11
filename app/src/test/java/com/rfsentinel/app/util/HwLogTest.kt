@@ -41,7 +41,7 @@ class HwLogTest {
         assertFalse(a.isEmpty(ctx))
         assertTrue(b.isEmpty(ctx))
         val report = a.report(ctx, "A · live", "USB devices plugged in now:\n  none\n")
-        assertTrue(report, "RF Sentinel - A log" in report && "Status: A · live" in report && "only in A" in report && "none" in report)
+        assertTrue(report, "Kokoho - A log" in report && "Status: A · live" in report && "only in A" in report && "none" in report)
         assertFalse("only in A" in b.report(ctx, ""))
         assertEquals(10, HwLogs.all.map { it.file }.toSet().size)
     }

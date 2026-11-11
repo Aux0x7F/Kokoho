@@ -12,7 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * The map engine under RF Sentinel's maps: MapLibre with OpenFreeMap (free, no account - the
+ * The map engine under Kokoho's maps: MapLibre with OpenFreeMap (free, no account - the
  * default) or Mapbox's own SDK and maps (Settings > Map > Map provider). Layers are written once,
  * as map style JSON, and data goes in as GeoJSON, so [RfMap] and the screens draw the same on both.
  */

@@ -8,7 +8,7 @@ package com.rfsentinel.app.usb
  * frames) it hears. It never transmits.
  *
  * Ported from Wardrive Go by RocketGod (https://github.com/RocketGod-git/wardrive-go,
- * GPL-3.0) and adapted to RF Sentinel: its handshake / PMKID capture was removed.
+ * GPL-3.0) and adapted to Kokoho: its handshake / PMKID capture was removed.
  * Used under the GNU GPL v3.
  */
 

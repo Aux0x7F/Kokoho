@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- USB devices RF Sentinel drives. Plugged in, Android offers to open RF Sentinel for them; with
+<!-- USB devices Kokoho drives. Plugged in, Android offers to open Kokoho for them; with
      "Always" ticked, later plug-ins get USB access without asking. Keep in step with the ID lists named below. -->
 <resources>
     <!-- USB WiFi adapters (UsbWifi.SUPPORTED) -->

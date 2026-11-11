@@ -12,11 +12,11 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * RF Sentinel's driver for the vendored Waze RT protocol layer: owns the anonymous
+ * Kokoho's driver for the vendored Waze RT protocol layer: owns the anonymous
  * account, the session lifecycle, the alert cache and the rate limits, and hands
  * back just the POLICE alerts near a point.
  *
- * <p>This class is RF Sentinel's own (the classes it drives are vendored from
+ * <p>This class is Kokoho's own (the classes it drives are vendored from
  * highway-radar-sabre-plus — see LICENSE in this directory). It is a slimmed
  * equivalent of that project's WazeProtocolSource: no Highway Radar plumbing, no
  * reporting, no tile decoding, no keepalive thread.
@@ -73,7 +73,7 @@ public final class WazeRtFetcher {
     private static final long FULL_REFRESH_MS = 10 * 60_000L;
     private static final long DAY_MS = 24 * 3600_000L;
 
-    /** One Waze police report, reduced to what RF Sentinel scores. */
+    /** One Waze police report, reduced to what Kokoho scores. */
     public static final class PoliceAlert {
         public final String uuid;
         public final String subtype;    // e.g. POLICE_WITH_MOBILE_CAMERA; "" when unspecified

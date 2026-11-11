@@ -113,10 +113,10 @@ object LinkStore {
     fun meshNodeName(c: Context): String? = sp(c).getString("mesh_node_name", null)
     fun setMeshNode(c: Context, address: String, name: String) =
         sp(c).edit { putString("mesh_node", address); putString("mesh_node_name", name.take(40)) }
-    /** The node's buzzer and alert LED silenced while RF Sentinel uses it (its external notification turned off). */
+    /** The node's buzzer and alert LED silenced while Kokoho uses it (its external notification turned off). */
     fun meshQuiet(c: Context) = sp(c).getBoolean("mesh_quiet", false)
     fun setMeshQuiet(c: Context, on: Boolean) = sp(c).edit { putBoolean("mesh_quiet", on) }
-    /** RF Sentinel turned the external notification of node [address] off: turned back on when silencing stops. */
+    /** Kokoho turned the external notification of node [address] off: turned back on when silencing stops. */
     fun meshBuzzerWasOn(c: Context, address: String) = sp(c).getBoolean("mesh_buzzer_was_on_$address", false)
     fun setMeshBuzzerWasOn(c: Context, address: String, on: Boolean) = sp(c).edit {
         if (on) putBoolean("mesh_buzzer_was_on_$address", true) else remove("mesh_buzzer_was_on_$address")
@@ -127,7 +127,7 @@ object LinkStore {
     const val MESH_INTERVAL_MIN = 15
     const val MESH_INTERVAL_MAX = 300
 
-    /** The node's channel slot for RF Sentinel's channel: 0 picks the first empty one of 1-7. Never 0, the primary. */
+    /** The node's channel slot for Kokoho's channel: 0 picks the first empty one of 1-7. Never 0, the primary. */
     fun meshSlot(c: Context) = sp(c).getInt("mesh_slot", 0).coerceIn(0, 7)
     fun setMeshSlot(c: Context, slot: Int) = sp(c).edit { putInt("mesh_slot", slot) }
 

@@ -204,7 +204,7 @@ object NotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val builder = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle(if (discreet) "RF Sentinel" else hit.label)
+            .setContentTitle(if (discreet) "Kokoho" else hit.label)
             .setContentText(if (discreet) "New alert - tap to view" else evidence)
             .setStyle(if (discreet) null else NotificationCompat.BigTextStyle().bigText(evidence))
             .setSmallIcon(R.drawable.ic_tile_scan)
@@ -219,7 +219,7 @@ object NotificationHelper {
                 com.rfsentinel.app.receiver.AlertActionReceiver.snoozeIntent(context, ALERT_NOTIFICATION_ID_BASE + key.hashCode()))
             .extend(
                 CarAppExtender.Builder()
-                    .setContentTitle(if (discreet) "RF Sentinel" else hit.label)
+                    .setContentTitle(if (discreet) "Kokoho" else hit.label)
                     .setContentText(if (discreet) "New alert" else evidence)
                     .setSmallIcon(R.drawable.ic_tile_scan)
                     .setImportance(NotificationManagerCompat.IMPORTANCE_HIGH)
@@ -328,13 +328,13 @@ object NotificationHelper {
             (via?.let { " · via $it" } ?: "")
 
         val publicVersion = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle("RF Sentinel")
+            .setContentTitle("Kokoho")
             .setContentText("New alert")
             .setSmallIcon(R.drawable.ic_tile_scan)
             .build()
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle(if (discreet) "RF Sentinel" else title)
+            .setContentTitle(if (discreet) "Kokoho" else title)
             .setContentText(if (discreet) "New alert - tap to view" else text)
             .setStyle(if (discreet) null else NotificationCompat.BigTextStyle().bigText("$text\n$mac\n${hit.evidence}"))
             .setSmallIcon(R.drawable.ic_tile_scan)
@@ -355,7 +355,7 @@ object NotificationHelper {
             // this device in the car app. (The tone/voice come from AlertPlayer.)
             .extend(
                 CarAppExtender.Builder()
-                    .setContentTitle(if (discreet) "RF Sentinel" else title)
+                    .setContentTitle(if (discreet) "Kokoho" else title)
                     .setContentText(if (discreet) "New alert" else carAlertText(hit, rssi, snap?.distanceM?.takeUnless { it.isNaN() }, others))
                     .setSmallIcon(R.drawable.ic_tile_scan)
                     .setImportance(NotificationManagerCompat.IMPORTANCE_HIGH)

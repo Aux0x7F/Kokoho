@@ -258,7 +258,7 @@ object UsbWifi {
             val r = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, intent: Intent) {
                     when (intent.action) {
-                        // Just plugged in: Android's "Open RF Sentinel?" prompt comes first; ask ourselves only if it didn't help.
+                        // Just plugged in: Android's "Open Kokoho?" prompt comes first; ask ourselves only if it didn't help.
                         UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                             connect(app, ask = false)
                             main.postDelayed({ if (receiver != null) connect(app) }, UsbAttachActivity.ATTACH_GRACE_MS)
@@ -353,7 +353,7 @@ object UsbWifi {
         runningDevice = d.deviceName
         runningChip = chip.name
         status = "USB WiFi (${chip.name}) · starting…"
-        log("Starting ${chip.name} (${"%04x:%04x".format(d.vendorId, d.productId)}) - RF Sentinel ${com.rfsentinel.app.BuildConfig.VERSION_NAME}, " +
+        log("Starting ${chip.name} (${"%04x:%04x".format(d.vendorId, d.productId)}) - Kokoho ${com.rfsentinel.app.BuildConfig.VERSION_NAME}, " +
             "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
         val previous = thread
         thread = Thread({

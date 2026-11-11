@@ -9,7 +9,7 @@ import com.rfsentinel.app.detect.Hit
  * `"ITS5" | sec u32 | usec u32 | len u16 | 802.11 frame`, all little-endian.
  *
  * Cars, emergency vehicles and roadside units broadcast where they are (CAM) and warnings
- * (DENM). RF Sentinel only looks for emergency vehicles: a CAM whose vehicle role is
+ * (DENM). Kokoho only looks for emergency vehicles: a CAM whose vehicle role is
  * emergency / rescue / safety car, its light bar and siren, and DENM "emergency vehicle
  * approaching" warnings. Ordinary cars are counted but not listed.
  *
@@ -262,7 +262,7 @@ object V2x {
         return Message("", Kind.DENM, stationType, lat, lon, cause = cause, subCause = sub)
     }
 
-    // ---- What RF Sentinel makes of it ----------------------------------------------------------------
+    // ---- What Kokoho makes of it ----------------------------------------------------------------
 
     private val ROLES = mapOf(1 to "public transport", 2 to "special transport", 3 to "dangerous goods", 4 to "road works",
         5 to "rescue", 6 to "emergency", 7 to "safety car", 8 to "agriculture", 9 to "commercial", 10 to "military",

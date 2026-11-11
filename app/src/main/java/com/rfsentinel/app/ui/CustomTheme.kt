@@ -197,7 +197,7 @@ object CustomThemes {
         val assets = JSONObject()
         bannerFile(c, t)?.let { assets.put("banner", Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)) }
         fontFile(c, t)?.let { assets.put("font", Base64.encodeToString(it.readBytes(), Base64.NO_WRAP)) }
-        return JSONObject().put("app", "RF Sentinel").put("type", "theme").put("format", FORMAT).put("theme", t.toJson()).put("assets", assets)
+        return JSONObject().put("app", "Kokoho").put("type", "theme").put("format", FORMAT).put("theme", t.toJson()).put("assets", assets)
     }
 
     fun toShareJson(c: Context, t: CustomTheme): String = shareObject(c, t).toString(2)
@@ -208,8 +208,8 @@ object CustomThemes {
     }
 
     fun parseShared(root: JSONObject): Shared {
-        if (root.optString("app") != "RF Sentinel" || root.optString("type") != "theme") throw BadThemeFile("That isn't an RF Sentinel theme file")
-        if (root.optInt("format", 0) !in 1..FORMAT) throw BadThemeFile("That theme is from a newer version of RF Sentinel - update the app first")
+        if (root.optString("app") != "Kokoho" || root.optString("type") != "theme") throw BadThemeFile("That isn't a Kokoho theme file")
+        if (root.optInt("format", 0) !in 1..FORMAT) throw BadThemeFile("That theme is from a newer version of Kokoho - update the app first")
         val t = root.optJSONObject("theme") ?: throw BadThemeFile("The theme file has no theme in it")
         val a = root.optJSONObject("assets")
         fun asset(k: String, max: Int) = a?.optString(k)?.takeIf { it.isNotEmpty() }?.let { s ->

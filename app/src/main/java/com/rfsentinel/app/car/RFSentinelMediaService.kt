@@ -35,7 +35,7 @@ import com.rfsentinel.app.util.Permissions
 import com.rfsentinel.app.util.Prefs
 
 /**
- * RF Sentinel as an Android Auto media app: four tabs (Threats, Cameras, Alerts, Status)
+ * Kokoho as an Android Auto media app: four tabs (Threats, Cameras, Alerts, Status)
  * and a "now playing" card with the threat headline plus Scan and Mute buttons.
  *
  * A real car only runs the Car App Library screens ([RFSentinelCarAppService]) when the
@@ -70,7 +70,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
 
     override fun onCreate() {
         super.onCreate()
-        session = MediaSessionCompat(this, "RFSentinel").apply {
+        session = MediaSessionCompat(this, "Kokoho").apply {
             setCallback(callback)
             // Inactive on purpose: Android routes media buttons only to active sessions.
             isActive = false
@@ -247,7 +247,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
             refresh()
         }
 
-        /** Voice "play RF Sentinel" in the car: starts scanning (never stops it). */
+        /** Voice "play Kokoho" in the car: starts scanning (never stops it). */
         override fun onPlayFromSearch(query: String?, extras: Bundle?) {
             if (!ScanForegroundService.isRunning) toggleScan()
             refresh()
@@ -279,7 +279,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
             return
         }
         if (Permissions.missingRequired(this).isNotEmpty()) {
-            message("Open RF Sentinel on the phone", "Location and Nearby devices are needed to scan")
+            message("Open Kokoho on the phone", "Location and Nearby devices are needed to scan")
             return
         }
         try {
@@ -287,7 +287,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
             message("Scanning started",
                 if (HomeScreen.phoneScreenOn(this)) null else "Phone screen off: Android limits Bluetooth scanning")
         } catch (e: Exception) {
-            message("Couldn't start scanning", "Open RF Sentinel on the phone")
+            message("Couldn't start scanning", "Open Kokoho on the phone")
         }
     }
 
@@ -327,7 +327,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
 
     private fun headline(): Card {
         val running = ScanForegroundService.isRunning
-        if (!running) return Card(HEADLINE, "Not scanning", "Tap Start scanning below", null, CarUi.WEAK_COLOR, "OFF", "RF Sentinel")
+        if (!running) return Card(HEADLINE, "Not scanning", "Tap Start scanning below", null, CarUi.WEAK_COLOR, "OFF", "Kokoho")
         val devices = DeviceRegistry.snapshot()
         val ambient = com.rfsentinel.app.online.AmbientThreats.top(this)
         val (color, text) = CarUi.threat(devices, Prefs.alertThreshold(this), ambient)
@@ -341,7 +341,7 @@ class RFSentinelMediaService : MediaBrowserServiceCompat() {
     }
 
     private fun cardFor(id: String, now: Long): Card? = when {
-        id == MESSAGE -> messageText?.let { (t, d) -> Card(id, t, d, null, 0xFF0B5C63.toInt(), "RF SENTINEL", null) }
+        id == MESSAGE -> messageText?.let { (t, d) -> Card(id, t, d, null, 0xFF0B5C63.toInt(), "KOKOHO", null) }
         id.startsWith(DEVICE) -> DeviceRegistry.get(id.removePrefix(DEVICE))?.let { s ->
             Card(id, CarUi.title(s), CarUi.tagLine(s), CarUi.signalLine(s, now), CarUi.colorFor(s),
                 s.best?.category?.shortTag ?: "DEVICE", com.rfsentinel.app.detect.DeviceIntel.formatDistance(s.distanceM))

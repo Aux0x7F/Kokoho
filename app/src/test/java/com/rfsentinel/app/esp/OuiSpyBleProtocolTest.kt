@@ -77,14 +77,14 @@ class OuiSpyBleProtocolTest {
         assertEquals("OUI-SPY target: Patrol car radio", OuiSpyBleProtocol.decode(watch.array())!!.hits.single().label)
 
         val flipper = header(52, OuiSpyBleProtocol.ENGINE_DETECTOR, mac, -55, 0, 3)
-        assertTrue(OuiSpyBleProtocol.decode(flipper.array())!!.hits.isEmpty()) // outside RF Sentinel's scope
+        assertTrue(OuiSpyBleProtocol.decode(flipper.array())!!.hits.isEmpty()) // outside Kokoho's scope
     }
 
     @Test
     fun skipsOldUnusedAndShortFrames() {
         // Detected while no phone was connected (DET_FLAG_AWAY).
         assertNull(OuiSpyBleProtocol.decode(header(70, 0x80 or OuiSpyBleProtocol.ENGINE_FLOCK_WIFI, mac, -70, 6, 4).array()))
-        // Engines RF Sentinel doesn't use (3 = Foxhunter, 5 = UniPwn, 7 = PCAP).
+        // Engines Kokoho doesn't use (3 = Foxhunter, 5 = UniPwn, 7 = PCAP).
         for (e in listOf(3, 5, 7)) assertNull(OuiSpyBleProtocol.decode(header(74, e, mac, -70, 6, 0).array()))
         assertNull(OuiSpyBleProtocol.decode(ByteArray(10)))
         assertTrue(OuiSpyBleProtocol.isSpoolHeader(byteArrayOf(0xFF.toByte(), 2, 0, 0, 0, 1, 2, 3, 4)))
@@ -100,7 +100,7 @@ class OuiSpyBleProtocolTest {
         assertEquals("Cafe Guest", a.name)
         assertEquals(2462, a.frequencyMhz)
         assertEquals("[WPA2-PSK][ESS]", a.capabilities)
-        assertTrue(a.hits.isEmpty()) // RF Sentinel's own lists decide
+        assertTrue(a.hits.isEmpty()) // Kokoho's own lists decide
 
         val dev = header(74, OuiSpyBleProtocol.ENGINE_WARDRIVE, mac, -58, 0, 1)
         str(dev, 53, "Speaker")

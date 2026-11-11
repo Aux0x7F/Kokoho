@@ -380,7 +380,7 @@ class ThemeHeaderView @JvmOverloads constructor(
         path.moveTo(w - m - k, h - m); path.lineTo(w - m, h - m); path.lineTo(w - m, h - m - k)
         canvas.drawPath(path, line)
 
-        val text = "RF SENTINEL"
+        val text = "KOKOHO"
         fit(text, w - 40 * d, 26 * d)
         title.color = c
         title.setShadowLayer(6 * d, 0f, 0f, c)
@@ -417,7 +417,7 @@ class ThemeHeaderView @JvmOverloads constructor(
         val c = primary
         // Slight flicker of the intensifier tube.
         val flicker = if (Random.nextInt(30) == 0) 0.75f else 1f
-        val text = "RF SENTINEL"
+        val text = "KOKOHO"
         fit(text, w - 16 * d, 30 * d)
         title.color = c; title.alpha = (255 * flicker).toInt()
         title.setShadowLayer(10 * d, 0f, 0f, c)
@@ -446,7 +446,7 @@ class ThemeHeaderView @JvmOverloads constructor(
     private fun crt(canvas: Canvas, now: Long): Long {
         val w = width.toFloat(); val h = height.toFloat()
         val c = primary
-        val text = "RFSENTINEL"
+        val text = "KOKOHO"
         fit(text, w - 40 * d, 30 * d)
         title.color = c
         title.setShadowLayer(5 * d, 0f, 0f, c)
@@ -507,7 +507,7 @@ class ThemeHeaderView @JvmOverloads constructor(
         for (i in -8..8) canvas.drawLine(vx + i * 12 * d, horizon, vx + i * 60 * d, h, line)
         line.alpha = 255
         // Chrome title.
-        val text = "RF SENTINEL"
+        val text = "KOKOHO"
         fit(text, sx - r - 8 * d, 32 * d)
         val base = 6 * d + title.textSize
         title.shader = LinearGradient(0f, base - title.textSize, 0f, base, secondary, primary, Shader.TileMode.CLAMP)
@@ -584,7 +584,7 @@ class ThemeHeaderView @JvmOverloads constructor(
         canvas.drawText("DWG RF-001  REV C", box.left + 4 * d, box.centerY() - 4 * d, sub)
         canvas.drawText("SCALE 1:1  RX ONLY", box.left + 4 * d, box.bottom - 4 * d, sub)
         // Title and its dimension line.
-        val text = "RF SENTINEL"
+        val text = "KOKOHO"
         fit(text, w - boxW - 30 * d, 28 * d)
         title.color = ink
         val tx = 10 * d; val base = 8 * d + title.textSize
@@ -620,7 +620,7 @@ class ThemeHeaderView @JvmOverloads constructor(
         // Thick-thin rule on top.
         line.strokeWidth = 2.5f * d; canvas.drawLine(0f, 2 * d, w, 2 * d, line)
         line.strokeWidth = 0.8f * d; canvas.drawLine(0f, 6 * d, w, 6 * d, line)
-        val text = "The RF Sentinel"
+        val text = "The Kokoho"
         fit(text, w - 12 * d, 34 * d)
         title.color = ink
         val base = 10 * d + title.textSize

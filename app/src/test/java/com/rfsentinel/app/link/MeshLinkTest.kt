@@ -16,7 +16,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.ConscryptMode
 
-/** Sentinel Link over Meshtastic: the phone-API protobufs, RF Sentinel's packet, and what goes out first. */
+/** Sentinel Link over Meshtastic: the phone-API protobufs, Kokoho's packet, and what goes out first. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], application = Application::class)
 @ConscryptMode(ConscryptMode.Mode.OFF)
@@ -61,9 +61,9 @@ class MeshLinkTest {
         val done = MeshProto.W().apply { uint(7, MeshProto.CONFIG_ONLY.toLong()) }.bytes()
         assertEquals(MeshProto.From.ConfigComplete(MeshProto.CONFIG_ONLY.toLong()), MeshProto.readFromRadio(done))
         val psk = ByteArray(32) { it.toByte() }
-        val ch = MeshProto.W().apply { msg(10) { uint(1, 3); msg(2) { bytes(2, psk); string(3, "RFSentinel") }; uint(3, 2) } }.bytes()
+        val ch = MeshProto.W().apply { msg(10) { uint(1, 3); msg(2) { bytes(2, psk); string(3, "Kokoho") }; uint(3, 2) } }.bytes()
         val c = MeshProto.readFromRadio(ch) as MeshProto.From.ChannelInfo
-        assertEquals(3, c.index); assertEquals(2, c.role); assertEquals("RFSentinel", c.name); assertArrayEquals(psk, c.psk)
+        assertEquals(3, c.index); assertEquals(2, c.role); assertEquals("Kokoho", c.name); assertArrayEquals(psk, c.psk)
         assertTrue(MeshProto.readFromRadio(MeshProto.W().apply { uint(16, 1) }.bytes()) === MeshProto.From.Other)
         assertTrue(runCatching { MeshProto.readFromRadio(byteArrayOf(0x12, 0x7F)) }.isFailure)
     }

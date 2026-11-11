@@ -78,7 +78,7 @@ object OuiSpyBle {
     private val finder = Handler(Looper.getMainLooper())
 
     /**
-     * Looks for OUI-SPY boards nearby for [ms], whether or not RF Sentinel is scanning. Boards advertise the
+     * Looks for OUI-SPY boards nearby for [ms], whether or not Kokoho is scanning. Boards advertise the
      * OUI-SPY service; their "OUI-SPY-xxxx" name is only in the scan response, which a busy scan can miss.
      * A board connected to another phone app doesn't advertise and isn't found.
      */

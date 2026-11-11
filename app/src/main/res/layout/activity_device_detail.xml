@@ -213,7 +213,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="Everything on this screen comes from signals the device broadcasts publicly. RF Sentinel never connects to it. Distance is a rough estimate from signal strength."
+            android:text="Everything on this screen comes from signals the device broadcasts publicly. Kokoho never connects to it. Distance is a rough estimate from signal strength."
             android:textColor="?android:attr/textColorSecondary"
             android:textSize="@dimen/text_caption" />
     </LinearLayout>

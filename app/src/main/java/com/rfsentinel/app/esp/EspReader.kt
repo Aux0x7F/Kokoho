@@ -3,7 +3,7 @@ package com.rfsentinel.app.esp
 import com.rfsentinel.app.link.MeshProto
 
 /**
- * Reads one ESP32 board until [stop] is called. RF Sentinel only listens and
+ * Reads one ESP32 board until [stop] is called. Kokoho only listens and
  * asks read-only questions: OUI-Spy may be sent `CMD:VERSION` and, in
  * Detector mode, `CMD:DUMP_LIVE` (what it has found so far); GhostESP is only
  * asked for `help`, to scan networks and to list them; ESP32 Marauder only for
@@ -50,7 +50,7 @@ class EspReader(
             //    USB-UART bridge mode passes it through from its ESP32 board).
             if (MarauderReports.recognises(heard + banner)) { pollMarauder(buf); return }
             if (MarauderReports.isFlipperCli(heard + banner)) {
-                onStatus("Flipper Zero connected - on the Flipper open GPIO > USB-UART Bridge so RF Sentinel can reach its ESP32 board (Marauder)")
+                onStatus("Flipper Zero connected - on the Flipper open GPIO > USB-UART Bridge so Kokoho can reach its ESP32 board (Marauder)")
                 // Wait for the bridge, asking `help` now and then (the Flipper's own command
                 // line just lists its commands) until Marauder answers through it.
                 while (!stopped) {
@@ -125,7 +125,7 @@ class EspReader(
             mode == OuiSpyReports.Mode.SELECTOR ->
                 "OUI-Spy is in its mode selector - join its Wi-Fi \"oui-spy\", open 192.168.4.1 and pick Flock-You, Detector or Sky Spy"
             mode == OuiSpyReports.Mode.OTHER ->
-                "This OUI-Spy mode isn't used by RF Sentinel - pick Flock-You, Detector or Sky Spy"
+                "This OUI-Spy mode isn't used by Kokoho - pick Flock-You, Detector or Sky Spy"
             mode == null && count == 0 -> "ESP32 connected · waiting for detections (OUI-Spy reports only when it finds something; a V2X board only when equipped vehicles are in range)"
             else -> "OUI-Spy ${mode?.label ?: ""} · live · $count detection${if (count == 1) "" else "s"}"
         })

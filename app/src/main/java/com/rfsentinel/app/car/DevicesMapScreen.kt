@@ -38,7 +38,7 @@ class DevicesMapScreen(carContext: CarContext) : LiveScreen(carContext, periodMs
         val items = if (me == null) emptyList() else around(me.latitude, me.longitude, limit)
 
         val noItems = when {
-            !ScanForegroundService.isRunning -> "Not scanning - tap Start on the RF Sentinel home screen"
+            !ScanForegroundService.isRunning -> "Not scanning - tap Start on the Kokoho home screen"
             me == null -> "Waiting for your location..."
             else -> "No devices placed yet - they appear as GPS fixes come in"
         }

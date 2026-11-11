@@ -7,7 +7,7 @@ import com.rfsentinel.app.detect.Hit
 import com.rfsentinel.app.detect.RemoteId
 
 /**
- * One device an ESP32 board reported. RF Sentinel turns it into a normal
+ * One device an ESP32 board reported. Kokoho turns it into a normal
  * observation, so all its own detection rules apply on top of [hits].
  */
 data class EspSighting(
@@ -46,7 +46,7 @@ object OuiSpyReports {
         "\"event\":\"detection\"" in text || "\"drone_lat\"" in text || "\"status\":\"scanning\"" in text ||
             "OUI-SPY" in text || "[flockyou]" in text || "[SELECTOR]" in text
 
-    /** OUI-Spy modes, as far as RF Sentinel is concerned. */
+    /** OUI-Spy modes, as far as Kokoho is concerned. */
     enum class Mode(val label: String, val usable: Boolean) {
         FLOCK_YOU("Flock-You", true), DETECTOR("Detector", true), SKY_SPY("Sky Spy", true),
         SELECTOR("mode selector", false), OTHER("PCAP / BLE sniff / fox hunter", false)

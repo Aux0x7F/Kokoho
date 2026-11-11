@@ -45,7 +45,7 @@ object TripExport {
             pings: List<TripPingEntity> = emptyList()): String {
         val sb = StringBuilder()
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-        sb.append("<gpx version=\"1.1\" creator=\"RF Sentinel\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n")
+        sb.append("<gpx version=\"1.1\" creator=\"Kokoho\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n")
         sb.append("  <metadata><name>").append(x(trip.name)).append("</name><time>").append(iso(trip.startTime)).append("</time></metadata>\n")
         devices.filter { it.lat != null && (!onlyFlagged || it.flagged) }.forEach { d ->
             sb.append(String.format(Locale.US, "  <wpt lat=\"%.7f\" lon=\"%.7f\">\n", d.lat, d.lon))

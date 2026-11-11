@@ -27,7 +27,7 @@ final class WazeRtCodec {
         return "ProtoBase64," + Base64.encodeToString(batch.toByteArray(), Base64.NO_WRAP);
     }
 
-    // Upstream's reportPayload() is deliberately absent: RF Sentinel is read-only.
+    // Upstream's reportPayload() is deliberately absent: Kokoho is read-only.
 
     // ── Request line builders ────────────────────────────────────────────────
 

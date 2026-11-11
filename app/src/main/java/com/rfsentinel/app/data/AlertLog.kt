@@ -8,7 +8,7 @@ import com.rfsentinel.app.detect.Hit
 import com.rfsentinel.app.detect.Tier
 
 /**
- * The alerts RF Sentinel raised recently (devices, known cameras, cell warnings),
+ * The alerts Kokoho raised recently (devices, known cameras, cell warnings),
  * newest first, kept on the phone only. Android Auto lists them, and a device's
  * car screen falls back to its last alert once the device is out of range.
  */

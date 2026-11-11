@@ -1,4 +1,4 @@
-# R8 shrinks the libraries; RF Sentinel's own classes stay whole and keep their names:
+# R8 shrinks the libraries; Kokoho's own classes stay whole and keep their names:
 # Gson reads and writes many of them by field name (exports, stores, WiGLE, watchlists),
 # Room and the Waze protobuf classes are looked up by name, and crash traces stay readable.
 -keep class com.rfsentinel.app.** { *; }

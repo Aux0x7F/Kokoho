@@ -42,7 +42,7 @@ object CrashLog {
         val trace = StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
         val entry = buildString {
             append("==== ").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date())).append(" ====\n")
-            append("RF Sentinel ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})${if (BuildConfig.DEBUG) " debug" else ""}\n")
+            append("Kokoho ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})${if (BuildConfig.DEBUG) " debug" else ""}\n")
             append("${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
             append("Thread: ${thread.name}\n")
             append(trace).append("\n")
@@ -110,7 +110,7 @@ object CrashLog {
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.R)
     private fun exitEntry(e: ApplicationExitInfo): String = buildString {
         append("==== ").append(SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date(e.timestamp))).append(" ====\n")
-        append("RF Sentinel ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) found at its next start: ${reasonLabel(e.reason)}\n")
+        append("Kokoho ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) found at its next start: ${reasonLabel(e.reason)}\n")
         append("${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
         val where = when {
             e.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND -> "on screen"
@@ -154,7 +154,7 @@ object CrashLog {
         prefs.edit().putBoolean("unseen", false).apply()
         if (!hasCrashes(activity)) return
         MaterialAlertDialogBuilder(activity)
-            .setTitle("RF Sentinel closed unexpectedly")
+            .setTitle("Kokoho closed unexpectedly")
             .setMessage("A crash log was saved on this phone (nothing is sent automatically). " +
                 "Sending it to the developer helps fix it.\n\nLater: Settings > Lists, tools & about > Export crash log.")
             .setPositiveButton("Send log") { _, _ -> share(activity) }
@@ -177,7 +177,7 @@ object CrashLog {
         if (uri == null) { Toast.makeText(activity, "Couldn't create the log file", Toast.LENGTH_SHORT).show(); return }
         activity.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain")
             .putExtra(Intent.EXTRA_STREAM, uri)
-            .putExtra(Intent.EXTRA_SUBJECT, "RF Sentinel crash log")
+            .putExtra(Intent.EXTRA_SUBJECT, "Kokoho crash log")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "Export crash log"))
     }
 

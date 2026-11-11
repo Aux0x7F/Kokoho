@@ -14,11 +14,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <!-- Your car's Bluetooth connection for auto-start, OUI-SPY boards and Sentinel Link (asked when you turn them on). -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- Sentinel Link: other RF Sentinel phones find this one by a Bluetooth advert (API 31+). -->
+    <!-- Sentinel Link: other Kokoho phones find this one by a Bluetooth advert (API 31+). -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <!-- Android Auto: the plate camera & drone map screen (PlaceListMapTemplate). -->
     <uses-permission android:name="androidx.car.app.MAP_TEMPLATES" />
-    <!-- Android Auto: draw RF Sentinel's own pannable map (devices, cameras, route). -->
+    <!-- Android Auto: draw Kokoho's own pannable map (devices, cameras, route). -->
     <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
     <!-- Optional ESP32 boards (OUI-Spy / GhostESP / Marauder, or a Flipper Zero bridging one) on a USB OTG cable. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
@@ -85,14 +85,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Voice "play RF Sentinel" (Android Auto media app): the scan starts through the media session. -->
+            <!-- Voice "play Kokoho" (Android Auto media app): the scan starts through the media session. -->
             <intent-filter>
                 <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
-        <!-- Plugging in an SDR, ESP32 board or USB WiFi adapter: Android offers RF Sentinel, which then has USB access. -->
+        <!-- Plugging in an SDR, ESP32 board or USB WiFi adapter: Android offers Kokoho, which then has USB access. -->
         <activity
             android:name=".usb.UsbAttachActivity"
             android:exported="true"

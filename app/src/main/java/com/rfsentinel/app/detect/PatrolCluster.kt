@@ -29,7 +29,7 @@ object PatrolCluster {
             get() = (24 + 12 * roles.size + if (correlated) 10 else 0).coerceAtMost(88)
     }
 
-    const val SOURCE = "RF Sentinel co-location analysis; each device alone is only weak evidence"
+    const val SOURCE = "Kokoho co-location analysis; each device alone is only weak evidence"
 
     private const val RECENT_MS = 60_000L
     private const val ARRIVAL_WINDOW_MS = 30_000L

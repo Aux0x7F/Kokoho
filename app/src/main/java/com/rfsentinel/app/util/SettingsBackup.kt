@@ -71,7 +71,7 @@ object SettingsBackup {
             }
             files.put(p.file, out)
         }
-        val root = JSONObject().put("app", "RF Sentinel").put("format", FORMAT).put("version", BuildConfig.VERSION_NAME)
+        val root = JSONObject().put("app", "Kokoho").put("format", FORMAT).put("version", BuildConfig.VERSION_NAME)
             .put("created", now).put("files", files)
         val themes = CustomThemes.backup(context)
         if (themes.length() > 0) root.put(THEMES, themes)
@@ -105,11 +105,11 @@ object SettingsBackup {
     private class Opened(val files: JSONObject?, val themes: JSONArray?)
 
     private fun open(text: String): Any {
-        if (text.length > MAX_BYTES) return Result.Refused("That file is too big to be an RF Sentinel backup")
+        if (text.length > MAX_BYTES) return Result.Refused("That file is too big to be a Kokoho backup")
         val root = runCatching { JSONObject(text) }.getOrNull() ?: return Result.Refused("That isn't a backup file (not valid JSON)")
-        if (root.optString("app") != "RF Sentinel") return Result.Refused("That isn't an RF Sentinel backup")
+        if (root.optString("app") != "Kokoho") return Result.Refused("That isn't a Kokoho backup")
         val format = root.optInt("format", 0)
-        if (format < 1 || format > FORMAT) return Result.Refused("That backup is from a newer version of RF Sentinel - update the app first")
+        if (format < 1 || format > FORMAT) return Result.Refused("That backup is from a newer version of Kokoho - update the app first")
         val files = root.optJSONObject("files")
         val themes = root.optJSONArray(THEMES)
         if (files == null && themes == null) return Result.Refused("The backup has no settings in it")

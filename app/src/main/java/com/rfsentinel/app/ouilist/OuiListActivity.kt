@@ -38,7 +38,7 @@ class OuiListActivity : AppCompatActivity() {
             Toast.makeText(this, "Imported $n entries", Toast.LENGTH_SHORT).show()
             refresh()
         } catch (e: Exception) {
-            Toast.makeText(this, "Not a valid RF Sentinel watchlist file", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Not a valid Kokoho watchlist file", Toast.LENGTH_LONG).show()
         }
     }
 

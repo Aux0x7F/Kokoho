@@ -546,7 +546,7 @@ object Prefs {
         runCatching { WifiBand.valueOf(sp(context).getString("wifi_band", null)!!) }.getOrDefault(WifiBand.ALL)
     fun setWifiBand(context: Context, band: WifiBand) = sp(context).edit { putString("wifi_band", band.name) }
 
-    /** Whether the screen stays on while an RF Sentinel screen is open. */
+    /** Whether the screen stays on while a Kokoho screen is open. */
     enum class ScreenMode { ALWAYS_ON, ON_WHILE_CHARGING, NORMAL }
     fun screenMode(context: Context): ScreenMode =
         runCatching { ScreenMode.valueOf(sp(context).getString("screen_mode", null)!!) }.getOrDefault(ScreenMode.ON_WHILE_CHARGING)

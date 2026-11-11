@@ -336,7 +336,7 @@ object DeviceActions {
             setPadding(pad, (8 * d).toInt(), pad, 0)
         }
         box.addView(TextView(activity).apply {
-            text = "Tell RF Sentinel what this is, so it knows it next time, even under a new address."
+            text = "Tell Kokoho what this is, so it knows it next time, even under a new address."
         })
         val label = EditText(activity).apply {
             hint = "What it is, e.g. pole camera on the bridge"
@@ -407,7 +407,7 @@ object DeviceActions {
     const val MAX_SHARED = 4
 
     /**
-     * Shares a signature report (see [SignatureReport]) so a device RF Sentinel
+     * Shares a signature report (see [SignatureReport]) so a device Kokoho
      * doesn't know can be added. The user sees exactly what is shared first.
      */
     fun reportUnknown(activity: AppCompatActivity, mac: String) {
@@ -438,7 +438,7 @@ object DeviceActions {
             .setTitle("Report unknown device")
             .setView(ScrollView(activity).apply { addView(box) })
             .setPositiveButton("Share") { _, _ ->
-                val text = "RF Sentinel signature report - please open an issue at\n" +
+                val text = "Kokoho signature report - please open an issue at\n" +
                     SignatureReport.ISSUE_URL + "\n\n" + report()
                 activity.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
@@ -478,7 +478,7 @@ object DeviceActions {
                 when (which) {
                     0 -> {
                         com.rfsentinel.app.data.TrackerMutes.mute(activity, mac, kind, snap.rssi, follow = true)
-                        toast(activity, "Ignored - RF Sentinel follows it when its address changes")
+                        toast(activity, "Ignored - Kokoho follows it when its address changes")
                     }
                     1 -> {
                         com.rfsentinel.app.data.TrackerMutes.mute(activity, mac, kind, snap.rssi, follow = false)
@@ -643,7 +643,7 @@ object DeviceActions {
 
     fun copy(activity: AppCompatActivity, text: String) {
         val cm = activity.getSystemService(ClipboardManager::class.java)
-        cm.setPrimaryClip(ClipData.newPlainText("RF Sentinel", text))
+        cm.setPrimaryClip(ClipData.newPlainText("Kokoho", text))
         toast(activity, "Copied")
     }
 

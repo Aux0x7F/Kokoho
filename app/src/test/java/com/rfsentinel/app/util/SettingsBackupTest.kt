@@ -64,7 +64,7 @@ class SettingsBackupTest {
             assertFalse("$bad is not in the backup", file.contains(bad))
         assertTrue(file.contains("sound_enabled"))
         val root = JSONObject(file)
-        assertEquals("RF Sentinel", root.getString("app")); assertEquals(SettingsBackup.FORMAT, root.getInt("format"))
+        assertEquals("Kokoho", root.getString("app")); assertEquals(SettingsBackup.FORMAT, root.getInt("format"))
     }
 
     @Test
@@ -72,11 +72,11 @@ class SettingsBackupTest {
         val main = sp("rf_sentinel_prefs"); main.edit().clear().putInt("retention_days", 12).commit()
         fun refused(text: String): String = (SettingsBackup.restore(ctx, text) as SettingsBackup.Result.Refused).why
         assertTrue(refused("not json at all").contains("not valid JSON"))
-        assertTrue(refused("""{"app":"Something else","format":1,"files":{}}""").contains("isn't an RF Sentinel backup"))
-        assertTrue(refused("""{"app":"RF Sentinel","format":99,"files":{}}""").contains("newer version"))
-        assertTrue(refused("""{"app":"RF Sentinel","format":1}""").contains("no settings"))
+        assertTrue(refused("""{"app":"Something else","format":1,"files":{}}""").contains("isn't a Kokoho backup"))
+        assertTrue(refused("""{"app":"Kokoho","format":99,"files":{}}""").contains("newer version"))
+        assertTrue(refused("""{"app":"Kokoho","format":1}""").contains("no settings"))
         // One damaged entry stops the whole restore: nothing is half applied.
-        refused("""{"app":"RF Sentinel","format":1,"files":{"rf_sentinel_prefs":{"retention_days":{"t":"i","v":3},"broken":{"t":"zzz","v":1}}}}""")
+        refused("""{"app":"Kokoho","format":1,"files":{"rf_sentinel_prefs":{"retention_days":{"t":"i","v":3},"broken":{"t":"zzz","v":1}}}}""")
         assertEquals(12, main.getInt("retention_days", 0))
         assertTrue(refused("x".repeat(SettingsBackup.MAX_BYTES + 1)).contains("too big"))
         assertNull(main.getString("broken", null))
@@ -131,7 +131,7 @@ class SettingsBackupTest {
     @Test
     fun aDamagedThemeStopsTheWholeRestore() {
         val main = sp("rf_sentinel_prefs"); main.edit().clear().putInt("retention_days", 12).commit()
-        val bad = """{"app":"RF Sentinel","format":1,"files":{"rf_sentinel_prefs":{"retention_days":{"t":"i","v":3}}},"customThemes":[{"id":"x","app":"Other"}]}"""
+        val bad = """{"app":"Kokoho","format":1,"files":{"rf_sentinel_prefs":{"retention_days":{"t":"i","v":3}}},"customThemes":[{"id":"x","app":"Other"}]}"""
         assertTrue(SettingsBackup.restore(ctx, bad) is SettingsBackup.Result.Refused)
         assertEquals(12, main.getInt("retention_days", 0))
         assertTrue(SettingsBackup.inspect("nope") is SettingsBackup.Inspect.Bad)

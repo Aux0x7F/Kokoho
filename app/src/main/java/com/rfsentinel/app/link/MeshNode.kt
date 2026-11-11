@@ -28,8 +28,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  * A Meshtastic node (LoRa board with the official firmware) used by Sentinel Link to reach Sentinels far away.
  *
  * Talks to the node over Bluetooth with Meshtastic's phone API, like the Meshtastic app does: asks for its config,
- * makes sure it has the group's private "RFSentinel" channel (adds it to a free slot when missing, key made from
- * the group key), then sends and receives RF Sentinel's packets on that channel. Reconnects on its own.
+ * makes sure it has the group's private "Kokoho" channel (adds it to a free slot when missing, key made from
+ * the group key), then sends and receives Kokoho's packets on that channel. Reconnects on its own.
  * The node serves one app at a time: the Meshtastic app on this phone can't use it meanwhile.
  */
 @SuppressLint("MissingPermission")
@@ -63,7 +63,7 @@ object MeshNode {
     @Volatile var status = ""; private set
     /** What the node reports, for the map (on this thread). */
     @Volatile var heard: ((MeshProto.From) -> Unit)? = null
-    /** Connected, set up, and the RFSentinel channel in place. */
+    /** Connected, set up, and the Kokoho channel in place. */
     @Volatile var ready = false; private set
     @Volatile var lastSent = 0L; private set
     @Volatile var lastHeard = 0L; private set
@@ -97,7 +97,7 @@ object MeshNode {
     private val channels = HashMap<Int, MeshProto.From.ChannelInfo>()
     /** The node's buzzer / LED alert settings from this connection's config download. */
     private var extNotif: MeshProto.From.ExtNotif? = null
-    /** The node's slot RF Sentinel sends on (1-7), -1 until set up. */
+    /** The node's slot Kokoho sends on (1-7), -1 until set up. */
     @Volatile var channelIndex = -1; private set
     private var channelTries = 0
     /** Why the node can't be used as it is (no region, no free channel): kept on screen while it retries. */
@@ -127,7 +127,7 @@ object MeshNode {
     private var droppedCount = 0
     private var badCount = 0
 
-    /** Starts using the node at [nodeAddress]; [packets] gets RF Sentinel payloads from the mesh (on this thread). */
+    /** Starts using the node at [nodeAddress]; [packets] gets Kokoho payloads from the mesh (on this thread). */
     fun start(context: Context, nodeAddress: String, groupKey: ByteArray, packets: (ByteArray) -> Unit) = h.post {
         ctx = context.applicationContext
         onPacket = packets
@@ -168,7 +168,7 @@ object MeshNode {
      */
     val canSend get() = ready && channelIndex >= 0 && txEnabled
 
-    /** Sends one RF Sentinel payload on the RFSentinel channel; false when the node isn't ready. */
+    /** Sends one Kokoho payload on the Kokoho channel; false when the node isn't ready. */
     fun send(payload: ByteArray, urgent: Boolean): Boolean {
         if (!canSend) return false
         h.post {
@@ -501,7 +501,7 @@ object MeshNode {
         }
     }
 
-    /** Settings read: use the RFSentinel channel, adding it first when it's missing or has another group's key. */
+    /** Settings read: use the Kokoho channel, adding it first when it's missing or has another group's key. */
     private fun configDone() {
         val psk = channelPsk ?: return
         if (region == 0) { stuck("set its LoRa region in the Meshtastic app first"); return }
@@ -545,7 +545,7 @@ object MeshNode {
 
     /**
      * Silenced: the node's external notification (its buzzer, vibration and LED alerts) is turned off, remembering it was
-     * on; not silenced any more: turned back on, only if RF Sentinel turned it off. Every other setting is written back as
+     * on; not silenced any more: turned back on, only if Kokoho turned it off. Every other setting is written back as
      * read. The node saves it and may restart (it reconnects).
      */
     private fun applyQuiet() {

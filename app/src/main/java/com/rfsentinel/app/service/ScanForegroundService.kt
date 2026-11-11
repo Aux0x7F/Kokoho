@@ -384,7 +384,7 @@ class ScanForegroundService : Service() {
         }
 
         val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RFSentinel::ScanWakeLock")
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Kokoho::ScanWakeLock")
         wakeLock?.setReferenceCounted(false)
     }
 

@@ -1,3 +1,0 @@
-• On first start RF Sentinel asks once whether it may check GitHub for updates when it opens. It never checks before you answer.
-• It also asks before loading camera locations from OpenStreetMap; nothing is downloaded until you allow it.
-• Change either any time in Settings.

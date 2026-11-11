@@ -100,7 +100,7 @@ object LiveExport {
         if (here != null) features.put(JSONObject()
             .put("type", "Feature")
             .put("geometry", JSONObject().put("type", "Point").put("coordinates", JSONArray().put(here.longitude).put(here.latitude)))
-            .put("properties", JSONObject().put("name", "You (RF Sentinel)").put("updated", ExportText.iso(now))))
+            .put("properties", JSONObject().put("name", "You (Kokoho)").put("updated", ExportText.iso(now))))
         return JSONObject().put("type", "FeatureCollection").put("features", features).toString()
     }
 }

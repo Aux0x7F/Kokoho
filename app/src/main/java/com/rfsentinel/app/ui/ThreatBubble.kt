@@ -32,7 +32,7 @@ import kotlin.math.min
  * scanning: green = all clear, orange = a probable match, red = a strong match
  * or something following you, with the number of flagged devices. Tap to open
  * the app, drag to move. Needs the "Display over other apps" permission; hidden
- * while RF Sentinel itself is on screen. Each new alert also shows a small card
+ * while Kokoho itself is on screen. Each new alert also shows a small card
  * next to the bubble for a few seconds saying what was detected, and Locate or
  * pinpointing shows the live read card under it (unless the floating map shows it).
  */
@@ -193,12 +193,12 @@ object ThreatBubble {
             color = 0xFFFFFFFF.toInt(); textAlign = Paint.Align.CENTER; isFakeBoldText = true; textSize = 20 * d
         }
 
-        init { contentDescription = "RF Sentinel threat level" }
+        init { contentDescription = "Kokoho threat level" }
 
         fun set(level: Level, count: Int) {
             if (level == this.level && count == this.count) return
             this.level = level; this.count = count
-            contentDescription = "RF Sentinel: ${if (count == 0) "all clear" else "$count flagged"}"
+            contentDescription = "Kokoho: ${if (count == 0) "all clear" else "$count flagged"}"
             invalidate()
         }
 

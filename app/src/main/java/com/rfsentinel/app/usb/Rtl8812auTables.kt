@@ -7,7 +7,7 @@ package com.rfsentinel.app.usb
  * Generated from the Realtek rtl8812au Linux driver as maintained in aircrack-ng/rtl8812au
  * (hal/phydm/rtl8812a/halhwimg8812a_{mac,bb,rf}.c and hal/rtl8812a/Hal8812PwrSeq): the vendor's condition
  * blocks are resolved for a USB board without an external PA or LNA, which is the plain-board branch, and
- * the tables are kept as they are. GPL-2.0, used under the GNU GPL v3 of RF Sentinel. The transmit power,
+ * the tables are kept as they are. GPL-2.0, used under the GNU GPL v3 of Kokoho. The transmit power,
  * power-by-rate and power-tracking tables are not here: nothing is ever sent.
  */
 

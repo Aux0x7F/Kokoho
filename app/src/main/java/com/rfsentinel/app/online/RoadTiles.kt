@@ -213,7 +213,7 @@ object RoadTiles {
     private fun download(url: String): ByteArray? = runCatching {
         val c = URL(url).openConnection() as HttpURLConnection
         c.connectTimeout = 10_000; c.readTimeout = 15_000
-        c.setRequestProperty("User-Agent", "RFSentinel/${com.rfsentinel.app.BuildConfig.VERSION_NAME}")
+        c.setRequestProperty("User-Agent", "Kokoho/${com.rfsentinel.app.BuildConfig.VERSION_NAME}")
         try {
             if (c.responseCode != 200) null
             else c.inputStream.use { s ->

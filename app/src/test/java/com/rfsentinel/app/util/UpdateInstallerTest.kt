@@ -17,9 +17,9 @@ import java.io.File
 class UpdateInstallerTest {
 
     private val release = """
-        {"tag_name":"v2.21.0","html_url":"https://github.com/CIS-C0/RFSentinel/releases/tag/v2.21.0","assets":[
+        {"tag_name":"v2.21.0","html_url":"https://github.com/Aux0x7F/Kokoho/releases/tag/v2.21.0","assets":[
           {"name":"notes.txt","browser_download_url":"https://example.invalid/notes.txt","size":10},
-          {"name":"RFSentinel-v2.21.0-release.apk","browser_download_url":"https://example.invalid/RFSentinel-v2.21.0-release.apk",
+          {"name":"Kokoho-v2.21.0-release.apk","browser_download_url":"https://example.invalid/Kokoho-v2.21.0-release.apk",
            "size":33755804,"digest":"sha256:11bda3ddc0c407d46383ad780d7678129ac1078c0a651dd45ab1dce24bd24d70"}]}
     """.trimIndent()
 
@@ -36,8 +36,8 @@ class UpdateInstallerTest {
     @Test
     fun eachBuildTakesItsOwnApk() {
         val both = """{"tag_name":"v2.24.0","assets":[
-            {"name":"RFSentinel-v2.24.0-foss.apk","browser_download_url":"f","size":2},
-            {"name":"RFSentinel-v2.24.0-release.apk","browser_download_url":"r","size":3}]}"""
+            {"name":"Kokoho-v2.24.0-foss.apk","browser_download_url":"f","size":2},
+            {"name":"Kokoho-v2.24.0-release.apk","browser_download_url":"r","size":3}]}"""
         assertEquals("r", UpdateChecker.parseLatest(both, foss = false).apkUrl)
         assertEquals("f", UpdateChecker.parseLatest(both, foss = true).apkUrl)
         // A release without a FOSS APK offers the FOSS build nothing to install.
@@ -46,7 +46,7 @@ class UpdateInstallerTest {
 
     @Test
     fun aReleaseWithoutAChecksumOrApkStillReads() {
-        val l = UpdateChecker.parseLatest("""{"tag_name":"v2.21.0","assets":[{"name":"RFSentinel-v2.21.0-release.apk","browser_download_url":"u","size":5}]}""", foss = false)
+        val l = UpdateChecker.parseLatest("""{"tag_name":"v2.21.0","assets":[{"name":"Kokoho-v2.21.0-release.apk","browser_download_url":"u","size":5}]}""", foss = false)
         assertNull(l.apkSha256)
         assertEquals(5L, l.apkSize)
         assertNull(UpdateChecker.parseLatest("""{"tag_name":"v2.21.0"}""").apkUrl)
@@ -79,7 +79,7 @@ class UpdateInstallerTest {
     fun cleaningUpRemovesLeftoverDownloads() {
         val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
         val dir = File(ctx.cacheDir, "updates").apply { mkdirs() }
-        File(dir, "RFSentinel-v1.apk").writeText("x"); File(dir, "RFSentinel-v2.apk.part").writeText("y")
+        File(dir, "Kokoho-v1.apk").writeText("x"); File(dir, "Kokoho-v2.apk.part").writeText("y")
         UpdateInstaller.cleanUp(ctx)
         assertTrue(dir.listFiles().isNullOrEmpty())
     }
@@ -102,7 +102,7 @@ class UpdateInstallerTest {
         val list = """[
             {"tag_name":"v2.34.0","draft":true,"assets":[]},
             {"tag_name":"v2.32.1","prerelease":false,"assets":[]},
-            {"tag_name":"v2.33.0","prerelease":true,"assets":[{"name":"RFSentinel-v2.33.0-release.apk","browser_download_url":"p","size":1}]},
+            {"tag_name":"v2.33.0","prerelease":true,"assets":[{"name":"Kokoho-v2.33.0-release.apk","browser_download_url":"p","size":1}]},
             {"tag_name":"v2.32.0","prerelease":false,"assets":[]}]"""
         val l = UpdateChecker.parseNewest(list, foss = false)
         assertEquals("2.33.0", l.version)

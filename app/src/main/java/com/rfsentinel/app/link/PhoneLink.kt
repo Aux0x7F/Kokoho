@@ -34,7 +34,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
 /**
- * Sentinel Link: RF Sentinel phones near each other share what they hear over Bluetooth LE, so every
+ * Sentinel Link: Kokoho phones near each other share what they hear over Bluetooth LE, so every
  * linked phone shows the same devices, radar and map, whichever phone (or its ESP32 board, USB adapter,
  * SDR) heard a device first.
  *

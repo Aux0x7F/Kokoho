@@ -1,8 +1,8 @@
 package com.rfsentinel.app.online.wazert;
 
 // Vendored from highway-radar-sabre-plus (MIT). See LICENSE in this directory.
-// Changed for RF Sentinel: package declaration, the user-report submission
-// methods are removed — RF Sentinel only reads alerts, it never reports — and
+// Changed for Kokoho: package declaration, the user-report submission
+// methods are removed — Kokoho only reads alerts, it never reports — and
 // the debug logs no longer print the anonymous account name or session id.
 
 import android.os.SystemClock;

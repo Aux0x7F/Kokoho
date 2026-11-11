@@ -220,7 +220,7 @@ object UsbBluetooth {
         var ext = false
         try {
             val id = "%04x:%04x".format(d.vendorId, d.productId)
-            com.rfsentinel.app.util.HwLogs.usbBt.log("=== USB Bluetooth bring-up ($id, interface ${intf.id}) - RF Sentinel ${com.rfsentinel.app.BuildConfig.VERSION_NAME} ===")
+            com.rfsentinel.app.util.HwLogs.usbBt.log("=== USB Bluetooth bring-up ($id, interface ${intf.id}) - Kokoho ${com.rfsentinel.app.BuildConfig.VERSION_NAME} ===")
             synchronized(partial) { partial.clear() } // pieces of split reports from an earlier session
             BulkRx.claim("BT", conn, intf, com.rfsentinel.app.util.HwLogs.usbBt::log) { halt.get() }
             val hci = HciUsb(conn, evtIn, "BT").also { h = it }
