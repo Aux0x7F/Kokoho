@@ -1,0 +1,652 @@
+package org.tucsoncommunity.kokoho.ui
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.graphics.Typeface
+import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.tucsoncommunity.kokoho.BuildConfig
+import org.tucsoncommunity.kokoho.data.AppDatabase
+import org.tucsoncommunity.kokoho.data.Favorites
+import org.tucsoncommunity.kokoho.data.TrustRules
+import org.tucsoncommunity.kokoho.data.TrustedNetworks
+import org.tucsoncommunity.kokoho.data.WhitelistCache
+import org.tucsoncommunity.kokoho.data.WhitelistEntity
+import org.tucsoncommunity.kokoho.databinding.DialogAddWatchlistBinding
+import org.tucsoncommunity.kokoho.detect.SignatureReport
+import org.tucsoncommunity.kokoho.oui.OuiEntry
+import org.tucsoncommunity.kokoho.oui.OuiWatchlist
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import org.tucsoncommunity.kokoho.util.MacUtil
+import kotlinx.coroutines.launch
+
+/** Actions on one device, shared by the list, the radar and the detail screen. */
+object DeviceActions {
+
+    /**
+     * Opens the Entity Details view for a logged or active detection.
+     */
+    fun openDetection(activity: AppCompatActivity, d: org.tucsoncommunity.kokoho.data.DetectionEntity) {
+        openDetails(activity, d.mac)
+    }
+
+    fun openDetails(activity: AppCompatActivity, mac: String) {
+        activity.startActivity(
+            Intent(activity, DeviceDetailActivity::class.java).putExtra(DeviceDetailActivity.EXTRA_MAC, mac)
+        )
+    }
+
+    /**
+     * Your own watchlist entries this device is on: its address, its WPS UUID, probe fingerprint or probe shape,
+     * and a name-start rule its [name] matches. The device page's button, its click and the long-press menu all
+     * use this, so they agree.
+     */
+    fun watchEntries(mac: String, name: String?): List<OuiEntry> {
+        val probe = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)
+        val named = name?.trimStart().orEmpty()
+        return listOfNotNull(OuiWatchlist.customAddressEntry(mac)) + listOfNotNull(
+            probe?.wps?.uuid?.let { org.tucsoncommunity.kokoho.usb.ProbeIntel.uuidKey(it) },
+            probe?.fingerprint,
+            probe?.skeleton?.let { org.tucsoncommunity.kokoho.usb.ProbeIntel.shapeKey(it) }
+        ).mapNotNull { OuiWatchlist.customEntry(OuiEntry.FINGERPRINT + it) } +
+            if (named.isEmpty()) emptyList() else OuiWatchlist.allEntries().filter {
+                it.isCustom && it.isStartsRule && named.startsWith(it.ruleText, ignoreCase = true)
+            }
+    }
+
+    /** Takes [entry] off the watchlist, with Undo. */
+    fun removeWatch(activity: AppCompatActivity, entry: OuiEntry) {
+        OuiWatchlist.removeCustomEntry(activity, entry.prefix)
+        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Removed ${entry.prefix} from the watchlist") {
+            OuiWatchlist.addCustomEntry(activity, entry)
+        }
+    }
+
+    /** A device already on the watchlist: take it off one of the ways it is on, or add another way. */
+    fun watchlistMenu(activity: AppCompatActivity, mac: String, name: String?, wifi: Boolean, done: () -> Unit = {}) {
+        val entries = watchEntries(mac, name)
+        if (entries.isEmpty()) { addToWatchlist(activity, mac, name, wifi); return }
+        val items = entries.map { "Remove: ${it.label} (${it.prefix})" } + "Add another way..."
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Watchlist")
+            .setItems(items.toTypedArray()) { _, which ->
+                if (which < entries.size) { removeWatch(activity, entries[which]); done() } else addToWatchlist(activity, mac, name, wifi)
+            }
+            .show()
+    }
+
+    /** Long-press menu for list/log items — aligned with Kokoho Entity Details menu. */
+    fun showQuickActions(activity: AppCompatActivity, mac: String, onChanged: (() -> Unit)? = null) {
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.ensureLoaded(activity)
+        val postureSnap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(activity)
+        val matchedThreat = postureSnap.activeThreats.firstOrNull {
+            it.uuid.equals(mac, ignoreCase = true) || mac.endsWith(it.uuid, ignoreCase = true)
+        }
+        val entityUuid = matchedThreat?.uuid ?: mac
+        val snap = DeviceRegistry.get(mac)
+
+        val defaultClassification = matchedThreat?.friendlyLabel
+            ?: snap?.best?.label
+            ?: snap?.name
+            ?: mac
+        val customClassification = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getCustomEntityLabel(activity, entityUuid)
+        val titleLabel = customClassification ?: defaultClassification
+
+        val whitelisted = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isEntityWhitelisted(activity, entityUuid) ||
+            WhitelistCache.inTable(mac)
+        val watched = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isEntityWatched(activity, entityUuid) ||
+            Favorites.contains(mac)
+
+        val items = listOf<Pair<String, () -> Unit>>(
+            "Details" to {
+                openDetails(activity, entityUuid)
+            },
+            (if (whitelisted) "Remove from Whitelist" else "Whitelist") to {
+                val next = !whitelisted
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.setEntityWhitelisted(activity, entityUuid, next)
+                if (!next && WhitelistCache.inTable(mac)) {
+                    unwhitelist(activity, mac)
+                }
+                Toast.makeText(
+                    activity,
+                    if (next) "Whitelisted locally" else "Removed from local whitelist",
+                    Toast.LENGTH_SHORT
+                ).show()
+                onChanged?.invoke()
+            },
+            (if (watched) "Unwatch" else "Watch") to {
+                val next = !watched
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.setEntityWatched(activity, entityUuid, next)
+                activity.lifecycleScope.launch {
+                    Favorites.set(activity, mac, next, snap?.name, snap?.vendor, snap?.deviceType)
+                }
+                Toast.makeText(
+                    activity,
+                    if (next) "Added to Watch (local)" else "Removed from Watch",
+                    Toast.LENGTH_SHORT
+                ).show()
+                onChanged?.invoke()
+            },
+            "Share" to {
+                val lat = matchedThreat?.lat ?: snap?.broadcast?.lat ?: snap?.located?.lat ?: 32.2226
+                val lon = matchedThreat?.lon ?: snap?.broadcast?.lon ?: snap?.located?.lon ?: -110.9747
+                val radiusM = matchedThreat?.mapCircleRadiusM ?: matchedThreat?.estimatedDistanceM ?: 350
+                val coordStr = "%.5f, %.5f".format(java.util.Locale.US, lat, lon)
+                val radiusStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatAccuracyRadius(activity, radiusM)
+                val shareText = buildString {
+                    appendLine("Kokoho Detection: $titleLabel")
+                    appendLine("$coordStr ($radiusStr)")
+                    if (matchedThreat != null && matchedThreat.evidenceSources.isNotEmpty()) {
+                        appendLine("Evidence:")
+                        matchedThreat.evidenceSources.forEach { appendLine("• ${it.detail}") }
+                    }
+                }.trim()
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, shareText)
+                }
+                activity.startActivity(Intent.createChooser(sendIntent, "Share detection"))
+            }
+        )
+
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(titleLabel)
+            .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
+            .show()
+    }
+
+    /** Logs the device's alert as false (History > False alerts) and mutes it, with an optional note. */
+    fun markFalseAlert(activity: AppCompatActivity, mac: String, done: () -> Unit = {}) {
+        val d = activity.resources.displayMetrics.density
+        val note = EditText(activity).apply { hint = "What is it really? (optional)"; setSingleLine(false) }
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = (20 * d).toInt()
+            setPadding(p, (8 * d).toInt(), p, 0)
+            addView(TextView(activity).apply { text = "Saved in History > False alerts to look at or export later. Its alerts are muted until you take it off that list." })
+            addView(note)
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("False alert")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                activity.lifecycleScope.launch {
+                    val entry = org.tucsoncommunity.kokoho.data.FalseAlerts.mark(activity, mac, note.text.toString())
+                    if (entry == null) { toast(activity, "Nothing flagged on this device to log"); return@launch }
+                    org.tucsoncommunity.kokoho.util.Undo.show(activity, "Logged as a false alert and muted") {
+                        org.tucsoncommunity.kokoho.data.FalseAlerts.remove(activity, mac); done()
+                    }
+                    done()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Takes the device off the false alerts and unmutes it. */
+    fun unmarkFalseAlert(activity: AppCompatActivity, mac: String, done: () -> Unit = {}) {
+        val entry = org.tucsoncommunity.kokoho.data.FalseAlerts.all(activity).firstOrNull { it.match.mac == mac } ?: return
+        org.tucsoncommunity.kokoho.data.FalseAlerts.remove(activity, mac)
+        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Removed from false alerts, alerts back on") {
+            org.tucsoncommunity.kokoho.data.FalseAlerts.add(activity, entry); done()
+        }
+        done()
+    }
+
+    /**
+     * Adds a device to the watchlist, either as this exact device (full MAC, the
+     * default), as its whole vendor prefix (disabled for randomized addresses), or
+     * as every network / device whose name starts the same way (an SSID prefix).
+     */
+    fun addToWatchlist(activity: AppCompatActivity, mac: String, name: String?, wifi: Boolean = false) {
+        val randomized = MacUtil.isRandomized(mac)
+        val b = DialogAddWatchlistBinding.inflate(activity.layoutInflater)
+        b.scopeDevice.text = "Only this device ($mac)"
+        // The prefix length: the vendor's own IEEE block to start with, longer to narrow it to one batch of devices.
+        var digits = org.tucsoncommunity.kokoho.detect.VendorDb.blockDigits(mac) ?: 6
+        fun showPrefix() {
+            b.scopePrefix.text = "Every device whose address starts with ${MacUtil.prefix(mac, digits)} (${digits * 4} bits)"
+        }
+        showPrefix()
+        b.prefixBitsSlider.value = digits * 4f
+        b.prefixBitsSlider.setLabelFormatter { "${it.toInt()} bits" }
+        b.prefixBitsSlider.addOnChangeListener { _, v, _ -> digits = v.toInt() / 4; showPrefix() }
+        if (randomized) {
+            b.warningText.visibility = View.VISIBLE
+            b.warningText.text = "This is a randomized (private) address: it may change later, and its prefix " +
+                "is not a real vendor, so prefix matching is disabled. Tip: add a name rule under " +
+                "Watchlist & rules instead."
+            b.scopePrefix.isEnabled = false
+        }
+        // A probe fingerprint (USB adapter) marks the device model / OS, even across random addresses.
+        val fp = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.fingerprint
+        // FlipDeFlock's coarser probe shape: also survives random addresses, but many phones share one.
+        val shape = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.skeleton?.let { org.tucsoncommunity.kokoho.usb.ProbeIntel.shapeKey(it) }
+        // Its WPS UUID: one exact device, the same under every random address it uses.
+        val uuid = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.wps?.uuid?.let { org.tucsoncommunity.kokoho.usb.ProbeIntel.uuidKey(it) }
+        if (uuid != null) {
+            b.scopeUuid.visibility = View.VISIBLE
+            b.scopeUuid.text = "This exact device, under any address (WPS UUID ${uuid.removePrefix("uuid-")})"
+        }
+        if (shape != null) {
+            b.scopeShape.visibility = View.VISIBLE
+            b.scopeShape.text = "Every device whose probe requests are built the same way (${shape.removePrefix("shape-")}; " +
+                "coarse: many phones share a shape)"
+        }
+        if (fp != null) {
+            b.scopeFingerprint.visibility = View.VISIBLE
+            b.scopeFingerprint.text = "Every device of this type (probe fingerprint $fp)"
+            if (randomized) b.warningText.text = "This is a randomized (private) address: it may change later. " +
+                "The probe fingerprint below stays the same - watch that to catch this type of device."
+        }
+        // The start of its name / SSID: catches the whole family ("Flock-..."), whatever the address.
+        val named = name?.trim().orEmpty()
+        if (named.isNotEmpty()) {
+            b.scopeStarts.visibility = View.VISIBLE
+            b.scopeStarts.text = if (wifi) "Every network whose name (SSID) starts with:" else "Every device whose name starts with:"
+            b.startsInput.setText(named)
+            if (randomized && fp == null) b.warningText.text = "This is a randomized (private) address: it may change later, and its " +
+                "prefix is not a real vendor, so prefix matching is disabled. Tip: watch the start of its name instead."
+        }
+        b.scopeGroup.setOnCheckedChangeListener { _, id ->
+            b.prefixBitsSlider.visibility = if (id == b.scopePrefix.id) View.VISIBLE else View.GONE
+            b.startsInput.visibility = if (id == b.scopeStarts.id) View.VISIBLE else View.GONE
+            if (id == b.scopeStarts.id) b.startsInput.requestFocus()
+        }
+        // Ways it is already watched can't be added twice: greyed out, and the first free way is picked.
+        listOfNotNull(b.scopeDevice to mac, uuid?.let { b.scopeUuid to OuiEntry.FINGERPRINT + it },
+            shape?.let { b.scopeShape to OuiEntry.FINGERPRINT + it }, fp?.let { b.scopeFingerprint to OuiEntry.FINGERPRINT + it })
+            .filter { (_, key) -> OuiWatchlist.customEntry(key) != null }
+            .forEach { (button, _) -> button.isEnabled = false; button.isChecked = false; button.text = "${button.text}\nAlready on your watchlist" }
+        if (b.scopeGroup.checkedRadioButtonId == View.NO_ID) {
+            listOf(b.scopeUuid, b.scopeFingerprint, b.scopeShape, b.scopeStarts, b.scopePrefix)
+                .firstOrNull { it.isEnabled && it.visibility == View.VISIBLE }?.let { b.scopeGroup.check(it.id) }
+        }
+        b.labelInput.setText(name ?: "")
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Add to watchlist")
+            .setView(b.root)
+            .setPositiveButton("Add") { _, _ ->
+                val wholePrefix = b.scopePrefix.isChecked
+                val byFingerprint = fp != null && b.scopeFingerprint.isChecked
+                val byShape = shape != null && b.scopeShape.isChecked
+                val byUuid = uuid != null && b.scopeUuid.isChecked
+                val start = b.startsInput.text.toString().trim()
+                val byStart = named.isNotEmpty() && b.scopeStarts.isChecked
+                if (byStart && start.isEmpty()) { toast(activity, "Not added: enter the start of the name"); return@setPositiveButton }
+                val key = when {
+                    byStart -> OuiEntry.STARTS + start
+                    byUuid -> OuiEntry.FINGERPRINT + uuid
+                    byShape -> OuiEntry.FINGERPRINT + shape; byFingerprint -> OuiEntry.FINGERPRINT + fp
+                    wholePrefix -> MacUtil.prefix(mac, digits); else -> mac
+                }
+                if (b.scopeGroup.checkedRadioButtonId == View.NO_ID || OuiWatchlist.customEntry(key) != null) {
+                    toast(activity, "Already on your watchlist: $key"); return@setPositiveButton
+                }
+                // The label box holds the device's own full name: for a name prefix, say what is watched instead.
+                val typed = b.labelInput.text.toString().trim().takeUnless { byStart && it == named }.orEmpty()
+                val label = typed.ifEmpty {
+                    when {
+                        byStart -> (if (wifi) "SSID starts with " else "Name starts with ") + start
+                        byUuid -> "Device WPS UUID ${uuid!!.removePrefix("uuid-")}"
+                        byShape -> "Probe shape ${shape!!.removePrefix("shape-")}"; byFingerprint -> "Device type $fp"
+                        wholePrefix -> "Custom prefix $key"; else -> "Custom device $mac"
+                    }
+                }
+                OuiWatchlist.addCustomEntry(activity, OuiEntry(key, label, "user-added from live list", "custom"))
+                toast(activity, "Added $key to the watchlist")
+            }
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Custom rule...") { _, _ -> ComboRuleDialog.show(activity, facts(mac), name) }
+            .show()
+    }
+
+    /** This device's values for a custom rule ([ComboRuleDialog]). */
+    private fun facts(mac: String): org.tucsoncommunity.kokoho.oui.ComboRule.Facts? {
+        val s = DeviceRegistry.get(mac) ?: return null
+        val probe = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)
+        return org.tucsoncommunity.kokoho.oui.ComboRule.Facts(s.name, listOfNotNull(s.vendor),
+            org.tucsoncommunity.kokoho.oui.ComboRule.band(s.source == org.tucsoncommunity.kokoho.detect.Advert.Source.BLE, s.advert?.wifi?.frequencyMhz),
+            setOfNotNull(probe?.fingerprint, probe?.skeleton?.let { org.tucsoncommunity.kokoho.usb.ProbeIntel.shapeKey(it) }), s.deviceType, s.rssi)
+    }
+
+    /**
+     * "I saw it": the user confirmed what this device is (a camera on a pole, a patrol car...), so RF
+     * Sentinel learns every stable thing that identifies it, to know it again next time, even under a new
+     * address: its address when that is fixed, its Bluetooth advert pattern, its WiFi probe fingerprint.
+     * A pattern many devices nearby share (one phone model) is refused, and patterns learned this way
+     * stay probable matches ([LEARNED_SCORE]), never strong ones: only the exact address is certain.
+     */
+    fun learn(activity: AppCompatActivity, mac: String) {
+        val snap = DeviceRegistry.get(mac)
+        val advert = snap?.advert
+        val randomized = MacUtil.isRandomized(mac)
+        val d = activity.resources.displayMetrics.density
+        val pad = (20 * d).toInt()
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, (8 * d).toInt(), pad, 0)
+        }
+        box.addView(TextView(activity).apply {
+            text = "Tell Kokoho what this is, so it knows it next time, even under a new address."
+        })
+        val label = EditText(activity).apply {
+            hint = "What it is, e.g. pole camera on the bridge"
+            setSingleLine(true)
+            setText(snap?.best?.label ?: snap?.name ?: "")
+        }
+        box.addView(label)
+
+        // Each stable identity: key, what it is, how sure a later match is, and why it can't be used.
+        class Option(val key: String, val text: String, val score: Int?, val refused: String?)
+        val options = mutableListOf<Option>()
+        if (!randomized) options += Option(mac, "This exact address ($mac)", null, null)
+        if (advert != null) org.tucsoncommunity.kokoho.detect.AdvertFingerprint.of(advert)?.let { fp ->
+            val key = org.tucsoncommunity.kokoho.detect.AdvertFingerprint.key(advert)!!
+            val shared = DeviceRegistry.sharingFingerprint(fp)
+            options += Option(OuiEntry.ADVERT + key, "Its Bluetooth advert pattern ($key)", LEARNED_SCORE,
+                if (shared >= MAX_SHARED) "$shared devices nearby send the same pattern" else null)
+        }
+        org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.wps?.uuid?.let { u ->
+            options += Option(OuiEntry.FINGERPRINT + org.tucsoncommunity.kokoho.usb.ProbeIntel.uuidKey(u), "Its WPS UUID ($u)", LEARNED_SCORE, null)
+        }
+        org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.fingerprint?.let { fp ->
+            val shared = org.tucsoncommunity.kokoho.usb.ProbeIntel.sharing(fp)
+            options += Option(OuiEntry.FINGERPRINT + fp, "Its WiFi probe fingerprint ($fp)", LEARNED_SCORE,
+                if (shared >= MAX_SHARED) "$shared addresses heard today share it" else null)
+        }
+        val boxes = options.map { o ->
+            android.widget.CheckBox(activity).apply {
+                val watched = OuiWatchlist.customEntry(o.key) != null
+                text = o.text + when {
+                    watched -> "\nAlready on your watchlist"
+                    o.refused != null -> "\nNot usable: ${o.refused}, so it would match them too"
+                    o.score != null -> "\nMatches as probable (${o.score}%): similar devices can share it"
+                    else -> ""
+                }
+                isEnabled = o.refused == null && !watched
+                isChecked = isEnabled
+            }.also { box.addView(it) }
+        }
+        if (boxes.none { it.isEnabled }) box.addView(TextView(activity).apply {
+            setPadding(0, (8 * d).toInt(), 0, 0)
+            text = if (options.isEmpty()) "Nothing stable to learn: its address is private and changes, and it sends nothing " +
+                "that marks it apart from similar devices. Tip: add a name rule under Watchlist & rules."
+            else "Nothing new to learn from it."
+        })
+        val category = snap?.best?.category?.takeIf { it != org.tucsoncommunity.kokoho.detect.Category.CUSTOM }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Learn this device")
+            .setView(ScrollView(activity).apply { addView(box) })
+            .setPositiveButton("Learn") { _, _ ->
+                val chosen = options.filterIndexed { i, _ -> boxes[i].isEnabled && boxes[i].isChecked }
+                if (chosen.isEmpty()) { toast(activity, "Nothing learned"); return@setPositiveButton }
+                val name = label.text.toString().trim().ifEmpty { "Seen device" }
+                val entries = chosen.map { OuiEntry(it.key, name, OuiEntry.LEARNED, "custom", it.score, category?.name) }
+                entries.forEach { OuiWatchlist.addCustomEntry(activity, it) }
+                org.tucsoncommunity.kokoho.util.Undo.show(activity, "Learned $name (${entries.size} " +
+                    (if (entries.size == 1) "rule" else "rules") + ")") {
+                    entries.forEach { OuiWatchlist.removeCustomEntry(activity, it.prefix) }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** How sure a later match on a learned pattern (not an exact address) is: probable, never strong. */
+    const val LEARNED_SCORE = 60
+    /** A pattern this many devices share is refused: it would match them all. */
+    const val MAX_SHARED = 4
+
+    /**
+     * Shares a signature report (see [SignatureReport]) so a device Kokoho
+     * doesn't know can be added. The user sees exactly what is shared first.
+     */
+    fun reportUnknown(activity: AppCompatActivity, mac: String) {
+        val snap = DeviceRegistry.get(mac)
+        val advert = snap?.advert ?: run { toast(activity, "Device no longer in range"); return }
+        val d = activity.resources.displayMetrics.density
+        val note = EditText(activity).apply { hint = "What do you think it is? (optional)"; setSingleLine(false) }
+        val preview = TextView(activity).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextIsSelectable(true)
+        }
+        fun report() = SignatureReport.build(advert, snap.vendor, snap.deviceType, MacUtil.isRandomized(mac),
+            note.text.toString(), BuildConfig.VERSION_NAME)
+        preview.text = report()
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val p = (20 * d).toInt()
+            setPadding(p, (8 * d).toInt(), p, 0)
+            addView(TextView(activity).apply {
+                text = "Shares only what a signature needs: vendor prefix, name pattern (serial digits hidden), " +
+                    "service and manufacturer IDs. No full address, location or times."
+            })
+            addView(note)
+            addView(preview)
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Report unknown device")
+            .setView(ScrollView(activity).apply { addView(box) })
+            .setPositiveButton("Share") { _, _ ->
+                val text = "Kokoho signature report - please open an issue at\n" +
+                    SignatureReport.ISSUE_URL + "\n\n" + report()
+                activity.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "New device signature")
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }, "Share signature report"))
+            }
+            .setNeutralButton("Copy") { _, _ -> copy(activity, report()) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * AirTags and other Find My / Find Hub tags change their address (about daily
+     * away from their owner), so a MAC whitelist can't hold them. Offers ignoring
+     * it as your own tag (followed through address changes), for today, or
+     * pausing tracker follow warnings.
+     */
+    fun ignoreTracker(activity: AppCompatActivity, mac: String) {
+        val snap = DeviceRegistry.get(mac) ?: run { toast(activity, "Tracker no longer in range"); return }
+        val kind = snap.best?.label ?: return
+        val choices = arrayOf(
+            "It's mine - keep ignoring it\n(follows it when its address changes; best effort)",
+            "Ignore it today only\n(until its address changes, at most 24 h)",
+            "Pause all tracker follow warnings for 24 h"
+        )
+        val title = android.widget.TextView(activity).apply {
+            val d = resources.displayMetrics.density
+            setPadding((24 * d).toInt(), (20 * d).toInt(), (24 * d).toInt(), (8 * d).toInt())
+            textSize = 16f
+            text = "Ignore this tracker?\n\nIts Bluetooth address changes about once a day, so it can't be " +
+                "whitelisted like other devices. Only ignore a tag you know - a hidden tracker would stay silent too."
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setCustomTitle(title)
+            .setItems(choices) { _, which ->
+                when (which) {
+                    0 -> {
+                        org.tucsoncommunity.kokoho.data.TrackerMutes.mute(activity, mac, kind, snap.rssi, follow = true)
+                        toast(activity, "Ignored - Kokoho follows it when its address changes")
+                    }
+                    1 -> {
+                        org.tucsoncommunity.kokoho.data.TrackerMutes.mute(activity, mac, kind, snap.rssi, follow = false)
+                        toast(activity, "Ignored until its address changes (at most 24 h)")
+                    }
+                    else -> {
+                        org.tucsoncommunity.kokoho.util.Prefs.setTrackerFollowPausedUntil(activity, System.currentTimeMillis() + 24 * 3600_000L)
+                        toast(activity, "Tracker follow warnings paused for 24 hours")
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Whitelist one device, or every device like it: the watchlist's ways the other way round (same match, maker,
+     * address prefix, name, Bluetooth advert pattern, probe fingerprint; [TrustRules]). [ssid]: a WiFi network's name,
+     * kept with the network names ([TrustedNetworks]).
+     */
+    fun whitelist(activity: AppCompatActivity, mac: String, label: String, ssid: String? = null) {
+        val snap = DeviceRegistry.get(mac)
+        val wifiName = ssid?.trim().orEmpty()
+        val nameText = wifiName.ifEmpty { snap?.name?.trim().orEmpty() }
+        val best = TrustRules.likeHit(snap?.hits)
+        val vendor = snap?.vendor?.trim()?.takeIf { it.isNotEmpty() }
+        val advKey = snap?.advert?.takeIf { it.isBle }?.let { org.tucsoncommunity.kokoho.detect.AdvertFingerprint.key(it) }
+        val fp = org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.fingerprint
+        val pad = (20 * activity.resources.displayMetrics.density).toInt()
+        fun radio(t: String) = android.widget.RadioButton(activity).apply { id = View.generateViewId(); text = t }
+        fun input(t: String) = EditText(activity).apply {
+            setText(t); setSelection(t.length); visibility = View.GONE
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        val device = radio("Only this device ($mac)")
+        val like = best?.let { radio("Ignore all like this: every device matched as \"${it.label}\"") }
+        val maker = vendor?.let { radio("Every device made by $it") }
+        // A random (private) address has no real maker prefix.
+        var digits = org.tucsoncommunity.kokoho.detect.VendorDb.blockDigits(mac) ?: 6
+        val prefix = if (MacUtil.isRandomized(mac)) null else radio("")
+        fun showPrefix() { prefix?.text = "Every device whose address starts with ${MacUtil.prefix(mac, digits)} (${digits * 4} bits)" }
+        showPrefix()
+        val slider = prefix?.let {
+            com.google.android.material.slider.Slider(activity).apply {
+                valueFrom = 24f; valueTo = 44f; stepSize = 4f; value = (digits * 4f).coerceIn(24f, 44f); visibility = View.GONE
+                setLabelFormatter { "${it.toInt()} bits" }
+                addOnChangeListener { _, v, _ -> digits = v.toInt() / 4; showPrefix() }
+            }
+        }
+        val what = if (wifiName.isNotEmpty()) "network whose name (SSID)" else "device whose name"
+        val starts = nameText.takeIf { it.isNotEmpty() }?.let { radio("Every $what starts with:") }
+        val startInput = starts?.let { input(nameText) }
+        val contains = nameText.takeIf { it.isNotEmpty() }?.let { radio("Every $what contains:") }
+        val containsInput = contains?.let { input(nameText) }
+        val pattern = advKey?.let { radio("Every Bluetooth device with the same advert pattern ($it)") }
+        val type = fp?.let { radio("Every device of this type (probe fingerprint $it)") }
+        val warning = TextView(activity).apply {
+            visibility = View.GONE; setPadding(0, pad / 2, 0, 0)
+            text = if (best?.category == org.tucsoncommunity.kokoho.detect.Category.PUBLIC_SAFETY)
+                "Careful: police and emergency equipment matching this won't alert you any more, even ones you have never seen."
+            else "Every matching device is trusted from now on, even ones you have never seen. Remove it under Whitelist > Rules."
+        }
+        val extras = listOf(prefix to slider, starts to startInput, contains to containsInput)
+        val group = android.widget.RadioGroup(activity).apply {
+            listOfNotNull(device, like, maker, prefix, slider, starts, startInput, contains, containsInput, pattern, type).forEach { addView(it) }
+            check(device.id)
+            setOnCheckedChangeListener { _, id ->
+                extras.forEach { (r, v) -> v?.visibility = if (r != null && r.id == id) View.VISIBLE else View.GONE }
+                warning.visibility = if (id == device.id) View.GONE else View.VISIBLE
+                extras.firstOrNull { (r, _) -> r != null && r.id == id }?.second?.takeIf { it is EditText }?.requestFocus()
+            }
+        }
+        val box = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(TextView(activity).apply { text = "Trusted, never logged, flashed or alerted on." })
+            addView(group); addView(warning)
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Whitelist")
+            .setView(ScrollView(activity).apply { addView(box) })
+            .setPositiveButton("Whitelist") { _, _ ->
+                fun typed(e: EditText?) = e?.text?.toString()?.trim().orEmpty()
+                fun byName(match: TrustedNetworks.Match, kind: TrustRules.Kind, text: String) {
+                    if (text.isEmpty()) { toast(activity, "Not whitelisted: enter part of the name"); return }
+                    if (wifiName.isEmpty()) { trustRule(activity, TrustRules.Rule(kind, text, label)); return }
+                    val rule = TrustedNetworks.Rule(text, match)
+                    TrustedNetworks.save(activity, rule)
+                    org.tucsoncommunity.kokoho.util.Undo.show(activity, "Whitelisted networks: ${rule.label} $text") { TrustedNetworks.remove(activity, rule) }
+                }
+                val id = group.checkedRadioButtonId
+                when {
+                    like != null && best != null && id == like.id -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.LABEL, best.label, label))
+                    maker != null && vendor != null && id == maker.id -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.VENDOR, vendor, label))
+                    prefix != null && id == prefix.id -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.PREFIX, MacUtil.prefix(mac, digits), label))
+                    starts != null && id == starts.id -> byName(TrustedNetworks.Match.STARTS, TrustRules.Kind.STARTS, typed(startInput))
+                    contains != null && id == contains.id -> byName(TrustedNetworks.Match.CONTAINS, TrustRules.Kind.CONTAINS, typed(containsInput))
+                    pattern != null && advKey != null && id == pattern.id -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.ADVERT, advKey, label))
+                    type != null && fp != null && id == type.id -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.FINGERPRINT, fp, label))
+                    else -> activity.lifecycleScope.launch {
+                        val dao = AppDatabase.getInstance(activity).whitelistDao()
+                        val entry = WhitelistEntity(mac, label)
+                        dao.add(entry)
+                        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Whitelisted $mac") {
+                            activity.lifecycleScope.launch { dao.remove(entry) }
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** One tap from the long-press menu: whitelisting one Zebra printer this way hides every Zebra printer. */
+    fun ignoreAllLikeThis(activity: AppCompatActivity, mac: String) {
+        val best = TrustRules.likeHit(DeviceRegistry.get(mac)?.hits) ?: return
+        val police = best.category == org.tucsoncommunity.kokoho.detect.Category.PUBLIC_SAFETY
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Ignore all like this?")
+            .setMessage("Every device matched as \"${best.label}\" will be trusted: never logged, flashed or alerted on, " +
+                "even ones you have never seen." +
+                (if (police) "\n\nCareful: this is police or emergency equipment." else "") +
+                "\n\nUndo it under Whitelist > Rules.")
+            .setPositiveButton("Ignore all") { _, _ -> trustRule(activity, TrustRules.Rule(TrustRules.Kind.LABEL, best.label, best.label)) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    fun trustRule(activity: AppCompatActivity, rule: TrustRules.Rule) {
+        TrustRules.add(activity, rule)
+        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Whitelisted: ${rule.describe}") { TrustRules.remove(activity, rule) }
+    }
+
+    /** The device is trusted by a whitelist rule: that rule comes off (with Undo). */
+    fun untrustRule(activity: AppCompatActivity, rule: TrustRules.Rule) {
+        TrustRules.remove(activity, rule)
+        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Removed rule: ${rule.describe}") { TrustRules.add(activity, rule) }
+    }
+
+    /** The device is trusted by its network name: that name comes off the whitelist (with Undo). */
+    fun untrustNetwork(activity: AppCompatActivity, ssid: String?) {
+        val rule = TrustedNetworks.ruleFor(ssid)
+        if (rule == null) { toast(activity, "Edit network names under Whitelist"); return }
+        TrustedNetworks.remove(activity, rule)
+        org.tucsoncommunity.kokoho.util.Undo.show(activity, "Removed ${rule.text} from the whitelist") { TrustedNetworks.save(activity, rule) }
+    }
+
+    /** A WiFi network's name, for whitelisting it by name; null for Bluetooth and hidden networks. */
+    fun ssidOf(s: DeviceRegistry.Snapshot?): String? =
+        s?.takeIf { it.source == org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI }?.name?.trim()?.takeIf { it.isNotEmpty() }
+
+    fun unwhitelist(activity: AppCompatActivity, mac: String) {
+        activity.lifecycleScope.launch {
+            val dao = AppDatabase.getInstance(activity).whitelistDao()
+            val was = dao.get(mac) ?: WhitelistEntity(mac)
+            dao.remove(was)
+            org.tucsoncommunity.kokoho.util.Undo.show(activity, "Removed $mac from the whitelist") {
+                activity.lifecycleScope.launch { dao.add(was) }
+            }
+        }
+    }
+
+    fun copy(activity: AppCompatActivity, text: String) {
+        val cm = activity.getSystemService(ClipboardManager::class.java)
+        cm.setPrimaryClip(ClipData.newPlainText("Kokoho", text))
+        toast(activity, "Copied")
+    }
+
+    private fun toast(activity: AppCompatActivity, msg: String) =
+        Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
+}

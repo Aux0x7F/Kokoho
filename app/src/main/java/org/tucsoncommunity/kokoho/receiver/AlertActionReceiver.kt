@@ -1,0 +1,103 @@
+package org.tucsoncommunity.kokoho.receiver
+
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import org.tucsoncommunity.kokoho.data.AlertLog
+import org.tucsoncommunity.kokoho.data.AppDatabase
+import org.tucsoncommunity.kokoho.data.TrackerMutes
+import org.tucsoncommunity.kokoho.data.WhitelistEntity
+import org.tucsoncommunity.kokoho.detect.AddressType
+import org.tucsoncommunity.kokoho.detect.Category
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import org.tucsoncommunity.kokoho.util.Prefs
+import org.tucsoncommunity.kokoho.util.Voice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+/**
+ * The buttons on an alert: "Mute N min" (car) / "Snooze all N min" (phone) silences alert sound and voice for the
+ * snooze length set under Alerts; "Mute this 30 min" (phone) mutes that one device, like its row's mute button; "Ignore"
+ * (car) stops alerting about that device (a rotating tracker until its address changes, anything else via the
+ * whitelist - undo from the device's details).
+ */
+class AlertActionReceiver : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val app = context.applicationContext
+        when (intent.action) {
+            ACTION_SNOOZE -> snooze(app)
+            ACTION_MUTE -> intent.getStringExtra(EXTRA_MAC)?.let { org.tucsoncommunity.kokoho.data.AlertMutes.mute(app, it, System.currentTimeMillis() + org.tucsoncommunity.kokoho.data.AlertMutes.TAP_MS) } ?: return
+            ACTION_IGNORE -> {
+                val mac = intent.getStringExtra(EXTRA_MAC) ?: return
+                val pending = goAsync()
+                scope.launch {
+                    try { ignore(app, mac) } finally { pending.finish() }
+                }
+            }
+            else -> return
+        }
+        val id = intent.getIntExtra(EXTRA_NOTIFICATION, 0)
+        if (id != 0) runCatching { app.getSystemService(NotificationManager::class.java).cancel(id) }
+    }
+
+    companion object {
+        const val ACTION_SNOOZE = "org.tucsoncommunity.kokoho.action.SNOOZE_ALERTS"
+        const val ACTION_IGNORE = "org.tucsoncommunity.kokoho.action.IGNORE_DEVICE"
+        const val ACTION_MUTE = "org.tucsoncommunity.kokoho.action.MUTE_DEVICE"
+        private const val EXTRA_MAC = "mac"
+        private const val EXTRA_NOTIFICATION = "notification"
+
+        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        fun snoozeIntent(context: Context, notificationId: Int): PendingIntent = PendingIntent.getBroadcast(
+            context, notificationId,
+            Intent(context, AlertActionReceiver::class.java).setAction(ACTION_SNOOZE)
+                .putExtra(EXTRA_NOTIFICATION, notificationId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        fun ignoreIntent(context: Context, mac: String, notificationId: Int): PendingIntent = PendingIntent.getBroadcast(
+            context, mac.hashCode(),
+            Intent(context, AlertActionReceiver::class.java).setAction(ACTION_IGNORE)
+                .putExtra(EXTRA_MAC, mac).putExtra(EXTRA_NOTIFICATION, notificationId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        fun muteIntent(context: Context, mac: String, notificationId: Int): PendingIntent = PendingIntent.getBroadcast(
+            context, mac.hashCode() + 1,
+            Intent(context, AlertActionReceiver::class.java).setAction(ACTION_MUTE)
+                .putExtra(EXTRA_MAC, mac).putExtra(EXTRA_NOTIFICATION, notificationId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        /** Silences alert sound and voice for [minutes] (the snooze length set under Alerts unless given). */
+        fun snooze(context: Context, now: Long = System.currentTimeMillis(), minutes: Int = Prefs.snoozeMinutes(context)) {
+            Prefs.setAlertsSnoozedUntil(context, now + minutes * 60_000L)
+            Voice.silence()
+        }
+
+        /**
+         * Stops alerting about [mac]: a tracker whose address rotates is ignored until the
+         * address changes (it can't be whitelisted); anything else is whitelisted.
+         * Returns what was done, for a toast.
+         */
+        suspend fun ignore(context: Context, mac: String): String {
+            val snap = DeviceRegistry.get(mac)
+            val label = snap?.best?.label ?: AlertLog.latestFor(context, mac)?.label ?: ""
+            val rotatingTracker = snap != null && snap.best?.category == Category.TRACKER &&
+                snap.addressType != AddressType.PUBLIC
+            return if (rotatingTracker) {
+                TrackerMutes.mute(context, mac, label, snap!!.rssi, follow = false)
+                "Ignored until its address changes (at most 24 h)"
+            } else {
+                AppDatabase.getInstance(context).whitelistDao().add(WhitelistEntity(mac, label))
+                "Whitelisted - won't alert again"
+            }
+        }
+    }
+}

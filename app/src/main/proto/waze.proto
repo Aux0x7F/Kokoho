@@ -1,5 +1,5 @@
 // Vendored from highway-radar-sabre-plus (MIT, (c) 2026 highway-radar-sabre-plus
-// contributors) — see app/src/main/java/com/rfsentinel/app/online/wazert/LICENSE.
+// contributors) — see app/src/main/java/org/tucsoncommunity/kokoho/online/wazert/LICENSE.
 // Adapted for Kokoho's read-only fetch path and Java package.
 //
 // Minimal, wire-compatible description of the Waze mobile RT protocol, limited
@@ -18,7 +18,7 @@
 
 syntax = "proto2";
 
-option java_package = "com.rfsentinel.app.online.wazert";
+option java_package = "org.tucsoncommunity.kokoho.online.wazert";
 option java_outer_classname = "WazeProto";
 option optimize_for = LITE_RUNTIME;
 

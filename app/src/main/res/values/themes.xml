@@ -2,8 +2,8 @@
     <!-- DarkActionBar (not NoActionBar): the activities rely on the window action bar
          for their titles and MainActivity's overflow menu.
          Light / Dark / System all use this theme; ThemeManager forces the night mode. -->
-    <style name="Theme.RFSentinel" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
-        <item name="textAppearanceButton">@style/TextAppearance.RFSentinel.Button</item>
+    <style name="Theme.Kokoho" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <item name="textAppearanceButton">@style/TextAppearance.Kokoho.Button</item>
         <item name="colorPrimary">@color/brand_primary</item>
         <item name="colorPrimaryVariant">@color/brand_primary_dark</item>
         <item name="colorOnPrimary">@android:color/white</item>
@@ -18,7 +18,7 @@
 
     <!-- Material You: Material 3 components; colours come from the wallpaper
          (DynamicColors, Android 12+), falling back to the M3 baseline palette. -->
-    <style name="Theme.RFSentinel.MaterialYou" parent="Theme.Material3.DayNight">
+    <style name="Theme.Kokoho.MaterialYou" parent="Theme.Material3.DayNight">
         <!-- Selected chips / toggles use this theme's own primary colour. -->
         <item name="rfAccent">?attr/colorPrimary</item>
         <item name="rfOnAccent">?attr/colorOnPrimary</item>
@@ -29,10 +29,10 @@
     </style>
 
     <!-- A theme made in the theme maker: Material 3 components; ThemeManager recolours it from the maker's accent (Android 11+). -->
-    <style name="Theme.RFSentinel.Custom" parent="Theme.RFSentinel.MaterialYou" />
+    <style name="Theme.Kokoho.Custom" parent="Theme.Kokoho.MaterialYou" />
 
     <!-- DedSec-inspired hacktivist poster: black and white with electric blue, monospace. -->
-    <style name="Theme.RFSentinel.DedSec" parent="Theme.MaterialComponents">
+    <style name="Theme.Kokoho.DedSec" parent="Theme.MaterialComponents">
         <!-- Selected chips / toggles use this theme's own primary colour. -->
         <item name="rfAccent">?attr/colorPrimary</item>
         <item name="rfOnAccent">?attr/colorOnPrimary</item>
@@ -87,7 +87,7 @@
     </style>
 
     <!-- fsociety (Mr. Robot-inspired): black and ash grey with blood red, monospace terminal. -->
-    <style name="Theme.RFSentinel.Fsociety" parent="Theme.MaterialComponents">
+    <style name="Theme.Kokoho.Fsociety" parent="Theme.MaterialComponents">
         <!-- Selected chips / toggles use this theme's own primary colour. -->
         <item name="rfAccent">?attr/colorPrimary</item>
         <item name="rfOnAccent">?attr/colorOnPrimary</item>
@@ -171,7 +171,7 @@
         <item name="android:background">?attr/colorSurface</item>
     </style>
 
-    <style name="Theme.RFSentinel.Styled" parent="Theme.MaterialComponents">
+    <style name="Theme.Kokoho.Styled" parent="Theme.MaterialComponents">
         <item name="rfAccent">?attr/colorPrimary</item>
         <item name="rfOnAccent">?attr/colorOnPrimary</item>
         <item name="actionBarStyle">@style/Styled.ActionBar</item>
@@ -181,7 +181,7 @@
     </style>
 
     <!-- Night Drive: red-only on black, like a cockpit - protects dark adaptation while driving. -->
-    <style name="Theme.RFSentinel.NightDrive" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.NightDrive" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/nd_red</item>
         <item name="colorPrimaryVariant">@color/nd_bg</item>
         <item name="colorOnPrimary">@color/nd_bg</item>
@@ -208,7 +208,7 @@
     </style>
 
     <!-- Night Vision: green phosphor image-intensifier look. -->
-    <style name="Theme.RFSentinel.NightVision" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.NightVision" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/nv_green</item>
         <item name="colorPrimaryVariant">@color/nv_bg</item>
         <item name="colorOnPrimary">@color/nv_bg</item>
@@ -235,7 +235,7 @@
     </style>
 
     <!-- Amber CRT: 1980s monochrome terminal. -->
-    <style name="Theme.RFSentinel.Amber" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.Amber" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/amber_main</item>
         <item name="colorPrimaryVariant">@color/amber_bg</item>
         <item name="colorOnPrimary">@color/amber_bg</item>
@@ -262,7 +262,7 @@
     </style>
 
     <!-- Synthwave: neon pink and cyan over a purple night. -->
-    <style name="Theme.RFSentinel.Synthwave" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.Synthwave" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/sw_pink</item>
         <item name="colorPrimaryVariant">@color/sw_bg</item>
         <item name="colorOnPrimary">@color/sw_bg</item>
@@ -289,7 +289,7 @@
     </style>
 
     <!-- Tactical: olive drab and coyote tan, low glare. -->
-    <style name="Theme.RFSentinel.Tactical" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.Tactical" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/tac_olive</item>
         <item name="colorPrimaryVariant">@color/tac_bg</item>
         <item name="colorOnPrimary">@color/tac_bg</item>
@@ -316,7 +316,7 @@
     </style>
 
     <!-- Blueprint: white technical drawing on drafting blue. -->
-    <style name="Theme.RFSentinel.Blueprint" parent="Theme.RFSentinel.Styled">
+    <style name="Theme.Kokoho.Blueprint" parent="Theme.Kokoho.Styled">
         <item name="colorPrimary">@color/bp_line</item>
         <item name="colorPrimaryVariant">@color/bp_bg</item>
         <item name="colorOnPrimary">@color/bp_bg</item>
@@ -343,7 +343,7 @@
     </style>
 
     <!-- Paper: newspaper ink on newsprint - maximum contrast in direct sunlight. -->
-    <style name="Theme.RFSentinel.Paper" parent="Theme.MaterialComponents.Light">
+    <style name="Theme.Kokoho.Paper" parent="Theme.MaterialComponents.Light">
         <!-- Selected chips / toggles use this theme's own primary colour. -->
         <item name="rfAccent">?attr/colorPrimary</item>
         <item name="rfOnAccent">?attr/colorOnPrimary</item>
@@ -403,7 +403,7 @@
         <item name="android:layout_height">wrap_content</item>
     </style>
 
-    <style name="TextAppearance.RFSentinel.Button" parent="TextAppearance.MaterialComponents.Button">
+    <style name="TextAppearance.Kokoho.Button" parent="TextAppearance.MaterialComponents.Button">
         <item name="android:textAllCaps">false</item>
         <item name="android:letterSpacing">0</item>
     </style>

@@ -12,7 +12,7 @@
         android:layout_height="match_parent" />
 
     <!-- The map's scale, under the status card (moved there in code). -->
-    <com.rfsentinel.app.ui.ScaleBarView
+    <org.tucsoncommunity.kokoho.ui.ScaleBarView
         android:id="@+id/scaleBar"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -590,7 +590,7 @@
     </LinearLayout>
 
     <!-- Your speed and the posted limit, bottom left just above the bottom panels (placed in code, placeGauge). -->
-    <com.rfsentinel.app.ui.SpeedGaugeView
+    <org.tucsoncommunity.kokoho.ui.SpeedGaugeView
         android:id="@+id/speedGauge"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"

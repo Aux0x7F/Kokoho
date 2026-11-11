@@ -1,0 +1,314 @@
+package org.tucsoncommunity.kokoho.esp
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.Context
+import android.os.ParcelUuid
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import org.tucsoncommunity.kokoho.util.Permissions
+
+/**
+ * Connects to an OUI-SPY board running the "App-Controlled" (Bluetooth)
+ * firmware, like its companion app does, but only for detection: it switches
+ * on the Flock-BLE, Flock-WiFi, Sky Spy and Detector engines (plus, by default,
+ * the survey engine that relays every network and device it hears), listens to
+ * Detection Events, and switches them off again when scanning stops. No cable
+ * needed; the board just needs power. Reconnects when the board comes back.
+ */
+object OuiSpyBle {
+
+    private const val TAG = "OuiSpyBle"
+    private const val MTU = 247 // detections are up to 155 bytes
+    private const val RECONNECT_MS = 8_000L
+    private const val MTU_FALLBACK_MS = 2_500L
+    private const val SETUP_TIMEOUT_MS = 20_000L
+    /** Let a just-closed link go before reconnecting, or the new client shares (and inherits) it. */
+    private const val CLOSE_SETTLE_MS = 1_000L
+
+    private val main = Handler(Looper.getMainLooper())
+    private val closer = Handler(Looper.getMainLooper())
+    private var gatt: BluetoothGatt? = null
+    private var appContext: Context? = null
+    private var address: String? = null
+    private var relayAll = true
+    /** The detection engines to switch on (Settings > OUI-SPY engines). */
+    private var engines: List<Int> = OuiSpyBleProtocol.ENGINES
+    private var onSightings: ((List<EspSighting>) -> Unit)? = null
+    @Volatile private var active = false
+
+    /** An OUI-SPY board is set to run (its reports keep devices marked as heard by external hardware). */
+    val connected: Boolean get() = active
+    private var inSpool = false
+    private var discovering = false
+    /** Set up and reporting. */
+    @Volatile var live = false; private set
+    /** Told when [live] changes (the scan hands the phone's Bluetooth scan to the board, or takes it back). */
+    var onLiveChanged: ((Boolean) -> Unit)? = null
+    private fun setLive(v: Boolean) { if (live != v) { live = v; onLiveChanged?.invoke(v) } }
+    private var closingUntil = 0L
+    private var detections = 0
+    /** GATT writes must be sent one at a time. */
+    private val pending = ArrayDeque<ByteArray>()
+
+    @Volatile var status: String = ""
+        private set
+    var onStatusChanged: (() -> Unit)? = null
+
+    private fun setStatus(s: String) { org.tucsoncommunity.kokoho.util.HwLogs.ouiSpy.logStatus("OUI-SPY", s); status = s; onStatusChanged?.invoke() }
+
+    fun canConnect(context: Context) = Build.VERSION.SDK_INT < 31 ||
+        Permissions.granted(context, android.Manifest.permission.BLUETOOTH_CONNECT)
+
+    /** A board heard by [find]. */
+    class Found(val address: String, val name: String?, val rssi: Int)
+
+    private val finder = Handler(Looper.getMainLooper())
+
+    /**
+     * Looks for OUI-SPY boards nearby for [ms], whether or not Kokoho is scanning. Boards advertise the
+     * OUI-SPY service; their "OUI-SPY-xxxx" name is only in the scan response, which a busy scan can miss.
+     * A board connected to another phone app doesn't advertise and isn't found.
+     */
+    @SuppressLint("MissingPermission")
+    fun find(context: Context, ms: Long = 6_000L, done: (List<Found>) -> Unit) {
+        val scanner = runCatching {
+            context.getSystemService(BluetoothManager::class.java)?.adapter?.takeIf { it.isEnabled }?.bluetoothLeScanner
+        }.getOrNull()
+        if (scanner == null) { done(emptyList()); return }
+        val seen = LinkedHashMap<String, Found>()
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, r: ScanResult) {
+                val name = r.scanRecord?.deviceName ?: runCatching { r.device.name }.getOrNull()
+                val addr = r.device.address
+                finder.post { seen[addr] = Found(addr, name ?: seen[addr]?.name, r.rssi) }
+            }
+        }
+        val filters = listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(OuiSpyBleProtocol.SERVICE)).build())
+        // Legacy, active, fastest: the scan response with the name comes along.
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).setReportDelay(0).build()
+        try { scanner.startScan(filters, settings, cb) } catch (e: Exception) { Log.w(TAG, "OUI-SPY search failed", e); org.tucsoncommunity.kokoho.util.HwLogs.ouiSpy.log("OUI-SPY: Bluetooth search failed: ${org.tucsoncommunity.kokoho.util.HwLog.describe(e)}"); done(emptyList()); return }
+        finder.postDelayed({
+            runCatching { scanner.stopScan(cb) }
+            done(seen.values.sortedByDescending { it.rssi })
+        }, ms)
+    }
+
+    /** Starts (or keeps) the link to the board at [boardAddress] while scanning. */
+    fun start(context: Context, boardAddress: String, relayEverything: Boolean, chosen: List<Int> = OuiSpyBleProtocol.ENGINES,
+              sightings: (List<EspSighting>) -> Unit) = main.post {
+        onSightings = sightings
+        if (active && address == boardAddress && relayAll == relayEverything && engines == chosen) return@post
+        stopNow()
+        appContext = context.applicationContext
+        address = boardAddress
+        relayAll = relayEverything
+        engines = chosen
+        active = true
+        connect()
+    }
+
+    fun stop() = main.post { stopNow() }
+
+    @SuppressLint("MissingPermission") // checked by canConnect()
+    private fun stopNow() {
+        active = false
+        setLive(false)
+        main.removeCallbacksAndMessages(null)
+        val g = gatt ?: return
+        // Switch our engines off so the board goes quiet, then let go.
+        val ctl = g.getService(OuiSpyBleProtocol.SERVICE)?.getCharacteristic(OuiSpyBleProtocol.ENGINE_CONTROL)
+        if (ctl != null) runCatching { write(g, ctl, OuiSpyBleProtocol.disableAll()) }
+        // Own handler: a quick restart clears `main`, and must not cancel this close.
+        closer.postDelayed({ runCatching { g.disconnect(); g.close() } }, 300)
+        closingUntil = System.currentTimeMillis() + 300 + CLOSE_SETTLE_MS
+        gatt = null
+        setStatus("")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connect() {
+        val ctx = appContext ?: return
+        val addr = address ?: return
+        if (!active) return
+        val wait = closingUntil - System.currentTimeMillis()
+        if (wait > 0) { main.postDelayed({ connect() }, wait); return }
+        if (!canConnect(ctx)) { setStatus("OUI-SPY: allow \"Nearby devices\" to connect to the board"); return }
+        val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter ?: return
+        if (!adapter.isEnabled) { setStatus("OUI-SPY: Bluetooth is off"); retry(); return }
+        val device = runCatching { adapter.getRemoteDevice(addr) }.getOrNull() ?: return
+        // The board keeps no pairing keys, so a phone-side pairing breaks every connection
+        // (encryption fails with "key missing"). It must not be paired in Android settings.
+        if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            setStatus("OUI-SPY: tap \"Forget\" on ${device.name ?: "the board"} in Android Bluetooth settings - it must not be paired there")
+            retry()
+            return
+        }
+        setStatus("OUI-SPY: connecting…")
+        Log.i(TAG, "connecting")
+        gatt = device.connectGatt(ctx, false, callback, BluetoothDevice.TRANSPORT_LE)
+    }
+
+    private fun retry() {
+        if (!active) return
+        main.removeCallbacksAndMessages(null)
+        main.postDelayed({ connect() }, RECONNECT_MS)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun write(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            g.writeCharacteristic(c, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        } else {
+            @Suppress("DEPRECATION")
+            c.value = value
+            @Suppress("DEPRECATION")
+            g.writeCharacteristic(c)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeNext(g: BluetoothGatt) {
+        val next = pending.removeFirstOrNull() ?: run {
+            setLive(true)
+            Log.i(TAG, "live")
+            val names = engines.mapNotNull { OuiSpyBleProtocol.ENGINE_NAMES[it] }
+            setStatus(when {
+                relayAll -> "OUI-SPY · live · relaying everything it hears"
+                names.isEmpty() -> "OUI-SPY · live · every engine off"
+                else -> "OUI-SPY · live · ${names.joinToString()} on"
+            })
+            return
+        }
+        val ctl = g.getService(OuiSpyBleProtocol.SERVICE)?.getCharacteristic(OuiSpyBleProtocol.ENGINE_CONTROL) ?: return
+        write(g, ctl, next)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun discover(g: BluetoothGatt) {
+        if (discovering) return
+        discovering = true
+        g.discoverServices()
+    }
+
+    private fun handle(value: ByteArray) {
+        when {
+            OuiSpyBleProtocol.isSpoolHeader(value) -> { inSpool = true; return }
+            OuiSpyBleProtocol.isSpoolEnd(value) -> { inSpool = false; return }
+            inSpool -> return // stored while no phone was connected: old, no location
+        }
+        val s = OuiSpyBleProtocol.decode(value) ?: return
+        detections++
+        onSightings?.invoke(listOf(s))
+        setStatus("OUI-SPY · live · $detections report${if (detections == 1) "" else "s"}")
+    }
+
+    private val callback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(g: BluetoothGatt, st: Int, newState: Int) {
+            Log.i(TAG, "connection state $newState (status $st)")
+            org.tucsoncommunity.kokoho.util.HwLogs.ouiSpy.log("OUI-SPY: Bluetooth state $newState (status $st)")
+            main.post {
+                if (g !== gatt) return@post
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    setStatus("OUI-SPY: connected, setting up…")
+                    setLive(false)
+                    discovering = false
+                    // On a reused link Android may never answer the MTU request: go on anyway.
+                    if (!g.requestMtu(MTU)) discover(g)
+                    else main.postDelayed({ if (g === gatt) discover(g) }, MTU_FALLBACK_MS)
+                    main.postDelayed({
+                        if (g === gatt && !live && active) {
+                            Log.w(TAG, "setup stalled, reconnecting")
+                            runCatching { g.disconnect(); g.close() }
+                            gatt = null
+                            closingUntil = System.currentTimeMillis() + CLOSE_SETTLE_MS
+                            setStatus("OUI-SPY: setup stalled - reconnecting…")
+                            retry()
+                        }
+                    }, SETUP_TIMEOUT_MS)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    runCatching { g.close() }
+                    gatt = null
+                    setLive(false)
+                    if (active) { setStatus("OUI-SPY: out of reach - reconnecting…"); retry() }
+                }
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onMtuChanged(g: BluetoothGatt, mtu: Int, st: Int) {
+            Log.i(TAG, "mtu $mtu (status $st)")
+            org.tucsoncommunity.kokoho.util.HwLogs.ouiSpy.log("OUI-SPY: MTU $mtu (status $st)")
+            main.post { if (g === gatt) discover(g) }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(g: BluetoothGatt, st: Int) {
+            main.post {
+                if (g !== gatt) return@post
+                val svc = g.getService(OuiSpyBleProtocol.SERVICE)
+                val det = svc?.getCharacteristic(OuiSpyBleProtocol.DETECTION_EVENTS)
+                if (det == null) {
+                    setStatus("OUI-SPY: this board's firmware isn't the Bluetooth (App-Controlled) version")
+                    return@post
+                }
+                g.setCharacteristicNotification(det, true)
+                val cccd = det.getDescriptor(OuiSpyBleProtocol.CCCD) ?: return@post
+                if (Build.VERSION.SDK_INT >= 33) {
+                    g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    g.writeDescriptor(cccd)
+                }
+            }
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, st: Int) {
+            main.post {
+                if (g !== gatt) return@post
+                inSpool = false
+                pending.clear()
+                // Engines turned off in Settings go off on the board too (its own app may have left them on).
+                (OuiSpyBleProtocol.ENGINES - engines.toSet()).forEach { pending.addLast(OuiSpyBleProtocol.disable(it)) }
+                OuiSpyBleProtocol.engines(relayAll, engines).forEach { pending.addLast(OuiSpyBleProtocol.enable(it)) }
+                writeNext(g)
+            }
+        }
+
+        override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, st: Int) {
+            main.post {
+                if (g !== gatt) return@post
+                if (st != BluetoothGatt.GATT_SUCCESS) { Log.w(TAG, "engine write failed: $st"); org.tucsoncommunity.kokoho.util.HwLogs.ouiSpy.log("OUI-SPY: command write failed ($st)") }
+                else Log.i(TAG, "engine command sent")
+                writeNext(g)
+            }
+        }
+
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
+            if (c.uuid == OuiSpyBleProtocol.DETECTION_EVENTS) main.post { handle(value) }
+        }
+
+        @Deprecated("Android 12 and older")
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
+            if (Build.VERSION.SDK_INT >= 33) return
+            val v = c.value ?: return
+            if (c.uuid == OuiSpyBleProtocol.DETECTION_EVENTS) main.post { handle(v) }
+        }
+    }
+}

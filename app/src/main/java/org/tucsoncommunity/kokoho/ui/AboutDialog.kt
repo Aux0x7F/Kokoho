@@ -1,0 +1,76 @@
+package org.tucsoncommunity.kokoho.ui
+
+import android.text.method.LinkMovementMethod
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.text.HtmlCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import org.tucsoncommunity.kokoho.BuildConfig
+
+/** Version, scope, and where every signature and lookup table comes from. */
+object AboutDialog {
+    fun show(activity: AppCompatActivity) {
+        val html = """
+            <b>Kokoho ${BuildConfig.VERSION_NAME}</b><br/>
+            Free software under the GNU General Public License v3.0 (forked from upstream RFSentinel, Copyright &copy; 2026 CIS-C0):
+            you may share and modify it under its terms. It comes with
+            ABSOLUTELY NO WARRANTY. Source code: github.com/Aux0x7F/Kokoho<br/><br/>
+            Passive, receive-only Bluetooth LE and WiFi scanner. It never transmits to,
+            connects to, jams or spoofs any device. Scans, detections, history and traces stay
+            on this phone. Internet is used only for map data: the map (OpenFreeMap${if (MapEngine.mapboxAvailable) ", or Mapbox if you choose it in Settings" else ""}),
+            the road tiles of your area while the Waze "only ahead"
+            option is on, and the list of known plate, speed and red-light cameras for the area you look at on
+            screen; and, when you search for a destination or start a route (on the phone or in Android
+            Auto), the place search (Photon, and Nominatim for a search you submit), places of one kind near you or ahead on your route (the same
+            OpenStreetMap servers as the cameras) and the route (Valhalla, on the OpenStreetMap Germany server).
+            Those servers see your IP and that area or trip, never your scans or detections.
+            Map data &copy; OpenStreetMap contributors (ODbL), &copy; OpenMapTiles; map engine
+            MapLibre Native (BSD-2-Clause), OpenFreeMap${if (MapEngine.mapboxAvailable) "; Mapbox Maps SDK (Mapbox terms) when selected" else ""}.<br/><br/>
+
+            <b>What a match means</b><br/>
+            A device with that vendor or payload signature is broadcasting nearby. It is not
+            proof of who is there. "Weak" matches (under 50%) are shared identifiers - verify
+            before acting on them. Signal strength is not a reliable distance.<br/><br/>
+
+            <b>Signature sources</b><br/>
+            &bull; IEEE Registration Authority (MA-L/MA-M/MA-S) - MAC prefixes and vendor names<br/>
+            &bull; Bluetooth SIG assigned numbers - company IDs, UUIDs, appearance values<br/>
+            &bull; all-cameras-are-beacons signature reference (Apache-2.0) - Axon BWCDEVICE tag,
+              Flock / Raven signatures, tracker and smart-glasses rules, drone maker prefixes<br/>
+            &bull; ASTM F3411 Remote ID, decoded per opendroneid-core-c (Apache-2.0)<br/>
+            &bull; Google Find Hub Network accessory spec; arXiv 2501.17452; AirGuard, SEEMOO / TU Darmstadt (Apache-2.0) (trackers)<br/>
+            &bull; European V2X (ITS-G5) frame layout after V2X2MAP by Peter Holzhauser (MIT); CAM / DENM decoded per ETSI EN 302 637-2 / -3<br/>
+            &bull; MT7921AU (WiFi 6E) USB driver after mt76-usb-macos by Network Weather and the Linux mt76 driver (MediaTek, Lorenzo Bianconi, Felix Fietkau; BSD-3-Clause-Clear); MediaTek firmware under its own licence<br/>
+            &bull; P25 voice (experimental): voice frame layout and IMBE vocoder ported from DSD (Copyright (C) 2010 DSD Author) and mbelib (Copyright (C) 2010 mbelib Author), ISC License (assets/licenses)<br/>
+            &bull; Research by ryanohoro and GainSec (Flock); Alan Meekins' DEF CON 31 talk (Axon)<br/><br/>
+
+            DedSec, fsociety and Night Vision theme font: Share Tech Mono &copy; Carrois Type Design, SIL Open Font
+            License 1.1 (assets/licenses). "DedSec" is a name from Ubisoft's Watch Dogs and "fsociety"
+            from Mr. Robot (Universal Content Productions); these themes are unofficial fan homages,
+            not affiliated with or endorsed by Ubisoft, USA Network or NBCUniversal.<br/><br/>
+
+            Feature ideas from SØPHIA, BLE Radar (MetaRadar) and RF Party; no code from
+            those projects is included.<br/><br/>
+
+            <b>Limits</b><br/>
+            Phone radios hear less than dedicated hardware; Android throttles WiFi scans;
+            WiFi only sees access points, not client devices; randomized addresses defeat
+            prefix matching; most license-plate cameras other than Flock use cellular only (the known-camera map layer covers the mapped ones)
+            and cannot be detected this way.<br/><br/>
+
+            Check your local laws before use. This is not legal advice.
+        """.trimIndent()
+        val view = TextView(activity).apply {
+            text = HtmlCompat.fromHtml(html, HtmlCompat.FROM_HTML_MODE_COMPACT)
+            movementMethod = LinkMovementMethod.getInstance()
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+            textSize = 14f
+        }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("About & sources")
+            .setView(android.widget.ScrollView(activity).apply { addView(view) })
+            .setPositiveButton("Close", null)
+            .show()
+    }
+}

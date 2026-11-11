@@ -1,0 +1,146 @@
+package org.tucsoncommunity.kokoho.car
+
+import android.location.Location
+import androidx.car.app.CarContext
+import androidx.car.app.model.CarColor
+import androidx.car.app.model.Row
+import androidx.car.app.model.Template
+import org.tucsoncommunity.kokoho.alpr.AlprStore
+import org.tucsoncommunity.kokoho.alpr.KnownCameras
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/**
+ * Android Auto: the closest known plate, speed and red-light cameras (OpenStreetMap, downloaded on
+ * the phone) and the drones broadcasting a Remote ID position, on the car's own
+ * map with distances. The car host draws the map; we only supply places.
+ */
+class NearbyMapScreen(
+    carContext: CarContext,
+    /** Opened from the devices map: its "Devices" button goes back instead of stacking another. */
+    private val fromDevicesMap: Boolean = false
+) : LiveScreen(carContext, periodMs = 5_000L, preciseLocation = true) {
+
+    /** One row: a camera or a drone. */
+    data class Item(val title: String, val detail: String, val lat: Double, val lon: Double, val distanceM: Double,
+                    val drone: Boolean, val mac: String?, val kind: org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind? = null,
+                    /** The known camera this row shows (opens its own view with the ignore toggle). */
+                    val camera: org.tucsoncommunity.kokoho.alpr.KnownCamera? = null,
+                    /** Flagged device: its list / radar colour (category, or amber when weak). */
+                    val deviceColor: Int? = null)
+
+    override fun contentKey(): Any {
+        val me = CarUi.currentLocation(carContext) ?: return "no fix"
+        val items = nearby(me.latitude, me.longitude, CarUi.listLimit(carContext).coerceAtMost(6))
+        return listOf(AlprStore.cameras.size) + items.map {
+            "${it.title}|${(it.distanceM / 10).toInt()}|${it.camera?.let { c -> org.tucsoncommunity.kokoho.alpr.IgnoredCameras.contains(carContext, c.osmId) }}"
+        }
+    }
+
+    override fun render(): Template {
+        val me = CarUi.currentLocation(carContext)
+        if (me != null) autoDownloadAround(me)
+        val limit = CarUi.listLimit(carContext).coerceAtMost(6)
+        val items = if (me == null) emptyList() else nearby(me.latitude, me.longitude, limit)
+
+        val noItems = when {
+            me == null -> "Waiting for your location..."
+            items.isNotEmpty() -> null
+            AlprStore.cameras.isEmpty() -> "No known cameras downloaded - on your phone: Map > menu > Download nearby cameras"
+            else -> "No known cameras or drones within ${org.tucsoncommunity.kokoho.util.Units.km((SEARCH_RADIUS_M / 1000).toInt())}"
+        }
+        return mapTemplate("Cameras nearby", items.map { row(it) }, action("Devices") {
+            if (fromDevicesMap) screenManager.pop() else screenManager.push(DevicesMapScreen(carContext))
+        }, location = me, noItems = noItems)
+    }
+
+    private fun row(it: Item): Row {
+        val ignored = it.camera != null && org.tucsoncommunity.kokoho.alpr.IgnoredCameras.contains(carContext, it.camera.osmId)
+        val color = when {
+            it.drone -> CarColor.BLUE
+            it.deviceColor != null -> CarColor.createCustom(it.deviceColor, it.deviceColor)
+            ignored -> CarColor.createCustom(0xFF9E9E9E.toInt(), 0xFF9E9E9E.toInt())
+            it.kind != null -> cameraColor(it.kind).let { c -> CarColor.createCustom(c, c) }
+            else -> CarColor.YELLOW
+        }
+        val label = it.kind?.let { k -> cameraLabel(k) } ?: if (it.drone) "D" else "!"
+        return mapRow(it.title, it.detail + if (ignored) " · alerts off" else "", it.lat, it.lon, it.distanceM, color, label) {
+            if (it.mac != null) screenManager.push(DeviceDetailScreen(carContext, it.mac))
+            else if (it.camera != null) screenManager.push(PlaceFocusScreen.forCamera(carContext, it.camera))
+            else screenManager.push(PlaceFocusScreen(carContext, it.title, it.detail, it.lat, it.lon, color, label))
+        }
+    }
+
+    /** Fetches the cameras within ~20 km when that area isn't cached yet, then refreshes. */
+    private fun autoDownloadAround(me: Location) {
+        if (!org.tucsoncommunity.kokoho.util.Prefs.autoCameras(carContext)) return
+        val dLat = 0.18
+        val dLon = 0.18 / kotlin.math.max(0.1, kotlin.math.cos(Math.toRadians(me.latitude)))
+        val (s, w, n, e) = listOf(me.latitude - dLat, me.longitude - dLon, me.latitude + dLat, me.longitude + dLon)
+        if (!AlprStore.needsDownload(s, w, n, e)) return
+        lifecycleScope.launch {
+            if (AlprStore.autoDownload(carContext, s, w, n, e)) invalidate()
+        }
+    }
+
+    companion object {
+        /** The list shows only the nearest few, so look well ahead along the road. */
+        const val SEARCH_RADIUS_M = 20_000.0
+
+        /** Nearest known cameras and positioned drones, closest first (pure; unit-tested). */
+        fun nearby(lat: Double, lon: Double, limit: Int): List<Item> {
+            val cams = KnownCameras.near(AlprStore.cameras, lat, lon, SEARCH_RADIUS_M).map { (c, d) ->
+                Item(c.label, c.operator ?: (c.direction?.let { "faces $it°" } ?: "mapped in OpenStreetMap"),
+                    c.lat, c.lon, d, drone = false, mac = null, kind = c.type, camera = c)
+            }
+            val drones = DeviceRegistry.snapshot().mapNotNull { s ->
+                val r = s.remoteId ?: return@mapNotNull null
+                val dLat = r.latitude ?: return@mapNotNull null
+                val dLon = r.longitude ?: return@mapNotNull null
+                val d = DeviceRegistry.metersBetween(lat, lon, dLat, dLon)
+                Item("Drone" + (r.uasId?.let { " $it" } ?: ""),
+                    listOfNotNull(r.heightM?.let { org.tucsoncommunity.kokoho.util.Units.length(it) + " up" }, r.speedMs?.let { org.tucsoncommunity.kokoho.util.Units.speed(it) })
+                        .joinToString(" · ").ifEmpty { "Remote ID" },
+                    dLat, dLon, d, drone = true, mac = s.mac)
+            }
+            // Flagged devices where they were pinpointed, else where your phone heard them best (the same spot as on the phone map).
+            val devices = DeviceRegistry.snapshot().mapNotNull { s ->
+                val best = s.best ?: return@mapNotNull null
+                if (org.tucsoncommunity.kokoho.data.WhitelistCache.contains(s.mac) || s.remoteId?.hasPosition == true) return@mapNotNull null
+                val pos = s.place ?: return@mapNotNull null
+                val d = DeviceRegistry.metersBetween(lat, lon, pos.lat, pos.lon)
+                if (d > SEARCH_RADIUS_M) return@mapNotNull null
+                Item(best.label, best.category.shortTag + if (s.located != null) " \u00b7 pinpointed" else " \u00b7 heard here", pos.lat, pos.lon, d, drone = false, mac = s.mac,
+                    deviceColor = if (best.tier == org.tucsoncommunity.kokoho.detect.Tier.WEAK) org.tucsoncommunity.kokoho.ui.DeviceColors.WEAK else best.category.colorArgb)
+            }
+            // Drones first (they move and matter now), then flagged devices, then cameras by distance.
+            return (drones.sortedBy { it.distanceM } + devices.sortedBy { it.distanceM } + cams).take(limit)
+        }
+
+        /** Marker colour of a camera kind: the same as the phone map's camera icons. */
+        fun cameraColor(kind: org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind): Int = org.tucsoncommunity.kokoho.ui.MapIcons.cameraColor(kind)
+
+        /** Marker letter: P(late reader), S(peed), R(ed light). */
+        fun cameraLabel(kind: org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind) = when (kind) {
+            org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind.SPEED -> "S"
+            org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind.RED_LIGHT -> "R"
+            org.tucsoncommunity.kokoho.alpr.KnownCamera.Kind.ALPR -> "P"
+        }
+
+        /** Metres below 1 km (rounded to 10 m), else kilometres with one decimal. */
+        fun distanceOf(m: Double): androidx.car.app.model.Distance =
+            if (org.tucsoncommunity.kokoho.util.Units.imperial) {
+                val ft = m * 3.28084
+                if (ft < 1000) androidx.car.app.model.Distance.create(((ft / 10).roundToInt() * 10).toDouble(), androidx.car.app.model.Distance.UNIT_FEET)
+                else androidx.car.app.model.Distance.create(m / 1609.344, androidx.car.app.model.Distance.UNIT_MILES_P1)
+            }
+            else if (m < 1000) androidx.car.app.model.Distance.create(((m / 10).roundToInt() * 10).toDouble(), androidx.car.app.model.Distance.UNIT_METERS)
+            else androidx.car.app.model.Distance.create(m / 1000, androidx.car.app.model.Distance.UNIT_KILOMETERS_P1)
+
+        /** To 10 m (a car list is read at a glance and redrawn as you move), or feet / miles in imperial. */
+        fun distanceText(m: Double) = if (org.tucsoncommunity.kokoho.util.Units.imperial) org.tucsoncommunity.kokoho.util.Units.distance(m)
+            else if (m < 1000) "${(m / 10).roundToInt() * 10} m" else String.format(java.util.Locale.US, "%.1f km", m / 1000)
+    }
+}

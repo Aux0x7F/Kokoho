@@ -70,13 +70,13 @@
             android:orientation="horizontal"
             android:visibility="gone">
 
-            <com.rfsentinel.app.ui.SignalGaugeView
+            <org.tucsoncommunity.kokoho.ui.SignalGaugeView
                 android:id="@+id/gauge"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1.6" />
 
-            <com.rfsentinel.app.ui.ConfidenceRingView
+            <org.tucsoncommunity.kokoho.ui.ConfidenceRingView
                 android:id="@+id/ring"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
@@ -109,7 +109,7 @@
                 android:textSize="@dimen/text_body" />
         </LinearLayout>
 
-        <com.rfsentinel.app.ui.SignalGraphView
+        <org.tucsoncommunity.kokoho.ui.SignalGraphView
             android:id="@+id/graph"
             android:layout_width="match_parent"
             android:layout_height="140dp"

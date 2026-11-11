@@ -38,7 +38,7 @@
         app:singleSelection="true"
         app:selectionRequired="true" />
 
-    <com.rfsentinel.app.ui.WifiChartView
+    <org.tucsoncommunity.kokoho.ui.WifiChartView
         android:id="@+id/chart"
         android:layout_width="match_parent"
         android:layout_height="240dp"

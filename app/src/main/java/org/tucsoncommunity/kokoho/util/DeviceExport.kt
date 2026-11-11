@@ -1,0 +1,274 @@
+package org.tucsoncommunity.kokoho.util
+
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import org.tucsoncommunity.kokoho.data.DetectionEntity
+import org.tucsoncommunity.kokoho.data.KnownDeviceEntity
+import org.tucsoncommunity.kokoho.detect.Advert
+import org.tucsoncommunity.kokoho.detect.AdStructure
+import org.tucsoncommunity.kokoho.detect.Bytes
+import org.tucsoncommunity.kokoho.detect.DeviceIntel
+import org.tucsoncommunity.kokoho.detect.VendorDb
+import org.tucsoncommunity.kokoho.oui.OuiEntry
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import org.tucsoncommunity.kokoho.util.ExportText.iso
+import org.tucsoncommunity.kokoho.util.ExportText.local
+import java.util.Locale
+
+/**
+ * Serializes EVERY device the app knows about - matched or not - for the
+ * "Export all" option: the live scan session (full detail, raw advertisement
+ * data) and the long-term device history.
+ */
+object DeviceExport {
+
+    private val gson = GsonBuilder().setPrettyPrinting().serializeNulls().create()
+
+    /** Per-device flags the registry doesn't hold (whitelist / favorite). */
+    class Flags(val whitelisted: (String) -> Boolean, val favorite: (String) -> Boolean)
+
+    // ---- Live session -------------------------------------------------------------
+
+    fun sessionCsv(devices: List<DeviceRegistry.Snapshot>, flags: Flags): String {
+        val sb = StringBuilder(
+            "mac,name,vendor,device_type,address_type,radios,rssi,best_rssi,distance_m,first_seen,last_seen," +
+                "packets,flagged,category,confidence,match_label,evidence,following,whitelisted,favorite," +
+                "first_seen_ever,sessions,company_ids,service_uuids,latitude,longitude\n"
+        )
+        devices.forEach { s ->
+            val best = s.best
+            val a = s.advert
+            val last = s.path.lastOrNull()
+            sb.append(s.mac).append(',')
+                .append(q(s.name)).append(',')
+                .append(q(s.vendor)).append(',')
+                .append(q(s.deviceType)).append(',')
+                .append(q(s.addressType.label)).append(',')
+                .append(s.sources.joinToString("+")).append(',')
+                .append(s.rssi).append(',')
+                .append(s.bestRssi).append(',')
+                .append(if (s.distanceM.isNaN()) "" else String.format(Locale.US, "%.1f", s.distanceM)).append(',')
+                .append(local(s.firstSeen)).append(',')
+                .append(local(s.lastSeen)).append(',')
+                .append(s.sightings).append(',')
+                .append(best != null).append(',')
+                .append(best?.category?.name ?: "").append(',')
+                .append(best?.confidence ?: "").append(',')
+                .append(q(best?.label)).append(',')
+                .append(q(best?.evidence)).append(',')
+                .append(s.following).append(',')
+                .append(flags.whitelisted(s.mac)).append(',')
+                .append(flags.favorite(s.mac)).append(',')
+                .append(s.known?.let { local(it.firstSeen) } ?: "").append(',')
+                .append(s.known?.sessions ?: "").append(',')
+                .append(q(a?.manufacturerData?.keys?.joinToString(" ") { String.format("0x%04X", it) })).append(',')
+                .append(q(a?.serviceUuids?.joinToString(" ") { u -> Advert.shortOf(u)?.let { String.format("0x%04X", it) } ?: u.toString() })).append(',')
+                .append(last?.lat ?: "").append(',')
+                .append(last?.lon ?: "").append('\n')
+        }
+        return sb.toString()
+    }
+
+    fun sessionJson(devices: List<DeviceRegistry.Snapshot>, flags: Flags): JsonArray =
+        JsonArray().apply { devices.forEach { add(sessionItem(it, flags)) } }
+
+    private fun sessionItem(s: DeviceRegistry.Snapshot, flags: Flags): JsonObject {
+        val o = JsonObject()
+        o.addProperty("mac", s.mac)
+        o.addProperty("name", s.name)
+        o.addProperty("vendor", s.vendor)
+        o.addProperty("ieeeRegistrant", VendorDb.macVendor(s.mac))
+        o.addProperty("deviceType", s.deviceType)
+        o.addProperty("addressType", s.addressType.label)
+        o.addProperty("trackability", s.addressType.trackable)
+        o.add("radios", JsonArray().apply { s.sources.forEach { add(it.name) } })
+        o.addProperty("rssi", s.rssi)
+        o.addProperty("bestRssi", s.bestRssi)
+        o.addProperty("distanceMetersRough", Math.round(s.distanceM * 10) / 10.0)
+        o.addProperty("firstSeen", iso(s.firstSeen))
+        o.addProperty("lastSeen", iso(s.lastSeen))
+        o.addProperty("packets", s.sightings)
+        o.addProperty("following", s.following)
+        o.addProperty("whitelisted", flags.whitelisted(s.mac))
+        o.addProperty("favorite", flags.favorite(s.mac))
+        o.add("matches", JsonArray().apply {
+            s.hits.forEach { h ->
+                add(JsonObject().apply {
+                    addProperty("category", h.category.name)
+                    addProperty("label", h.label)
+                    addProperty("confidence", h.confidence)
+                    addProperty("tier", h.tier.name)
+                    addProperty("evidence", h.evidence)
+                    addProperty("source", h.source)
+                })
+            }
+        })
+        o.add("facts", JsonObject().apply { s.facts.forEach { (k, v) -> addProperty(k, v) } })
+        s.known?.let { k ->
+            o.add("history", JsonObject().apply {
+                addProperty("firstSeenEver", iso(k.firstSeen))
+                addProperty("sessions", k.sessions)
+                addProperty("detectCount", k.detectCount)
+            })
+        }
+        s.remoteId?.let { o.add("remoteId", gson.toJsonTree(it)) }
+        s.advert?.let { o.add("advertisement", advertJson(it)) }
+        if (s.path.isNotEmpty()) {
+            o.add("positions", JsonArray().apply {
+                s.path.forEach { p ->
+                    add(JsonObject().apply {
+                        addProperty("time", iso(p.time)); addProperty("lat", p.lat); addProperty("lon", p.lon)
+                    })
+                }
+            })
+        }
+        if (s.history.isNotEmpty()) {
+            o.add("rssiHistory", JsonArray().apply {
+                s.history.forEach { h -> add(JsonArray().apply { add(h.time); add(h.rssi) }) }
+            })
+        }
+        return o
+    }
+
+    private fun advertJson(a: Advert): JsonObject = JsonObject().apply {
+        a.txPower?.let { addProperty("txPower", it) }
+        a.connectable?.let { addProperty("connectable", it) }
+        a.phy?.let { addProperty("phy", it) }
+        add("manufacturerData", JsonObject().apply {
+            a.manufacturerData.forEach { (cid, d) ->
+                addProperty(String.format("0x%04X", cid) + (VendorDb.company(cid)?.let { " $it" } ?: ""), Bytes.hex(d))
+            }
+        })
+        add("serviceUuids", JsonArray().apply { a.serviceUuids.forEach { add(it.toString()) } })
+        add("serviceData", JsonObject().apply { a.serviceData.forEach { (u, d) -> addProperty(u.toString(), Bytes.hex(d)) } })
+        a.rawBytes?.let { raw ->
+            addProperty("raw", Bytes.hex(raw, ""))
+            add("adStructures", JsonArray().apply {
+                AdStructure.parse(raw).forEach { ad ->
+                    add(JsonObject().apply {
+                        addProperty("type", String.format("0x%02X", ad.type))
+                        addProperty("name", ad.typeName)
+                        addProperty("data", Bytes.hex(ad.data))
+                    })
+                }
+            })
+        }
+        a.wifi?.let { w ->
+            add("wifi", JsonObject().apply {
+                addProperty("frequencyMhz", w.frequencyMhz)
+                addProperty("capabilities", w.capabilities)
+                addProperty("standard", w.standard)
+                add("infoElementIds", JsonArray().apply { w.infoElements.forEach { add(it.first) } })
+            })
+        }
+    }
+
+    /** KML of devices that have a GPS position (needs location while scanning). */
+    fun sessionKml(devices: List<DeviceRegistry.Snapshot>): String {
+        val sb = StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n<Document>\n  <name>Kokoho - nearby devices</name>\n")
+        devices.filter { it.path.isNotEmpty() }.forEach { s ->
+            val p = s.path.last()
+            sb.append("  <Placemark>\n    <name>").append(x(s.best?.label ?: s.name ?: s.deviceType)).append("</name>\n")
+                .append("    <description>").append(x("${s.mac} - ${s.vendor ?: ""} - ${s.rssi} dBm - ${local(s.lastSeen)}")).append("</description>\n")
+                .append(String.format(Locale.US, "    <Point><coordinates>%.7f,%.7f,0</coordinates></Point>\n", p.lon, p.lat))
+                .append("  </Placemark>\n")
+        }
+        return sb.append("</Document>\n</kml>\n").toString()
+    }
+
+    // ---- Long-term history ----------------------------------------------------------
+
+    private const val HISTORY_CSV_HEADER = "mac,name,vendor,device_type,first_seen,last_seen,sessions,detect_count,favorite,note,custom_name\n"
+
+    fun historyCsv(rows: List<KnownDeviceEntity>): String {
+        val sb = StringBuilder(HISTORY_CSV_HEADER)
+        rows.forEach { r -> historyCsvLine(sb, r) }
+        return sb.toString()
+    }
+
+    private fun historyCsvLine(sb: StringBuilder, r: KnownDeviceEntity) {
+        sb.append(r.mac).append(',').append(q(r.name)).append(',').append(q(r.vendor)).append(',')
+            .append(q(DeviceIntel.savedType(r.deviceType, r.vendor, r.mac))).append(',').append(local(r.firstSeen)).append(',').append(local(r.lastSeen)).append(',')
+            .append(r.sessions).append(',').append(r.detectCount).append(',').append(r.favorite).append(',')
+            .append(q(r.note)).append(',').append(q(r.alias)).append('\n')
+    }
+
+    /**
+     * The device history as CSV or JSON, written straight to [out] a batch at a time ([batches] gives the next
+     * rows, empty when done): 100,000+ devices built up as one string ran the app out of memory.
+     */
+    suspend fun writeHistory(out: java.io.Writer, csv: Boolean, batches: suspend () -> List<KnownDeviceEntity>) {
+        if (csv) {
+            out.write(HISTORY_CSV_HEADER)
+            val sb = StringBuilder()
+            while (true) {
+                val rows = batches(); if (rows.isEmpty()) break
+                sb.setLength(0); rows.forEach { historyCsvLine(sb, it) }; out.write(sb.toString())
+            }
+        } else {
+            val w = gson.newJsonWriter(out)
+            w.beginArray()
+            while (true) { val rows = batches(); if (rows.isEmpty()) break; rows.forEach { gson.toJson(historyItem(it), w) } }
+            w.endArray()
+            w.flush()
+        }
+        out.flush()
+    }
+
+    fun historyJson(rows: List<KnownDeviceEntity>): JsonArray = JsonArray().apply { rows.forEach { add(historyItem(it)) } }
+
+    private fun historyItem(r: KnownDeviceEntity) = JsonObject().apply {
+        addProperty("mac", r.mac); addProperty("name", r.name); addProperty("vendor", r.vendor)
+        addProperty("deviceType", DeviceIntel.savedType(r.deviceType, r.vendor, r.mac)); addProperty("firstSeen", iso(r.firstSeen))
+        addProperty("lastSeen", iso(r.lastSeen)); addProperty("sessions", r.sessions)
+        addProperty("detectCount", r.detectCount); addProperty("favorite", r.favorite); addProperty("note", r.note)
+        addProperty("customName", r.alias)
+    }
+
+    fun matchesJson(rows: List<DetectionEntity>): JsonArray = gson.toJsonTree(rows).asJsonArray
+
+    /**
+     * One file with everything (session, history, match log, watchlist entries), written straight
+     * to [out] one device at a time: a long history (100,000+ devices after some wardriving) built up
+     * as one JSON tree and one string ran the app out of memory. [historyBatches] and [matchBatches]
+     * give the next rows, empty when done.
+     */
+    suspend fun writeEverything(
+        out: java.io.Writer,
+        appVersion: String,
+        session: List<DeviceRegistry.Snapshot>,
+        flags: Flags,
+        historyBatches: suspend () -> List<KnownDeviceEntity>,
+        matchBatches: suspend () -> List<DetectionEntity>,
+        watchlist: List<OuiEntry>
+    ) {
+        val w = gson.newJsonWriter(out)
+        w.beginObject()
+        w.name("exportedBy").value("Kokoho $appVersion")
+        w.name("exportedAt").value(iso(System.currentTimeMillis()))
+        w.name("sessionDevices").beginArray()
+        session.forEach { gson.toJson(sessionItem(it, flags), w) }
+        w.endArray()
+        w.name("deviceHistory").beginArray()
+        while (true) { val rows = historyBatches(); if (rows.isEmpty()) break; rows.forEach { gson.toJson(historyItem(it), w) } }
+        w.endArray()
+        w.name("matchLog").beginArray()
+        while (true) { val rows = matchBatches(); if (rows.isEmpty()) break; rows.forEach { gson.toJson(it, DetectionEntity::class.java, w) } }
+        w.endArray()
+        w.name("watchlist"); gson.toJson(gson.toJsonTree(watchlist), w)
+        w.endObject()
+        w.flush()
+    }
+
+    /** [rows] a batch of [size] at a time (for [writeEverything] from rows already in memory). */
+    fun <T> batches(rows: List<T>, size: Int = 500): suspend () -> List<T> {
+        var at = 0
+        return { rows.subList(at.coerceAtMost(rows.size), (at + size).coerceAtMost(rows.size)).also { at += size } }
+    }
+
+    fun pretty(el: com.google.gson.JsonElement): String = gson.toJson(el)
+
+    private fun q(s: String?): String = ExportText.csv(s)
+    private fun x(s: String): String = ExportText.xml(s)
+}

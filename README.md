@@ -13,17 +13,17 @@
 ### 1. Passive Signal Modalities & Agency Classification
 Kokoho correlates observations across three passive receive paths against bundled and user-imported signature tables (`assets/kokoho_signatures.json`):
 
-- **VHF / UHF / 800 MHz RF & P25 (`com.rfsentinel.app.sdr`):**
+- **VHF / UHF / 800 MHz RF & P25 (`org.tucsoncommunity.kokoho.sdr`):**
   Drives attached USB OTG RTL-SDR dongles (`RtlSdr.kt`) or local `rtl_tcp` streams (`RtlTcp.kt`) to sweep conventional federal allocations (162–174 MHz, 406–420 MHz) and decode P25 Phase 1 Trunking Signalling Blocks (`P25Tsbk.kt`, `P25Demod.kt`) for Network Access Codes (NAC) and talkgroup IDs (including PCWIN regional trunked talkgroups).
-- **Fleet Wi-Fi & Bluetooth LE OUIs (`com.rfsentinel.app.service`, `com.rfsentinel.app.detect`):**
+- **Fleet Wi-Fi & Bluetooth LE OUIs (`org.tucsoncommunity.kokoho.service`, `org.tucsoncommunity.kokoho.detect`):**
   Passively scans 802.11 beacons/probes and BLE advertisements for mobile routers, ruggedized terminals, and tactical radios (e.g., Cradlepoint, Sierra Wireless, Motorola APX/Astro, Axon fleet hardware). Colocated OUI sightings within a 90-second window fuse with concurrent RF detections into a single correlated entity track.
-- **ADS-B Aircraft Telemetry (`com.rfsentinel.app.online.PoliceAircraft`, `com.rfsentinel.app.sdr.AdsbTracker`):**
+- **ADS-B Aircraft Telemetry (`org.tucsoncommunity.kokoho.online.PoliceAircraft`, `org.tucsoncommunity.kokoho.sdr.AdsbTracker`):**
   Matches 1090 MHz Mode-S broadcasts and regional ADS-B feeds against agency tail numbers, ICAO hex allocations, callsigns, and registered operators.
 
 By default, filtering is scoped to **DHS** sub-agencies (**CBP**, **ICE**, **HSI**, **AMO**, **FPS**, and **Federal Interop**). Optional agency scopes (**Police / TPD**, **Sheriff / PCSO**, **Fire**, and **SAR**) can be toggled independently in Settings for ground RF/OUI and ADS-B aircraft.
 
 ### 2. Offline-First Spatial Engine & Client Triangulation
-`KokohoPostureEngine` (`com.rfsentinel.app.kokoho.KokohoPostureEngine`) maintains a rolling spatial sample history per deterministic entity UUIDv5 within the user-configured signal decay window (default 30 minutes; configurable from 5 to 120 minutes):
+`KokohoPostureEngine` (`org.tucsoncommunity.kokoho.posture.KokohoPostureEngine`) maintains a rolling spatial sample history per deterministic entity UUIDv5 within the user-configured signal decay window (default 30 minutes; configurable from 5 to 120 minutes):
 
 1. **Single-Point / Narrow Baseline (`< 60 m` GPS spread):**
    Estimates emitter range from log-distance path loss (RSSI dBm for Wi-Fi/BLE; role-weighted SNR dB for repeater, mobile, or air-to-ground RF) and renders a user-centered uncertainty ring on the MapLibre vector map.
@@ -47,10 +47,10 @@ By default, filtering is scoped to **DHS** sub-agencies (**CBP**, **ICE**, **HSI
 
 ## Repository Structure
 
-- `app/src/main/java/com/rfsentinel/app/kokoho/` — Posture engine, offline triangulation, agency signature matcher, Auxnet SSE/check-in client, and 3-tab UI controller (`Monitor` | `Map` | `Utility`).
-- `app/src/main/java/com/rfsentinel/app/ui/` — MapLibre dark vector map (`RfMap.kt`), Entity Details view with inline local classification editing and `1/4`-screen radius map (`DeviceDetailActivity.kt`), and unified detection/telemetry logs (`DetectionLogActivity.kt`).
-- `app/src/main/java/com/rfsentinel/app/sdr/` — RTL-SDR USB host driver, P25 Phase 1 TSBK control channel decoder, waterfall spectrum view, and NOAA antenna check.
-- `app/src/main/java/com/rfsentinel/app/settings/` — Searchable Settings activity (agency toggles, ADS-B aircraft scope, signal decay time, privacy controls, RadioReference CSV/TSV channel import, and imperial/metric units).
+- `app/src/main/java/org/tucsoncommunity/kokoho/posture/` — Posture engine, offline triangulation, agency signature matcher, Auxnet SSE/check-in client, and 3-tab UI controller (`Monitor` | `Map` | `Utility`).
+- `app/src/main/java/org/tucsoncommunity/kokoho/ui/` — MapLibre dark vector map (`RfMap.kt`), Entity Details view with inline local classification editing and `1/4`-screen radius map (`DeviceDetailActivity.kt`), and unified detection/telemetry logs (`DetectionLogActivity.kt`).
+- `app/src/main/java/org/tucsoncommunity/kokoho/sdr/` — RTL-SDR USB host driver, P25 Phase 1 TSBK control channel decoder, waterfall spectrum view, and NOAA antenna check.
+- `app/src/main/java/org/tucsoncommunity/kokoho/settings/` — Searchable Settings activity (agency toggles, ADS-B aircraft scope, signal decay time, privacy controls, RadioReference CSV/TSV channel import, and imperial/metric units).
 - `app/src/main/assets/kokoho_signatures.json` — Bundled Tucson sector VHF/UHF frequencies, P25 NACs, PCWIN talkgroups, and fleet hardware OUIs.
 
 ---
@@ -73,4 +73,4 @@ Output APK: `app/build/outputs/apk/foss/debug/Kokoho-v2.41.0-foss-debug.apk`
 
 ## License
 
-Kokoho is free software distributed under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)). Forked from upstream [RFSentinel](https://github.com/CIS-C0/RFSentinel); hardware driver and vocoder attributions are documented in [`app/src/main/java/com/rfsentinel/app/usb/NOTICE.md`](app/src/main/java/com/rfsentinel/app/usb/NOTICE.md) and [`app/src/main/java/com/rfsentinel/app/sdr/NOTICE.md`](app/src/main/java/com/rfsentinel/app/sdr/NOTICE.md).
+Kokoho is free software distributed under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)). Forked from upstream [RFSentinel](https://github.com/CIS-C0/RFSentinel); hardware driver and vocoder attributions are documented in [`app/src/main/java/org/tucsoncommunity/kokoho/usb/NOTICE.md`](app/src/main/java/org/tucsoncommunity/kokoho/usb/NOTICE.md) and [`app/src/main/java/org/tucsoncommunity/kokoho/sdr/NOTICE.md`](app/src/main/java/org/tucsoncommunity/kokoho/sdr/NOTICE.md).

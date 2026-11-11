@@ -38,7 +38,7 @@
                 android:visibility="gone" />
 
             <!-- Visual style: the match's confidence -->
-            <com.rfsentinel.app.ui.LevelBarView
+            <org.tucsoncommunity.kokoho.ui.LevelBarView
                 android:id="@+id/confidenceBar"
                 android:layout_width="match_parent"
                 android:layout_height="4dp"
@@ -75,7 +75,7 @@
             android:orientation="vertical"
             android:visibility="gone">
 
-            <com.rfsentinel.app.ui.SignalBarsView
+            <org.tucsoncommunity.kokoho.ui.SignalBarsView
                 android:id="@+id/signalBars"
                 android:layout_width="28dp"
                 android:layout_height="22dp" />

@@ -1,0 +1,52 @@
+package org.tucsoncommunity.kokoho.online
+
+import android.content.Context
+import org.tucsoncommunity.kokoho.alpr.AlprStore
+import org.tucsoncommunity.kokoho.alpr.IgnoredCameras
+import org.tucsoncommunity.kokoho.alpr.KnownCamera
+import org.tucsoncommunity.kokoho.alpr.KnownCameras
+import org.tucsoncommunity.kokoho.detect.Category
+import org.tucsoncommunity.kokoho.service.ScanForegroundService
+import org.tucsoncommunity.kokoho.util.Prefs
+
+/**
+ * Threats that aren't a device in the list: the nearest known camera (scored by
+ * distance), a police aircraft overhead and a Waze police report. The threat headline
+ * (phone banner, car screens) shows the strongest of these when it outranks the devices.
+ */
+object AmbientThreats {
+
+    data class Threat(val score: Int, val label: String, val category: Category)
+
+    /** Latest from the online sources, with when it was seen. */
+    @Volatile var aircraft: Pair<Long, Threat>? = null
+    @Volatile var waze: Pair<Long, Threat>? = null
+
+    private const val ONLINE_TTL_MS = 3 * 60_000L
+    /** How long a Waze report keeps the headline up: a little over two polls, never under 6 minutes (set by OnlineWatch). */
+    @Volatile var wazeTtlMs = 6 * 60_000L
+
+    fun clear() {
+        aircraft = null
+        waze = null
+    }
+
+    /** The strongest current ambient threat scoring 40 or more, if any. */
+    fun top(context: Context, now: Long = System.currentTimeMillis()): Threat? = listOfNotNull(
+        camera(context),
+        aircraft?.takeIf { now - it.first < ONLINE_TTL_MS }?.second,
+        waze?.takeIf { now - it.first < wazeTtlMs }?.second
+    ).filter { it.score >= 40 }.maxByOrNull { it.score }
+
+    private fun camera(context: Context): Threat? {
+        if (!ScanForegroundService.isRunning || !Prefs.mappedCameras(context)) return null
+        val loc = ScanForegroundService.lastFix ?: return null
+        val cams = AlprStore.cameras.takeIf { it.isNotEmpty() } ?: return null
+        val (cam, d) = KnownCameras.near(cams, loc.latitude, loc.longitude, 500.0).firstOrNull { (c, _) ->
+            val wanted = if (c.type == KnownCamera.Kind.ALPR) Prefs.knownAlprAlerts(context) else Prefs.speedCameraAlerts(context)
+            wanted && !IgnoredCameras.contains(context, c.osmId)
+        } ?: return null
+        val score = KnownCameras.proximityScore(d)
+        return Threat(score, "${cam.label} ${org.tucsoncommunity.kokoho.util.Units.distance(d)} away", Category.ALPR)
+    }
+}

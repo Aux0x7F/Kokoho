@@ -1,0 +1,323 @@
+package org.tucsoncommunity.kokoho.detect
+
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.BeforeClass
+import org.junit.Test
+import java.io.File
+import kotlin.math.sin
+
+class IdentificationTest {
+
+    companion object {
+        @BeforeClass
+        @JvmStatic
+        fun loadVendors() {
+            VendorDb.load { File("src/main/assets", it).inputStream() }
+        }
+    }
+
+    private fun hit(c: Category, label: String, conf: Int, source: String = "test") = Hit(c, label, conf, "e", source)
+
+    // ---- Evidence fusion ------------------------------------------------------
+
+    @Test
+    fun agreeingRulesStrengthenEachOther() {
+        val fused = EvidenceFusion.fuse(listOf(
+            hit(Category.PUBLIC_SAFETY, "Zebra mobile printer", 50),
+            hit(Category.PUBLIC_SAFETY, "Watchlisted printer", 70)
+        ))
+        assertEquals("Watchlisted printer", fused.first().label)
+        assertTrue(fused.first().confidence in 77..78) // 1 - 0.30 * (1 - 0.25) = 77.5 %
+        assertTrue(fused.first().evidence.contains("Corroborated by"))
+    }
+
+    @Test
+    fun fusionIgnoresOtherCategoriesWeakHitsAndCaps() {
+        val other = EvidenceFusion.fuse(listOf(hit(Category.PUBLIC_SAFETY, "A", 60), hit(Category.DRONE, "B", 60)))
+        assertEquals(60, other.first().confidence)
+        val weak = EvidenceFusion.fuse(listOf(hit(Category.PUBLIC_SAFETY, "A", 60), hit(Category.PUBLIC_SAFETY, "TI block", 20)))
+        assertEquals(60, weak.first().confidence)
+        val many = EvidenceFusion.fuse((1..6).map { hit(Category.BODY_CAM, "R$it", 85) })
+        assertEquals(EvidenceFusion.FUSED_CAP, many.first().confidence)
+    }
+
+    @Test
+    fun clusterHitIsNeverFusedWithTheDevicesOwnMatch() {
+        // A 2-role group scores 48 (weak). The radio's own 45 is what gave it its role,
+        // so fusing the two would double-count and push it past the 50% alert line.
+        val fused = EvidenceFusion.fuse(listOf(
+            hit(Category.PUBLIC_SAFETY, "Motorola Solutions equipment", 45),
+            hit(Category.PUBLIC_SAFETY, "Two-way radio in a possible police vehicle", 48, PatrolCluster.SOURCE)
+        ))
+        assertEquals(48, fused.first().confidence)
+        assertTrue(fused.all { it.confidence < 50 })
+    }
+
+    // ---- Patrol-vehicle clusters ----------------------------------------------
+
+    private fun wave(start: Long, phase: Double = 0.0, offset: Int = -70) =
+        (0 until 60).map { s -> (start + s * 1000L) to (offset + (8 * sin(s / 5.0 + phase)).toInt()) }
+
+    @Test
+    fun rolesComeFromHitsVendorsAndNames() {
+        assertEquals("mobile printer", PatrolCluster.roleOf(listOf(hit(Category.MOBILE_PRINTER, "Zebra mobile printer", 50)), "Texas Instruments", null))
+        assertEquals("two-way radio", PatrolCluster.roleOf(emptyList(), "Motorola Solutions Inc.", null))
+        assertEquals("body camera", PatrolCluster.roleOf(listOf(hit(Category.BODY_CAM, "Axon body camera", 90)), null, null))
+        assertEquals("mobile printer", PatrolCluster.roleOf(emptyList(), null, "RJ-4250WB_1234"))
+        assertNull(PatrolCluster.roleOf(emptyList(), "Apple, Inc.", "iPhone"))
+        assertEquals("police radar", PatrolCluster.roleOf(listOf(hit(Category.PUBLIC_SAFETY, "Applied Concepts Stalker police speed radar", 70)), null, null))
+        assertEquals("emergency-vehicle equipment", PatrolCluster.roleOf(listOf(hit(Category.PUBLIC_SAFETY, "Federal Signal police lightbar / siren controller", 55)), null, null))
+        // The cluster's own hit never counts as a role (no self-reinforcement).
+        assertNull(PatrolCluster.roleOf(listOf(hit(Category.PUBLIC_SAFETY, "Possible police vehicle", 60, PatrolCluster.SOURCE)), null, null))
+    }
+
+    @Test
+    fun devicesMovingTogetherFormAVehicle() {
+        val now = 60_000L
+        val members = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "police camera", 0, now, wave(0)),
+            PatrolCluster.Member("AA:00:00:00:00:02", "two-way radio", 0, now, wave(0, offset = -80)),
+            PatrolCluster.Member("AA:00:00:00:00:03", "vehicle cellular router", 0, now, wave(0, phase = 3.1)) // opposite motion
+        )
+        val groups = PatrolCluster.groups(members, now)
+        assertEquals(1, groups.size)
+        assertEquals(setOf("police camera", "two-way radio"), groups[0].roles)
+        assertTrue(groups[0].correlated)
+        val h = PatrolCluster.hitFor("AA:00:00:00:00:01", groups)!!
+        assertEquals(58, h.confidence) // 24 + 12*2 + 10
+        assertNull(PatrolCluster.hitFor("AA:00:00:00:00:03", groups))
+    }
+
+    @Test
+    fun sameRoleOrStaleDevicesDontCluster() {
+        val now = 200_000L
+        val twoRadios = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "two-way radio", 150_000, now, wave(140_000)),
+            PatrolCluster.Member("AA:00:00:00:00:02", "two-way radio", 150_000, now, wave(140_000))
+        )
+        assertTrue(PatrolCluster.groups(twoRadios, now).isEmpty())
+        val stale = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "two-way radio", 0, 10_000, emptyList()),
+            PatrolCluster.Member("AA:00:00:00:00:02", "mobile printer", 0, now, emptyList())
+        )
+        assertTrue(PatrolCluster.groups(stale, now).isEmpty())
+    }
+
+    @Test
+    fun aMovingDeviceAndAParkedOneAreNotAVehicle() {
+        val now = 60_000L
+        val parked = (0 until 60).map { it * 1000L to -60 }
+        val members = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "two-way radio", 0, now, wave(0)),
+            PatrolCluster.Member("AA:00:00:00:00:02", "mobile printer", 5_000, now, parked)
+        )
+        assertTrue(PatrolCluster.groups(members, now).isEmpty())
+        assertEquals(PatrolCluster.Motion.OneFlat, PatrolCluster.motion(wave(0), parked, now))
+    }
+
+    @Test
+    fun newVehicleRolesAndSupportOnlyGroups() {
+        assertEquals("vehicle cellular router", PatrolCluster.roleOf(emptyList(), "Peplink International Ltd.", null))
+        assertEquals("vehicle cellular router", PatrolCluster.roleOf(emptyList(), "Inseego Wireless, Inc", null))
+        assertEquals("vehicle interface module",
+            PatrolCluster.roleOf(listOf(hit(Category.PUBLIC_SAFETY, "Fortin vehicle interface module", 20)), null, null))
+        // Fortinet firewalls are not Fortin modules.
+        assertNull(PatrolCluster.roleOf(emptyList(), "Fortinet, Inc.", null))
+        assertNull(PatrolCluster.roleOf(emptyList(), "Brother industries, LTD.", null))
+
+        val now = 60_000L
+        // A remote starter and a Dräger device moving together: civilian makers alone never make a vehicle.
+        val supportOnly = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "vehicle interface module", 0, now, wave(0)),
+            PatrolCluster.Member("AA:00:00:00:00:02", "impairment-screening device", 0, now, wave(0, offset = -80))
+        )
+        assertTrue(PatrolCluster.groups(supportOnly, now).isEmpty())
+        // A radio alone is dual-use: support gear doesn't make it a vehicle...
+        val withRadio = supportOnly + PatrolCluster.Member("AA:00:00:00:00:03", "two-way radio", 0, now, wave(0, offset = -75))
+        assertTrue(PatrolCluster.groups(withRadio, now).isEmpty())
+        // ...but it adds to a group with a police-specific role.
+        val withCamera = withRadio + PatrolCluster.Member("AA:00:00:00:00:04", "police camera", 0, now, wave(0, offset = -85))
+        assertEquals(4, PatrolCluster.groups(withCamera, now).single().roles.size)
+    }
+
+    @Test
+    fun civilianKitsAreNotAVehicle() {
+        val now = 60_000L
+        fun kit(vararg roles: String) = roles.mapIndexed { i, r ->
+            PatrolCluster.Member("AA:00:00:00:00:0$i", r, 0, now, wave(0, offset = -70 - 5 * i))
+        }
+        fun vehicle(vararg roles: String) = PatrolCluster.groups(kit(*roles), now).isNotEmpty()
+        // A stockroom: label printer and cellular router moving together (GitHub issue #3), or a printer and a radio.
+        assertFalse(vehicle("mobile printer", "vehicle cellular router"))
+        assertFalse(vehicle("mobile printer", "two-way radio"))
+        assertFalse(vehicle("impairment-screening device", "vehicle cellular router"))
+        // Two different dual-use roles, or one police-specific role, still make one; the printer adds to it.
+        assertTrue(vehicle("two-way radio", "vehicle cellular router"))
+        assertEquals(3, PatrolCluster.groups(kit("two-way radio", "vehicle cellular router", "mobile printer"), now).single().roles.size)
+        assertTrue(vehicle("body camera", "mobile printer"))
+        assertTrue(vehicle("plate reader", "vehicle cellular router"))
+        assertFalse(PatrolCluster.isVehicle(setOf("body camera")))
+    }
+
+    @Test
+    fun consumerBrandsHaveNoPatrolRole() {
+        assertNull(PatrolCluster.roleOf(emptyList(), "JVCKENWOOD Corporation", "KENWOOD CAR"))
+        assertNull(PatrolCluster.roleOf(emptyList(), "Panasonic Connect Co., Ltd.", null))
+    }
+
+    @Test
+    fun matchesFadeAfterTheEvidenceStops() {
+        DeviceRegistry.startSession(0)
+        val mac = "00:25:DF:00:00:42"
+        val a = { t: Long -> Advert(mac, Advert.Source.BLE, -60, null, timestamp = t) }
+        val id = DeviceIntel.Identity("x", emptyList())
+        val axon = Hit(Category.BODY_CAM, "Axon body camera", 90, "e", "s")
+        DeviceRegistry.report(a(1_000), listOf(axon), id, null, null, null, 1_000)
+        // Intermittent tag: a packet without it keeps the match for a while...
+        DeviceRegistry.report(a(30_000), emptyList(), id, null, null, null, 30_000)
+        assertEquals("Axon body camera", DeviceRegistry.get(mac)!!.best?.label)
+        // ...but not forever.
+        DeviceRegistry.report(a(1_000 + DeviceRegistry.HIT_HOLD_MS + 1), emptyList(), id, null, null, null, 1_000 + DeviceRegistry.HIT_HOLD_MS + 1)
+        assertNull(DeviceRegistry.get(mac)!!.best)
+    }
+
+    @Test
+    fun signalIsSmoothedButResetsAfterAPause() {
+        DeviceRegistry.startSession(0)
+        val mac = "C0:00:00:00:00:77"
+        val id = DeviceIntel.Identity("x", emptyList())
+        fun at(t: Long, rssi: Int) =
+            DeviceRegistry.report(Advert(mac, Advert.Source.BLE, rssi, null, timestamp = t), emptyList(), id, null, null, null, t)
+        at(1_000, -60)
+        at(1_100, -80) // one outlier packet moves the reading, but only part of the way
+        assertEquals(-66, DeviceRegistry.get(mac)!!.rssi)
+        at(60_000, -90) // heard again after a long gap: take the new value as is
+        assertEquals(-90, DeviceRegistry.get(mac)!!.rssi)
+    }
+
+    @Test
+    fun flatSignalsFallBackToArrivalTime() {
+        val flat = (0 until 30).map { it * 1000L to -60 }
+        val now = 30_000L
+        val together = listOf(
+            PatrolCluster.Member("AA:00:00:00:00:01", "two-way radio", 0, now, flat),
+            PatrolCluster.Member("AA:00:00:00:00:02", "vehicle cellular router", 10_000, now, flat)
+        )
+        val g = PatrolCluster.groups(together, now)
+        assertEquals(1, g.size)
+        assertEquals(48, g[0].confidence)
+    }
+
+    // ---- Address rotation -------------------------------------------------------
+
+    private fun axonAdvert(mac: String, time: Long) = Advert(
+        mac, Advert.Source.BLE, -65, null, mapOf(0x034D to ByteArray(6)),
+        timestamp = time
+    )
+
+    @Test
+    fun rotatedAddressInheritsMatches() {
+        DeviceRegistry.startSession(0)
+        val axon = Hit(Category.BODY_CAM, "Axon / TASER equipment", 60, "Company ID 0x034D", "SIG")
+        DeviceRegistry.report(axonAdvert("5A:11:22:33:44:01", 1_000), listOf(axon), DeviceIntel.Identity("x", emptyList()), null, null, null, 1_000)
+        DeviceRegistry.report(axonAdvert("5A:11:22:33:44:02", 6_000), emptyList(), DeviceIntel.Identity("x", emptyList()), null, null, null, 6_000)
+        val inherited = DeviceRegistry.inheritedHits("5A:11:22:33:44:02")
+        assertEquals(1, inherited.size)
+        assertEquals(55, inherited[0].confidence)
+        assertTrue(DeviceRegistry.get("5A:11:22:33:44:02")!!.facts.any { it.first == "Previous address" })
+    }
+
+    @Test
+    fun rotatedAddressKeepsFollowTracking() {
+        DeviceRegistry.startSession(0)
+        val id = DeviceIntel.Identity("x", emptyList())
+        val axon = Hit(Category.BODY_CAM, "Axon / TASER equipment", 60, "Company ID 0x034D", "SIG")
+        // Heard for 8 minutes along a 1.2 km drive under the first address...
+        for (i in 0..8) {
+            val t = 1_000L + i * 60_000L
+            DeviceRegistry.report(axonAdvert("5A:11:22:33:55:01", t), listOf(axon), id, null, null,
+                DeviceRegistry.GeoSample(t, 45.0 + i * 0.0015, 10.0), t)
+        }
+        // ...then its address changes; 3 more minutes under the new one.
+        for (i in 0..3) {
+            val t = 490_000L + i * 60_000L
+            DeviceRegistry.report(axonAdvert("5A:11:22:33:55:02", t), emptyList(), id, null, null,
+                DeviceRegistry.GeoSample(t, 45.0135 + i * 0.0015, 10.0), t)
+        }
+        // 11 minutes in all: the new address counts the time and distance before the change.
+        assertTrue(DeviceRegistry.checkFollowing("5A:11:22:33:55:02", 10 * 60_000L, 800.0))
+    }
+
+    @Test
+    fun ambiguousOrUninformativeAdvertsAreNotLinked() {
+        DeviceRegistry.startSession(0)
+        val axon = Hit(Category.BODY_CAM, "Axon", 60, "e", "s")
+        val id = DeviceIntel.Identity("x", emptyList())
+        // Two identical candidates went silent: can't tell which one rotated.
+        DeviceRegistry.report(axonAdvert("5A:00:00:00:00:01", 1_000), listOf(axon), id, null, null, null, 1_000)
+        DeviceRegistry.report(axonAdvert("5A:00:00:00:00:02", 1_000), listOf(axon), id, null, null, null, 1_000)
+        DeviceRegistry.report(axonAdvert("5A:00:00:00:00:03", 5_000), emptyList(), id, null, null, null, 5_000)
+        assertTrue(DeviceRegistry.inheritedHits("5A:00:00:00:00:03").isEmpty())
+        // Apple Continuity-only adverts carry no fingerprint at all.
+        assertNull(AdvertFingerprint.of(Advert("5A:00:00:00:00:09", Advert.Source.BLE, -60, null, mapOf(0x004C to ByteArray(10)))))
+    }
+
+    // ---- Identification ----------------------------------------------------------
+
+    @Test
+    fun identifiesByServiceAndRegistrant() {
+        val hr = DeviceIntel.identify(Advert("5A:00:00:00:00:01", Advert.Source.BLE, -60, null,
+            serviceUuids = listOf(Advert.uuid16(0x180D))))
+        assertEquals("Heart-rate sensor / fitness wearable", hr.type)
+        assertTrue(hr.facts.contains("Identified by" to "advertised service"))
+        assertTrue(hr.facts.first { it.first == "Services" }.second.contains("0x180D"))
+
+        val router = DeviceIntel.identify(
+            Advert("00:30:44:00:00:01", Advert.Source.WIFI, -60, "NETGEAR-5G",
+                wifi = Advert.WifiInfo(2437, "[WPA2-PSK-CCMP]", null, emptyList())),
+            VendorDb.macVendor("00:30:44:00:00:01")
+        )
+        assertEquals("Vehicle / cellular router (WiFi)", router.type)
+        assertNotNull(router.facts.firstOrNull { it.first == "Identified by" })
+    }
+
+    private fun ap(mac: String, ssid: String?) = DeviceIntel.identify(
+        Advert(mac, Advert.Source.WIFI, -60, ssid, wifi = Advert.WifiInfo(2437, "[WPA2-PSK-CCMP]", null, emptyList())),
+        VendorDb.macVendor(mac))
+
+    @Test
+    fun savedRecordsOfCarWifiReadAsVehicleWifi() {
+        // Types saved by older versions, upgraded at view time from the saved registrant or the address.
+        assertEquals("Vehicle WiFi - Tesla", DeviceIntel.savedType("Phone hotspot", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        assertEquals("Vehicle WiFi - Harman", DeviceIntel.savedType("Hidden WiFi network", null, "00:1C:D7:00:00:01"))
+        assertEquals("Vehicle WiFi - Visteon - MIB3", DeviceIntel.savedType("Vehicle system (WiFi) - MIB3", null, "00:09:93:00:00:01"))
+        assertEquals("Vehicle WiFi - Tesla", DeviceIntel.savedType("WiFi access point - Tesla", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        // Clients, other makers and already-current types stay as saved.
+        assertEquals("WiFi device (laptop, phone or camera on a network)",
+            DeviceIntel.savedType("WiFi device (laptop, phone or camera on a network)", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        assertEquals("Phone hotspot", DeviceIntel.savedType("Phone hotspot", "Apple, Inc.", "00:00:00:00:00:01"))
+        assertEquals("Vehicle WiFi - Tesla", DeviceIntel.savedType("Vehicle WiFi - Tesla", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        assertNull(DeviceIntel.savedType(null, "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        // A label that was the old type follows it; a network name stays.
+        assertEquals("Vehicle WiFi - Tesla", DeviceIntel.savedLabel("Hidden WiFi network", "Hidden WiFi network", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+        assertEquals("My Model 3", DeviceIntel.savedLabel("My Model 3", "WiFi access point", "Tesla,Inc.", "0C:29:8F:00:00:01"))
+    }
+
+    @Test
+    fun aCarMakersAddressMakesAnyNetworkVehicleWifi() {
+        // Registry prefixes (IEEE): Tesla, Inc. / Harman-Becker Automotive / Visteon.
+        val hotspot = ap("0C:29:8F:00:00:01", "Model Y Hotspot")
+        assertEquals("Vehicle WiFi - Tesla", hotspot.type)
+        assertTrue(hotspot.facts.contains("Network name suggests" to "Phone hotspot"))
+        assertEquals("Vehicle WiFi - Harman", ap("00:1C:D7:00:00:01", "DIRECT-xy-Car").type)
+        assertEquals("Vehicle WiFi - Visteon", ap("00:09:93:00:00:01", null).type)
+        // Not car makers: a Tesla-named controls company, and an ordinary router.
+        assertEquals(null, DeviceIntel.automotiveMaker("Tesla Controls"))
+        assertFalse(ap("00:30:44:00:00:01", "Hotspot").type.startsWith("Vehicle WiFi"))
+    }
+}

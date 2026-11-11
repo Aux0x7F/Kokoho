@@ -21,7 +21,7 @@ val keystoreProps = Properties().apply {
 base.archivesName.set("Kokoho-v$appVersionName")
 
 android {
-    namespace = "com.rfsentinel.app"
+    namespace = "org.tucsoncommunity.kokoho"
     compileSdk = 37
 
     defaultConfig {

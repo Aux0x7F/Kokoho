@@ -1,0 +1,283 @@
+package org.tucsoncommunity.kokoho.online
+
+import android.content.Context
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import org.tucsoncommunity.kokoho.detect.Category
+import org.tucsoncommunity.kokoho.detect.Hit
+import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import kotlin.math.abs
+
+/**
+ * Police and government aircraft overhead, from community ADS-B networks (adsb.fi,
+ * adsb.lol: no key, and unlike the commercial flight trackers they don't hide
+ * law-enforcement flights). An aircraft counts when its ICAO address is in the bundled
+ * registry of law-enforcement airframes (FAA + Transport Canada), when the feed names a
+ * police owner, or when an unlisted aircraft keeps circling low over the same spot.
+ */
+object PoliceAircraft {
+
+    /** One aircraft from the feed. Altitude in feet, speed in knots, track in degrees. */
+    data class Plane(
+        val hex: String,
+        val callsign: String?,
+        val registration: String?,
+        val type: String?,
+        val owner: String?,
+        val lat: Double,
+        val lon: Double,
+        val altitudeFt: Int?,
+        val speedKt: Double?,
+        val trackDeg: Double?,
+        val military: Boolean
+    )
+
+    data class Entry(val registration: String, val owner: String, val model: String)
+
+    /** Matches police / federal law-enforcement owner names (also in the feed's owner field). */
+    private val LE_OWNER = Regex(
+        "POLICE|SHERIFF|HIGHWAY PATROL|STATE PATROL|TROOPER|PUBLIC SAFETY|CONSTABLE|MARSHALS?\\b|" +
+            "CUSTOMS|BORDER (PROTECTION|SERVICES)|HOMELAND SECURITY|FEDERAL BUREAU OF INVESTIGATION|" +
+            "DRUG ENFORCEMENT|LAW ENFORCEMENT|GENDARMERIE",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Government owners (agencies, states, counties, cities, the Crown): not proof of police, but a public-service flight. */
+    private val GOV_OWNER = Regex(
+        "GOVERNMENT|DEPARTMENT OF|DEPT OF|MINISTRY|STATE OF|COMMONWEALTH OF|PROVINCE OF|COUNTY OF|CITY OF|" +
+            "HIS MAJESTY|HER MAJESTY|NATIONAL GUARD|COAST GUARD",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** The label of an unlisted aircraft circling overhead ([classify]). */
+    const val CIRCLING = "Aircraft circling overhead"
+
+    @Volatile private var registry: Map<String, Entry>? = null
+
+    fun load(context: Context): Map<String, Entry> = registry ?: synchronized(this) {
+        registry ?: parseRegistry(
+            context.assets.open("aircraft/law_enforcement.tsv").bufferedReader().use { it.readText() }
+        ).also { registry = it }
+    }
+
+    internal fun parseRegistry(text: String): Map<String, Entry> = text.lineSequence()
+        .filter { it.isNotBlank() && !it.startsWith("#") }
+        .mapNotNull { line ->
+            val f = line.split('\t')
+            if (f.size < 3) null else f[0].lowercase() to Entry(f[1], f[2], f.getOrElse(3) { "" })
+        }
+        .toMap()
+
+    /** Aircraft from an adsb.fi ("aircraft") or adsb.lol ("ac") response. */
+    internal fun parseFeed(json: String): List<Plane> {
+        val root = JsonParser.parseString(json).asJsonObject
+        val list = (root.getAsJsonArray("aircraft") ?: root.getAsJsonArray("ac")) ?: return emptyList()
+        return list.mapNotNull { e ->
+            val o = e.asJsonObject
+            val lat = o.num("lat") ?: return@mapNotNull null
+            val lon = o.num("lon") ?: return@mapNotNull null
+            val hex = o.str("hex")?.lowercase()?.removePrefix("~") ?: return@mapNotNull null
+            Plane(
+                hex = hex,
+                callsign = o.str("flight")?.trim()?.ifEmpty { null },
+                registration = o.str("r"),
+                type = o.str("desc") ?: o.str("t"),
+                owner = o.str("ownOp"),
+                lat = lat, lon = lon,
+                // alt_baro is "ground" for aircraft on the ground.
+                altitudeFt = o.num("alt_baro")?.toInt() ?: o.num("alt_geom")?.toInt() ?: if (o.str("alt_baro") == "ground") 0 else null,
+                speedKt = o.num("gs"),
+                trackDeg = o.num("track"),
+                military = ((o.num("dbFlags")?.toInt() ?: 0) and 1) != 0
+            )
+        }
+    }
+
+    private fun JsonObject.str(k: String): String? =
+        get(k)?.takeIf { it.isJsonPrimitive }?.asString?.trim()?.ifEmpty { null }
+
+    private fun JsonObject.num(k: String): Double? =
+        get(k)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isNumber }?.asDouble
+
+    /**
+     * What an aircraft is, or null when it's ordinary traffic. [circling] comes from
+     * [LoiterTracker]; [distanceM] is the ground distance from you.
+     */
+    fun classify(p: Plane, registry: Map<String, Entry>, circling: Boolean, distanceM: Double?, via: String = VIA_ONLINE, alertM: Double = ALERT_M): Hit? {
+        val where = describe(p, distanceM)
+        // One 40 km away is listed, but it isn't overhead.
+        val over = if (distanceM != null && distanceM <= alertM) " overhead" else ""
+        registry[p.hex]?.let { e ->
+            return Hit(Category.AIRCRAFT, "Police aircraft$over: ${titleCase(e.owner)}", if (circling) 90 else 85,
+                "${e.registration} (${e.model.ifBlank { p.type ?: "aircraft" }}), registered to ${titleCase(e.owner)}. $where" +
+                    if (circling) " It is circling." else "",
+                "FAA / Transport Canada aircraft registry; $via")
+        }
+        p.owner?.takeIf { LE_OWNER.containsMatchIn(it) }?.let { owner ->
+            return Hit(Category.AIRCRAFT, "Police aircraft$over: ${titleCase(owner)}", if (circling) 85 else 80,
+                "${p.registration ?: p.hex.uppercase()} (${p.type ?: "aircraft"}), operated by ${titleCase(owner)}. $where" +
+                    if (circling) " It is circling." else "",
+                "ADS-B owner / operator (adsb.fi)")
+        }
+        p.owner?.takeIf { GOV_OWNER.containsMatchIn(it) }?.let { owner ->
+            return Hit(Category.AIRCRAFT, "Government aircraft$over: ${titleCase(owner)}", if (circling) 85 else 80,
+                "${p.registration ?: p.hex.uppercase()} (${p.type ?: "aircraft"}), operated by ${titleCase(owner)}. $where" +
+                    (if (circling) " It is circling." else "") + " A government owner isn't always police - verify.",
+                "ADS-B owner / operator (adsb.fi)")
+        }
+        if (circling) {
+            val low = (p.altitudeFt ?: 0) in 1..3_000
+            return Hit(Category.AIRCRAFT, CIRCLING, if (low) 55 else 45,
+                "${p.registration ?: p.callsign ?: p.hex.uppercase()} (${p.type ?: "aircraft"}) keeps circling over the same area. $where " +
+                    "Police and surveillance flights orbit like this, but so do news, training and survey flights - verify.",
+                "$via track (loiter detection)")
+        }
+        if (p.military) {
+            return Hit(Category.AIRCRAFT, "Military / government aircraft nearby", 40,
+                "${p.registration ?: p.callsign ?: p.hex.uppercase()} (${p.type ?: "aircraft"}). $where",
+                "ADS-B database flag (military)")
+        }
+        return null
+    }
+
+    /**
+     * A law-enforcement aircraft the RTL-SDR heard (its transponder answering radar, or ADS-B
+     * without a position): in radio range - tens of km - but where exactly isn't known.
+     */
+    fun heardNearby(hex: String, registry: Map<String, Entry>): Hit? = registry[hex]?.let { e ->
+        Hit(Category.AIRCRAFT, "Police aircraft in radio range: ${titleCase(e.owner)}", 60,
+            "${e.registration} (${e.model.ifBlank { "aircraft" }}), registered to ${titleCase(e.owner)}. Its transponder was " +
+                "heard by your RTL-SDR, so it is within radio range (usually under 100 km), but it sent no position.",
+            "FAA / Transport Canada aircraft registry; $VIA_LOCAL")
+    }
+
+    /** The default alert distance (ground distance, Settings): closer, a strong match alerts; farther, or weaker, it's only logged and listed. */
+    const val ALERT_M = 5_000.0
+
+    /**
+     * Whether a hit alerts (sound, voice, notification): a strong match (police, government) within [alertM], or with
+     * [circlingOn] (Settings) any aircraft circling within it; otherwise it's only logged.
+     */
+    fun alerts(hit: Hit, distanceM: Double?, circlingOn: Boolean = false, alertM: Double = ALERT_M): Boolean =
+        distanceM != null && distanceM <= alertM &&
+            (hit.confidence >= org.tucsoncommunity.kokoho.detect.Tier.STRONG.min || (circlingOn && hit.label == CIRCLING))
+
+    const val VIA_ONLINE = "ADS-B (adsb.fi / adsb.lol)"
+    const val VIA_LOCAL = "ADS-B heard by your RTL-SDR"
+
+    private fun describe(p: Plane, distanceM: Double?): String =
+        listOfNotNull(
+            distanceM?.let { "About ${org.tucsoncommunity.kokoho.util.Units.distance(it)} from you" },
+            p.altitudeFt?.let { if (it <= 0) "on the ground" else "at ${it} ft" },
+            p.speedKt?.let { "${it.toInt()} kt" }
+        ).joinToString(", ") + "."
+
+    internal fun titleCase(s: String): String = s.lowercase().split(' ').joinToString(" ") { w ->
+        if (w.length <= 3 && w in setOf("us", "fbi", "dea", "cbp", "dps", "rcmp", "opp")) w.uppercase()
+        else w.replaceFirstChar { it.uppercase() }
+    }
+
+    /**
+     * Spots aircraft orbiting over one area: in the last 12 minutes it turned through at least one and a half
+     * full circles while staying within 4 km of its own average position, below 8,000 ft and slower than 180 kt
+     * (airliners and passing traffic don't). Its positions must also go all the way around that average spot:
+     * the reported heading alone can't be trusted (a taxiing plane, a hovering helicopter or a jumpy heading
+     * adds up turns while flying straight). Fixes on the ground, slower than 30 kt or without a new position
+     * don't count.
+     */
+    class LoiterTracker {
+        private data class Fix(val time: Long, val lat: Double, val lon: Double, val track: Double)
+        private val tracks = HashMap<String, ArrayDeque<Fix>>()
+
+        fun update(p: Plane, now: Long): Boolean {
+            val q = tracks.getOrPut(p.hex) { ArrayDeque() }
+            val airborne = (p.altitudeFt ?: 1) > 0 && (p.speedKt ?: MIN_SPEED_KT) >= MIN_SPEED_KT
+            val last = q.lastOrNull()
+            // The RTL-SDR's list repeats the last position every couple of seconds until a new one is decoded.
+            val fresh = last == null || (now - last.time >= MIN_GAP_MS && (last.lat != p.lat || last.lon != p.lon))
+            if (airborne && fresh) p.trackDeg?.let { q.addLast(Fix(now, p.lat, p.lon, it)) }
+            while (q.isNotEmpty() && now - q.first().time > WINDOW_MS) q.removeFirst()
+            if (!airborne || q.size < 6 || now - q.first().time < 5 * 60_000L) return false
+            if ((p.altitudeFt ?: 0) > 8_000 || (p.speedKt ?: 0.0) > 180) return false
+            var turned = 0.0
+            for (i in 1 until q.size) turned += wrap(q[i].track - q[i - 1].track)
+            val cLat = q.sumOf { it.lat } / q.size
+            val cLon = q.sumOf { it.lon } / q.size
+            val dist = q.map { DeviceRegistry.metersBetween(cLat, cLon, it.lat, it.lon) }
+            if (dist.max() > 4_000 || dist.average() < MIN_RADIUS_M) return false
+            // How far the positions went around the average spot (a straight pass sweeps under 180 degrees).
+            var around = 0.0
+            for (i in 1 until q.size) around += wrap(bearing(cLat, cLon, q[i]) - bearing(cLat, cLon, q[i - 1]))
+            return abs(turned) >= 540 && abs(around) >= 360 && turned * around > 0
+        }
+
+        private fun wrap(d: Double): Double = when { d > 180 -> d - 360; d < -180 -> d + 360; else -> d }
+
+        private fun bearing(lat: Double, lon: Double, f: Fix): Double =
+            Math.toDegrees(kotlin.math.atan2((f.lon - lon) * kotlin.math.cos(Math.toRadians(lat)), f.lat - lat))
+
+        /** Forgets aircraft not heard for a while. */
+        fun prune(now: Long) {
+            tracks.entries.removeAll { (_, q) -> q.isEmpty() || now - q.last().time > WINDOW_MS }
+        }
+
+        companion object {
+            private const val WINDOW_MS = 12 * 60_000L
+            private const val MIN_GAP_MS = 5_000L
+            private const val MIN_SPEED_KT = 30.0
+            /** Average distance from the middle of the orbit: a real one is wider than this. */
+            private const val MIN_RADIUS_M = 150.0
+        }
+    }
+
+    /** Ground distance in metres. */
+    fun distance(p: Plane, lat: Double, lon: Double): Double = DeviceRegistry.metersBetween(lat, lon, p.lat, p.lon)
+
+    /** One aircraft as last heard, with what it matched (null: ordinary traffic). */
+    data class Seen(val plane: Plane, val hit: Hit?)
+
+    /** Every aircraft from the latest poll, for the map; empty when the source is off. */
+    @Volatile var latest: List<Seen> = emptyList()
+    @Volatile var latestAt = 0L
+    /** Every aircraft the RTL-SDR's ADS-B receiver has a position for. */
+    @Volatile var local: List<Seen> = emptyList()
+    @Volatile var localAt = 0L
+
+    /** Aircraft the other Sentinels sent: ICAO address to (when it arrived, as checked here). */
+    val shared = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Seen>>()
+    const val SHARED_MS = 5 * 60_000L
+
+    /** This phone's own aircraft, heard by the RTL-SDR and from the online feeds, while fresh; the RTL-SDR's are newer. */
+    fun own(now: Long = System.currentTimeMillis()): List<Seen> {
+        val mine = if (now - localAt <= 30_000L) local else emptyList()
+        val online = if (now - latestAt <= 3 * 60_000L) latest else emptyList()
+        if (mine.isEmpty()) return online
+        val heard = mine.mapTo(HashSet()) { it.plane.hex }
+        return mine + online.filter { it.plane.hex !in heard }
+    }
+
+    /** The aircraft to draw: this phone's own, then those the other Sentinels sent that it doesn't have. */
+    fun all(now: Long = System.currentTimeMillis()): List<Seen> {
+        val own = own(now)
+        if (shared.isEmpty()) return own
+        shared.entries.removeIf { now - it.value.first > SHARED_MS }
+        val heard = own.mapTo(HashSet()) { it.plane.hex }
+        return own + shared.values.map { it.second }.filter { it.plane.hex !in heard }
+    }
+
+    /** Aircraft [hex] (ICAO address) as the map draws it, or null. */
+    fun current(hex: String, now: Long = System.currentTimeMillis()): Seen? =
+        all(now).firstOrNull { it.plane.hex.equals(hex, ignoreCase = true) }
+
+    fun feedUrls(lat: Double, lon: Double, radiusKm: Int): List<String> {
+        val nm = Math.round(radiusKm / 1.852).toInt().coerceIn(1, 250)
+        // Rounded to ~1 km: the feeds don't need your exact position.
+        val la = String.format(java.util.Locale.US, "%.2f", lat)
+        val lo = String.format(java.util.Locale.US, "%.2f", lon)
+        return listOf(
+            "https://opendata.adsb.fi/api/v2/lat/$la/lon/$lo/dist/$nm",
+            "https://api.adsb.lol/v2/point/$la/$lo/$nm"
+        )
+    }
+
+}

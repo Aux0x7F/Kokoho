@@ -1,0 +1,371 @@
+package org.tucsoncommunity.kokoho.esp
+
+import org.tucsoncommunity.kokoho.link.MeshProto
+
+/**
+ * Reads one ESP32 board until [stop] is called. Kokoho only listens and
+ * asks read-only questions: OUI-Spy may be sent `CMD:VERSION` and, in
+ * Detector mode, `CMD:DUMP_LIVE` (what it has found so far); GhostESP is only
+ * asked for `help`, to scan networks and to list them; ESP32 Marauder only for
+ * `help` and its passive `sniffbeacon` / `sniffprobe` sniffers; a FREE-WiLi 2 ([freeWili])
+ * only gets its console's WiFi-menu keys and its access-point scan. An ESP32-C5 with the
+ * V2X2MAP firmware streams on its own and is never sent anything that changes it ([pollV2x]).
+ * A Meshtastic or MeshCore radio is asked for its node list and left listening ([probeMesh]).
+ */
+/** V2X frames carry no signal strength (the board sends the frame only); its position is what counts. */
+private const val V2X_NOMINAL_RSSI = -70
+
+class EspReader(
+    private val port: SerialPort,
+    private val onStatus: (String) -> Unit,
+    private val freeWili: Boolean = false,
+    private val onSightings: (List<EspSighting>) -> Unit
+) {
+    @Volatile private var stopped = false
+    private val text = Utf8Chunks()
+
+    fun stop() { stopped = true }
+
+    fun run() {
+        val buf = ByteArray(4096)
+        if (freeWili) { pollFreeWili(buf); return }
+        onStatus("ESP32 · listening…")
+        // 1. OUI-Spy prints on its own (banners, status, detections).
+        var heard = readFor(buf, 4_000) { OuiSpyReports.recognises(it) || it.contains(V2x.MAGIC) }
+        if (stopped) return
+        // An ESP32-C5 with the V2X2MAP firmware streams European V2X frames on its own.
+        if (heard.contains(V2x.MAGIC)) { pollV2x(buf); return }
+        // 2. Detector, PCAP and BLE-sniff modes answer a version request.
+        if (!OuiSpyReports.recognises(heard)) {
+            port.write("CMD:VERSION\n")
+            heard += readFor(buf, 1_500) { OuiSpyReports.recognises(it) }
+        }
+        if (stopped) return
+        if (!OuiSpyReports.recognises(heard)) {
+            // 3. GhostESP answers `help` with its banner.
+            port.write("help\r\n")
+            val banner = readFor(buf, 2_500) { GhostEspReports.recognises(it) }
+            if (GhostEspReports.recognises(banner)) { pollGhostEsp(buf); return }
+            // 4. ESP32 Marauder answers `help` with its command list (a Flipper Zero in
+            //    USB-UART bridge mode passes it through from its ESP32 board).
+            if (MarauderReports.recognises(heard + banner)) { pollMarauder(buf); return }
+            if (MarauderReports.isFlipperCli(heard + banner)) {
+                onStatus("Flipper Zero connected - on the Flipper open GPIO > USB-UART Bridge so Kokoho can reach its ESP32 board (Marauder)")
+                // Wait for the bridge, asking `help` now and then (the Flipper's own command
+                // line just lists its commands) until Marauder answers through it.
+                while (!stopped) {
+                    port.write("help\r\n")
+                    if (MarauderReports.recognises(readFor(buf, 3_000) { MarauderReports.recognises(it) })) {
+                        pollMarauder(buf); return
+                    }
+                }
+                return
+            }
+            heard += banner
+            // 5. A mesh radio answers only in its own framing.
+            if (probeMesh(buf)) return
+            heard += probeText
+        }
+        // 6. OUI-Spy - or a quiet board: Flock-You and Sky Spy say nothing until they find
+        //    something, so keep listening rather than giving up on it.
+        readOuiSpy(heard, buf)
+    }
+
+    /** What a board that isn't a mesh radio said meanwhile: a quiet OUI-Spy's first detection can land here. */
+    private val probeText = StringBuilder()
+
+    private fun meshFrames(frames: MeshFrames, buf: ByteArray, ms: Long, each: (ByteArray) -> Boolean): Boolean {
+        val until = System.currentTimeMillis() + ms
+        while (!stopped && System.currentTimeMillis() < until) {
+            val n = port.read(buf, 300)
+            if (n <= 0) continue
+            if (probeText.length < 16_384) probeText.append(text.decode(buf, n))
+            if (frames.feed(buf, n).map(each).any { it }) return true
+        }
+        return false
+    }
+
+    private fun probeMesh(buf: ByteArray): Boolean {
+        val want = MeshFrames.meshtastic(MeshProto.wantConfig(MeshProto.NODES_ONLY))
+        port.write(want)
+        val log = MeshtasticLog()
+        fun read(f: ByteArray) = runCatching { MeshProto.readFromRadio(f) }.getOrDefault(MeshProto.From.Other)
+        fun take(m: MeshProto.From) {
+            if (m == MeshProto.From.Rebooted) port.write(want)
+            log.feed(m)?.let { onSightings(listOf(it)) }
+        }
+        val frames = MeshFrames(meshtastic = true)
+        if (meshFrames(frames, buf, 2_500) { f -> read(f).also(::take) != MeshProto.From.Other }) {
+            var beat = System.currentTimeMillis()
+            while (!stopped) {
+                meshFrames(frames, buf, 1_000) { f -> take(read(f)); false }
+                onStatus("Meshtastic radio · live · ${log.heard.size} nodes heard")
+                val now = System.currentTimeMillis()
+                if (now - beat > 300_000) { beat = now; port.write(MeshFrames.meshtastic(MeshProto.heartbeat())) }
+            }
+            return true
+        }
+        val core = MeshCoreLog()
+        val replies = MeshFrames(meshtastic = false)
+        port.write(MeshFrames.meshCore(MeshCoreLog.APP_START))
+        if (!meshFrames(replies, buf, 2_500) { MeshCoreLog.isSelfInfo(it) }) return false
+        port.write(MeshFrames.meshCore(MeshCoreLog.GET_CONTACTS))
+        while (!stopped) {
+            meshFrames(replies, buf, 1_000) { f -> core.feed(f)?.let { onSightings(listOf(it)) }; false }
+            onStatus("MeshCore radio · live · ${core.heard.size} nodes heard")
+        }
+        return true
+    }
+
+    private fun readOuiSpy(already: String, buf: ByteArray) {
+        var mode = OuiSpyReports.modeOf(already)
+        val pending = StringBuilder()
+        var count = 0
+        fun status() = onStatus(when {
+            mode == OuiSpyReports.Mode.SELECTOR ->
+                "OUI-Spy is in its mode selector - join its Wi-Fi \"oui-spy\", open 192.168.4.1 and pick Flock-You, Detector or Sky Spy"
+            mode == OuiSpyReports.Mode.OTHER ->
+                "This OUI-Spy mode isn't used by Kokoho - pick Flock-You, Detector or Sky Spy"
+            mode == null && count == 0 -> "ESP32 connected · waiting for detections (OUI-Spy reports only when it finds something; a V2X board only when equipped vehicles are in range)"
+            else -> "OUI-Spy ${mode?.label ?: ""} · live · $count detection${if (count == 1) "" else "s"}"
+        })
+        fun consume(text: String) {
+            pending.append(text)
+            while (true) {
+                val nl = pending.indexOf('\n')
+                if (nl < 0) break
+                val line = pending.substring(0, nl)
+                pending.delete(0, nl + 1)
+                OuiSpyReports.modeOf(line)?.let { if (it != mode) { mode = it; status() } }
+                OuiSpyReports.parse(line)?.let {
+                    count++
+                    onSightings(listOf(it))
+                    status()
+                }
+            }
+            if (pending.length > 16_384) pending.setLength(0) // binary output (PCAP modes) isn't for us
+        }
+        consume(already) // what was heard while identifying (a partial last line stays pending)
+        status()
+        // Detector keeps what it found in RAM: fetch it once (read-only).
+        if (mode == OuiSpyReports.Mode.DETECTOR) port.write("CMD:DUMP_LIVE\n")
+        var askedDump = mode == OuiSpyReports.Mode.DETECTOR
+        while (!stopped) {
+            val n = port.read(buf, 500)
+            // A quiet V2X board only starts streaming once a vehicle is in range.
+            if (n > 0 && V2x.looksLikeStream(buf, n)) { pollV2x(buf, buf.copyOf(n)); return }
+            if (n > 0) consume(text.decode(buf, n))
+            if (!askedDump && mode == OuiSpyReports.Mode.DETECTOR) {
+                askedDump = true
+                port.write("CMD:DUMP_LIVE\n")
+            }
+        }
+    }
+
+    private fun pollGhostEsp(buf: ByteArray) {
+        onStatus("GhostESP · live")
+        while (!stopped) {
+            port.write("scanap\r\n")
+            readFor(buf, 6_000)
+            if (stopped) break
+            port.write("stopscan\r\n")
+            readFor(buf, 400)
+            port.write("list -a\r\n")
+            val networks = GhostEspReports.parseList(readFor(buf, 3_000))
+            if (networks.isNotEmpty()) onSightings(networks)
+            onStatus("GhostESP · live · ${networks.size} Wi-Fi networks")
+        }
+        runCatching { port.write("stopscan\r\n") }
+    }
+
+    /**
+     * ESP32 Marauder: alternates its two passive sniffers - `sniffbeacon` (access points,
+     * both bands on an ESP32-C5) and `sniffprobe` (client devices looking for networks) -
+     * and passes on what it hears in batches. Nothing else is sent.
+     */
+    private fun pollMarauder(buf: ByteArray) {
+        val seen = LinkedHashMap<String, EspSighting>()
+        val channels = HashSet<Int>()
+        // Devices heard this round (one beacon + one probe sniff), for the status counts.
+        val apMacs = HashSet<String>(); val clientMacs = HashSet<String>()
+        var fiveGhz = false
+        var hint = ""
+        val pending = StringBuilder()
+        fun status() = onStatus(
+            "Marauder · live · ${apMacs.size} networks, ${clientMacs.size} client devices" +
+                (if (fiveGhz) " · 2.4 + 5 GHz" else "") + hint
+        )
+        fun flush() {
+            if (seen.isEmpty()) return
+            onSightings(seen.values.toList())
+            seen.clear()
+            status()
+        }
+        fun sniff(command: String, ms: Long) {
+            port.write("$command\r\n")
+            val until = System.currentTimeMillis() + ms
+            var lastFlush = System.currentTimeMillis()
+            while (!stopped && System.currentTimeMillis() < until) {
+                val n = port.read(buf, 300)
+                if (n > 0) {
+                    pending.append(text.decode(buf, n))
+                    while (true) {
+                        val nl = pending.indexOf('\n')
+                        if (nl < 0) break
+                        val s = MarauderReports.parse(pending.substring(0, nl))
+                        pending.delete(0, nl + 1)
+                        if (s == null) continue
+                        if (s.client) clientMacs += s.mac else apMacs += s.mac
+                        // Keep the strongest reading per device in each batch.
+                        val prev = seen[s.mac]
+                        if (prev == null || s.rssi > prev.rssi) seen[s.mac] = s
+                        if (s.frequencyMhz >= 5000) fiveGhz = true
+                        channels += s.frequencyMhz
+                    }
+                    if (pending.length > 16_384) pending.setLength(0)
+                }
+                if (System.currentTimeMillis() - lastFlush >= 2_000) { flush(); lastFlush = System.currentTimeMillis() }
+            }
+            flush()
+            port.write("stopscan\r\n")
+            readFor(buf, 500)
+        }
+        status()
+        var rounds = 0
+        while (!stopped) {
+            channels.clear()
+            sniff("sniffbeacon", 20_000)
+            if (stopped) break
+            sniff("sniffprobe", 10_000)
+            rounds++
+            // Marauder only hops channels with its ChanHop setting on; say so rather than change it.
+            hint = if (rounds >= 2 && channels.size == 1) " · stuck on one channel: turn on Channel Hop in Marauder's settings" else ""
+            status()
+            apMacs.clear(); clientMacs.clear()
+        }
+        runCatching { port.write("stopscan\r\n") }
+    }
+
+    /**
+     * FREE-WiLi 2 (its ESP32-C5 does WiFi): opens the console's WiFi menu (`w`), then runs its
+     * access-point scan (`s`) over and over, passing on the `*wifiscan` lines it prints.
+     * Leaves the menu (`q`) when stopped. Ported from Wardrive Go (RocketGod, GPL-3.0).
+     */
+    private fun pollFreeWili(buf: ByteArray) {
+        onStatus("FREE-WiLi · connecting…")
+        readFor(buf, 3_000) // boot banner / menu
+        var inWifi = false
+        for (attempt in 0 until 2) {
+            if (stopped) return
+            readFor(buf, 200); port.write("w\r"); readFor(buf, 1_500)
+            port.write("w\r")
+            if (FreeWiliReports.isWifiMenu(readFor(buf, 1_800))) { inWifi = true; break }
+        }
+        onStatus(if (inWifi) "FREE-WiLi · live · scanning…" else "FREE-WiLi · WiFi menu not confirmed · scanning anyway…")
+        val seen = HashMap<String, Long>()
+        var sweeps = 0
+        while (!stopped) {
+            readFor(buf, 200) // drain
+            port.write("s\r")
+            val found = FreeWiliReports.parseScan(readFor(buf, 9_000))
+            if (stopped) break
+            val now = System.currentTimeMillis()
+            found.forEach { seen[it.mac] = now }
+            seen.entries.removeAll { now - it.value > 60_000 }
+            if (found.isNotEmpty()) onSightings(found)
+            sweeps++
+            onStatus("FREE-WiLi · live · ${seen.size} Wi-Fi networks (sweep $sweeps)")
+        }
+        runCatching { port.write("q\r") }
+    }
+
+    /**
+     * ESP32-C5 with the V2X2MAP firmware (pit711/V2X2MAP): European V2X (ITS-G5) frames, streamed by
+     * the board without being asked. Emergency vehicles (their role, light bar and siren, and their
+     * "emergency vehicle approaching" warnings) are passed on at the position they broadcast;
+     * ordinary traffic is only counted. Every frame also goes to a .pcap recording when one runs.
+     * Nothing is ever sent to the board.
+     */
+    private fun pollV2x(buf: ByteArray, first: ByteArray? = null) {
+        val stream = V2x.Stream()
+        val stations = HashMap<String, Long>()
+        /** Stations known to be emergency vehicles, with their last match (status-only frames carry no role). */
+        val emergency = HashMap<String, Pair<Long, org.tucsoncommunity.kokoho.detect.Hit>>()
+        val batch = LinkedHashMap<String, EspSighting>()
+        var frames = 0L
+        fun status() {
+            val now = System.currentTimeMillis()
+            stations.entries.removeAll { now - it.value > 60_000 }
+            emergency.entries.removeAll { now - it.value.first > 5 * 60_000 }
+            val live = emergency.count { now - it.value.first < 60_000 }
+            onStatus("V2X (ITS-G5) · live · ${stations.size} stations in range" +
+                (if (live > 0) " · $live emergency vehicle${if (live == 1) "" else "s"}" else "") + " · $frames frames")
+        }
+        fun handle(bytes: ByteArray, n: Int) {
+            val now = System.currentTimeMillis()
+            for (f in stream.feed(bytes, n)) {
+                frames++
+                org.tucsoncommunity.kokoho.usb.PcapRecorder.frame(f, 0, f.size, V2x.CCH_MHZ, null, now)
+                val m = V2x.decode(f) ?: continue
+                stations[m.mac] = now
+                val hit = V2x.hit(m) ?: emergency[m.mac]?.second ?: continue
+                emergency[m.mac] = now to hit
+                val lat = m.lat ?: continue; val lon = m.lon ?: continue
+                batch[m.mac] = EspSighting(
+                    mac = m.mac, rssi = V2X_NOMINAL_RSSI, ble = false,
+                    name = "V2X ${V2x.typeName(m.stationType)}", frequencyMhz = V2x.CCH_MHZ,
+                    hits = listOf(hit), position = lat to lon
+                )
+            }
+        }
+        status()
+        first?.let { handle(it, it.size) }
+        var lastFlush = System.currentTimeMillis()
+        while (!stopped) {
+            val n = port.read(buf, 300)
+            if (n > 0) handle(buf, n)
+            val now = System.currentTimeMillis()
+            if (now - lastFlush >= 1_000) {
+                if (batch.isNotEmpty()) { onSightings(batch.values.toList()); batch.clear() }
+                status()
+                lastFlush = now
+            }
+        }
+    }
+
+    /** Reads for up to [ms], stopping early once [done] is true for what was read. */
+    private fun readFor(buf: ByteArray, ms: Long, done: ((String) -> Boolean)? = null): String {
+        val sb = StringBuilder()
+        val until = System.currentTimeMillis() + ms
+        while (!stopped && System.currentTimeMillis() < until) {
+            val n = port.read(buf, 300)
+            if (n > 0) {
+                sb.append(text.decode(buf, n))
+                if (done?.invoke(sb.toString()) == true) break
+            }
+        }
+        return sb.toString()
+    }
+}
+
+/**
+ * Serial reads as text: a character split across two reads (an accented or emoji network name)
+ * waits for its last bytes instead of turning into two replacement characters.
+ */
+internal class Utf8Chunks {
+    private var carry = ByteArray(0)
+
+    fun decode(buf: ByteArray, n: Int): String {
+        val all = if (carry.isEmpty()) buf.copyOf(n) else carry + buf.copyOf(n)
+        var cut = all.size
+        for (back in 1..minOf(3, all.size)) {
+            val b = all[all.size - back].toInt() and 0xff
+            if (b and 0xC0 == 0x80) continue // continuation byte: look further back for its lead byte
+            val need = when { b >= 0xF0 -> 4; b >= 0xE0 -> 3; b >= 0xC0 -> 2; else -> 1 }
+            if (need > back) cut = all.size - back
+            break
+        }
+        carry = all.copyOfRange(cut, all.size)
+        return String(all, 0, cut, Charsets.UTF_8)
+    }
+}

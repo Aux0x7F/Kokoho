@@ -121,7 +121,7 @@
             android:paddingTop="8dp"
             android:text="By hour of day" />
 
-        <com.rfsentinel.app.ui.BarChartView
+        <org.tucsoncommunity.kokoho.ui.BarChartView
             android:id="@+id/hourChart"
             android:layout_width="match_parent"
             android:layout_height="64dp" />
@@ -131,7 +131,7 @@
             android:paddingTop="6dp"
             android:text="By day of week" />
 
-        <com.rfsentinel.app.ui.BarChartView
+        <org.tucsoncommunity.kokoho.ui.BarChartView
             android:id="@+id/dayChart"
             android:layout_width="match_parent"
             android:layout_height="52dp" />

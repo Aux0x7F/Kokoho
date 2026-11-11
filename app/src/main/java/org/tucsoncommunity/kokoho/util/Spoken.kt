@@ -1,0 +1,114 @@
+package org.tucsoncommunity.kokoho.util
+
+import android.content.Context
+import org.tucsoncommunity.kokoho.alpr.KnownCamera
+import org.tucsoncommunity.kokoho.detect.Category
+import org.tucsoncommunity.kokoho.detect.Hit
+
+/**
+ * The words spoken for an alert: the full label, or two or three words with
+ * Settings > Short spoken alerts ("Body cam", "Police car", "Speed camera, 50").
+ */
+object Spoken {
+
+    /** Short phrases; always in the radar-detector sound style, which speaks like a detector. */
+    /** Short phrases; always in the radar-detector sound style, which speaks like a detector. */
+    fun short(context: Context) = Prefs.shortVoice(context) || Prefs.detectorSound(context) || Prefs.detectorSound(context)
+
+    /** [via]: the linked Sentinel that heard it (Sentinel Link). */
+    fun device(context: Context, hit: Hit, following: Boolean = false, via: String? = null): String {
+        val v = via?.let { ", via $it" } ?: ""
+        if (!short(context)) return if (following) "Warning. ${hit.label} may be following you." else "${hit.label} nearby$v"
+        val word = shortWord(hit)
+        return if (following) "$word following" else word + v
+    }
+
+    fun camera(context: Context, cam: KnownCamera): String {
+        if (!short(context)) return cam.spoken
+        return when (cam.type) {
+            KnownCamera.Kind.ALPR -> "Plate camera"
+            KnownCamera.Kind.SPEED -> "Speed camera" + (cam.maxspeed?.let { ", $it" } ?: "")
+            KnownCamera.Kind.RED_LIGHT -> "Red light camera"
+        }
+    }
+
+    /** A distance said aloud: "300 meters" (to the nearest 50), "1 kilometer", "1.2 kilometers"; "500 feet", "1.2 miles". */
+    fun distanceWords(m: Double, feet: Boolean = Units.imperial): String {
+        if (feet) {
+            val ft = Math.round(m * 3.28084 / 100.0) * 100
+            if (ft < 1000) return "${ft.coerceAtLeast(100)} feet"
+            val mi = Math.round(m / 160.9344) / 10.0
+            return if (mi == Math.floor(mi)) "${mi.toLong()} mile${if (mi == 1.0) "" else "s"}" else "$mi miles"
+        }
+        val r = Math.round(m / 50.0) * 50
+        if (r < 1000) return "${r.coerceAtLeast(50)} meters"
+        val km = Math.round(m / 100.0) / 10.0
+        return if (km == Math.floor(km)) "${km.toLong()} kilometer${if (km == 1.0) "" else "s"}" else "$km kilometers"
+    }
+
+    /** An aircraft alert said aloud: "Police aircraft overhead", or "Police aircraft, 2 kilometers northeast". */
+    fun aircraft(hit: Hit, distanceM: Double?, bearingDeg: Double?): String {
+        val word = shortWord(hit)
+        if (distanceM == null) return word
+        if (distanceM < 500) return "$word overhead"
+        val dir = bearingDeg?.let { " " + arrayOf("north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest")[((it + 22.5) / 45).toInt().mod(8)] }.orEmpty()
+        return "$word, ${distanceWords(distanceM)}$dir"
+    }
+
+    /** Where a report is, said aloud; empty when the heading is unknown. */
+    fun sideWords(side: org.tucsoncommunity.kokoho.online.WazePolice.Side?): String = when (side) {
+        org.tucsoncommunity.kokoho.online.WazePolice.Side.AHEAD -> "ahead"
+        org.tucsoncommunity.kokoho.online.WazePolice.Side.BEHIND -> "behind you"
+        org.tucsoncommunity.kokoho.online.WazePolice.Side.LEFT -> "on your left"
+        org.tucsoncommunity.kokoho.online.WazePolice.Side.RIGHT -> "on your right"
+        null -> ""
+    }
+
+    /**
+     * What is said for a Waze report: "Police ahead, 800 meters" (short), or
+     * "Police reported on Waze, 800 meters ahead" (full). The same short form is used as you get closer.
+     */
+    fun wazePhrase(type: org.tucsoncommunity.kokoho.online.WazePolice.Type, distanceM: Double,
+                   side: org.tucsoncommunity.kokoho.online.WazePolice.Side?, short: Boolean): String {
+        val where = sideWords(side)
+        val dist = distanceWords(distanceM)
+        return if (short) type.singular + (if (where.isEmpty()) "" else " $where") + ", $dist"
+        else "${type.singular} reported on Waze, $dist" + (if (where.isEmpty()) "" else " $where")
+    }
+
+    /** [wazePhrase] in the style Settings asks for (short spoken alerts, or the radar-detector style). */
+    fun waze(context: Context, type: org.tucsoncommunity.kokoho.online.WazePolice.Type, distanceM: Double,
+             side: org.tucsoncommunity.kokoho.online.WazePolice.Side?): String = wazePhrase(type, distanceM, side, short(context))
+
+    fun shortWord(hit: Hit): String = when (hit.category) {
+        Category.BODY_CAM -> "Body cam"
+        Category.ALPR -> "Plate camera"
+        Category.AUDIO_SENSOR -> "Audio sensor"
+        Category.PUBLIC_SAFETY -> if (hit.label.contains("police vehicle", ignoreCase = true)) "Police car" else "Police gear"
+        Category.MOBILE_PRINTER -> "Mobile printer"
+        Category.DRONE -> "Drone"
+        Category.TRACKER -> "Tracker"
+        Category.GLASSES -> "Camera glasses"
+        Category.NETWORK_CAMERA -> "Camera"
+        Category.CELL_ANOMALY -> "Cell warning"
+        Category.RADIO -> "Radio nearby"
+        Category.GNSS -> "GPS warning"
+        Category.AIRCRAFT -> when {
+            hit.label.startsWith("Police") -> "Police aircraft"
+            hit.label.startsWith("Government") -> "Government aircraft"
+            hit.label.startsWith("Military") -> "Military aircraft"
+            else -> "Aircraft circling"
+        }
+        Category.POLICE_REPORT -> "Waze " + (org.tucsoncommunity.kokoho.online.WazePolice.Type.entries
+            .firstOrNull { hit.label.startsWith(it.singular) }?.singular?.lowercase() ?: "report")
+        Category.SKIMMER -> "Card skimmer"
+        Category.OTHER_CAMERA -> if (hit.label.startsWith("Hidden")) "Hidden camera" else "Action camera"
+        Category.HACKER -> "Hacking tool"
+        Category.V2X -> when {
+            hit.label.contains("siren", ignoreCase = true) -> "Emergency siren"
+            hit.label.contains("approaching") -> "Emergency approaching"
+            else -> "Emergency vehicle"
+        }
+        Category.CUSTOM -> "Watchlist"
+    }
+}

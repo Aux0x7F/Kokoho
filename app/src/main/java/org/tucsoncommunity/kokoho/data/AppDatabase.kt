@@ -1,0 +1,138 @@
+package org.tucsoncommunity.kokoho.data
+
+import android.content.Context
+import androidx.room.Database
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
+@Database(
+    entities = [
+        DetectionEntity::class, WhitelistEntity::class, KnownDeviceEntity::class,
+        TripEntity::class, TripPointEntity::class, TripDeviceEntity::class, DeviceDetailsEntity::class,
+        TripPingEntity::class
+    ],
+    version = 10,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun detectionDao(): DetectionDao
+    abstract fun whitelistDao(): WhitelistDao
+    abstract fun knownDeviceDao(): KnownDeviceDao
+    abstract fun tripDao(): TripDao
+    abstract fun deviceDetailsDao(): DeviceDetailsDao
+
+    companion object {
+        @Volatile private var INSTANCE: AppDatabase? = null
+
+        /** v1.x -> v2.0: richer detections + persistent device history. Keeps existing logs. */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE detections ADD COLUMN category TEXT NOT NULL DEFAULT 'CUSTOM'")
+                db.execSQL("ALTER TABLE detections ADD COLUMN confidence INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE detections ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE detections ADD COLUMN vendor TEXT")
+                db.execSQL("ALTER TABLE detections ADD COLUMN deviceName TEXT")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_detections_timestamp ON detections(timestamp)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_detections_mac ON detections(mac)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS known_devices (" +
+                        "mac TEXT NOT NULL PRIMARY KEY, firstSeen INTEGER NOT NULL, lastSeen INTEGER NOT NULL, " +
+                        "sessions INTEGER NOT NULL, detectCount INTEGER NOT NULL, name TEXT, vendor TEXT, " +
+                        "deviceType TEXT, favorite INTEGER NOT NULL DEFAULT 0, note TEXT)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_known_devices_lastSeen ON known_devices(lastSeen)")
+            }
+        }
+
+        /** v2.2 -> v2.3: recorded scan traces (trips). Keeps everything else. */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS trips (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "name TEXT NOT NULL, startTime INTEGER NOT NULL, endTime INTEGER, distanceM REAL NOT NULL, " +
+                        "pointCount INTEGER NOT NULL, deviceCount INTEGER NOT NULL, flaggedCount INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS trip_points (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "tripId INTEGER NOT NULL, time INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, " +
+                        "accuracyM REAL, speedMs REAL, " +
+                        "FOREIGN KEY(tripId) REFERENCES trips(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_trip_points_tripId ON trip_points(tripId)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS trip_devices (tripId INTEGER NOT NULL, mac TEXT NOT NULL, " +
+                        "label TEXT NOT NULL, name TEXT, vendor TEXT, deviceType TEXT, source TEXT NOT NULL, " +
+                        "category TEXT, confidence INTEGER NOT NULL, evidence TEXT, firstSeen INTEGER NOT NULL, " +
+                        "lastSeen INTEGER NOT NULL, bestRssi INTEGER NOT NULL, lat REAL, lon REAL, " +
+                        "PRIMARY KEY(tripId, mac), " +
+                        "FOREIGN KEY(tripId) REFERENCES trips(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_trip_devices_tripId ON trip_devices(tripId)")
+            }
+        }
+
+        /** v2.12: requested network names on recorded trace devices. */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE trip_devices ADD COLUMN probed TEXT")
+            }
+        }
+
+        /** v2.25: your own names for devices. */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE known_devices ADD COLUMN alias TEXT")
+            }
+        }
+
+        /** v2.28: snapshots - device lists saved without a route, kept with the traces. */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE trips ADD COLUMN kind TEXT NOT NULL DEFAULT 'trace'")
+            }
+        }
+
+        /** v2.30: the match history keeps the radio side (WiFi band, channel, security; Bluetooth address type...). */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE detections ADD COLUMN radio TEXT")
+            }
+        }
+
+        /** v2.31: each device's page as last heard, so the device history shows it all once it's out of range. */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS device_details (mac TEXT NOT NULL PRIMARY KEY, savedAt INTEGER NOT NULL, json TEXT NOT NULL)")
+            }
+        }
+
+        /** v2.33: every sighting of a device during a trace, where you were (optional). */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS trip_pings (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, tripId INTEGER NOT NULL, " +
+                    "mac TEXT NOT NULL, time INTEGER NOT NULL, rssi INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, " +
+                    "FOREIGN KEY(tripId) REFERENCES trips(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_trip_pings_tripId ON trip_pings (tripId)")
+            }
+        }
+
+        /** v2.34: which radio heard each match (a USB adapter, an ESP32, a linked Sentinel...). */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE detections ADD COLUMN heardBy TEXT")
+            }
+        }
+
+        fun getInstance(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "kokoho.db"
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10).build().also { INSTANCE = it }
+            }
+        }
+    }
+}

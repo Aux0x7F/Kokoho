@@ -1,0 +1,53 @@
+package org.tucsoncommunity.kokoho.car
+
+import androidx.car.app.CarContext
+import androidx.car.app.model.Template
+import org.tucsoncommunity.kokoho.R
+import org.tucsoncommunity.kokoho.esp.EspBoards
+import org.tucsoncommunity.kokoho.esp.OuiSpyBle
+import org.tucsoncommunity.kokoho.service.ScanForegroundService
+import org.tucsoncommunity.kokoho.usb.UsbWifi
+import org.tucsoncommunity.kokoho.util.Prefs
+
+/**
+ * What is listening: the phone's own scanners (and the watchdog that restarts a
+ * stalled one), ESP32 boards on USB (OUI-Spy, GhostESP, Marauder, through a
+ * Flipper Zero), an OUI-SPY board over Bluetooth and a USB WiFi adapter.
+ * Read-only: pairing and settings stay on the phone.
+ */
+class HardwareScreen(carContext: CarContext) : LiveScreen(carContext, periodMs = 3_000L) {
+
+    private fun lines(): List<Triple<String, String, Int>> {
+        val running = ScanForegroundService.isRunning
+        val now = System.currentTimeMillis()
+        val watchdog = ScanForegroundService.lastWatchdogRestart
+        val phone = when {
+            !running -> "Not scanning"
+            watchdog != null && now - watchdog.first < 30 * 60_000L ->
+                "Working · ${watchdog.second} scan restarted ${CarUi.ageText(now - watchdog.first)} (it had stalled)"
+            else -> "Working · Bluetooth and WiFi"
+        }
+        val board = Prefs.ouiSpyBoard(carContext)
+        return listOf(
+            Triple("Phone radios", phone, R.drawable.ic_tile_scan),
+            Triple("ESP32 on USB", EspBoards.status.ifBlank {
+                if (running) "None connected - OUI-Spy, GhostESP or Marauder on an OTG cable" else "Connects while scanning"
+            }, R.drawable.ic_car_usb),
+            Triple("OUI-SPY over Bluetooth",
+                if (board == null) "Not paired (pair it in Settings on the phone)"
+                else "$board · " + OuiSpyBle.status.ifBlank { "connects while scanning" }, R.drawable.ic_car_usb),
+            Triple("USB WiFi adapter", UsbWifi.status.ifBlank {
+                if (running) "None connected (RTL8811AU / 8821AU or RTL8812BU / 8822BU)" else "Connects while scanning"
+            }, R.drawable.ic_car_usb)
+        ) + listOfNotNull(org.tucsoncommunity.kokoho.usb.UsbBluetooth.status.takeIf { it.isNotBlank() }?.let {
+            Triple("USB Bluetooth adapter", it, R.drawable.ic_car_usb)
+        })
+    }
+
+    override fun contentKey(): Any = lines()
+
+    override fun render(): Template = listTemplate("Hardware",
+        lines().take(CarUi.listLimit(carContext)).map { (title, text, icon) ->
+            row(title, text.take(120), icon = icon)
+        })
+}

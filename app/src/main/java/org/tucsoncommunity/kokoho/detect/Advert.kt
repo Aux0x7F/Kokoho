@@ -1,0 +1,155 @@
+package org.tucsoncommunity.kokoho.detect
+
+import java.util.UUID
+
+/**
+ * One radio observation, normalized from either a BLE advertisement or a WiFi
+ * scan result. Pure Kotlin (no Android types) so the detection code can be
+ * unit-tested on the JVM.
+ */
+class Advert(
+    /** Normalized "AA:BB:CC:DD:EE:FF". */
+    val mac: String,
+    val source: Source,
+    val rssi: Int,
+    /** BLE local name, or WiFi SSID. */
+    val name: String? = null,
+    /** BLE manufacturer-specific data (AD 0xFF), keyed by SIG company ID. */
+    val manufacturerData: Map<Int, ByteArray> = emptyMap(),
+    /** Advertised service UUIDs (AD 0x02-0x07). Solicitation UUIDs are deliberately excluded. */
+    val serviceUuids: List<UUID> = emptyList(),
+    /** Service data (AD 0x16 / 0x20 / 0x21), keyed by service UUID. */
+    val serviceData: Map<UUID, ByteArray> = emptyMap(),
+    /** Raw advertisement bytes (BLE) - parsed into AD structures for the detail screen. */
+    val rawBytes: ByteArray? = null,
+    /** Advertised TX power (AD 0x0A) in dBm, if present. */
+    val txPower: Int? = null,
+    val addressType: AddressType = AddressType.UNKNOWN,
+    val connectable: Boolean? = null,
+    /** BLE PHY description (e.g. "LE 1M", "LE Coded") or null. */
+    val phy: String? = null,
+    /** WiFi only. */
+    val wifi: WifiInfo? = null,
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    enum class Source { BLE, WIFI }
+
+    class WifiInfo(
+        val frequencyMhz: Int,
+        val capabilities: String,
+        val standard: String?,
+        /** Beacon information elements (id, payload), API 30+ only. */
+        val infoElements: List<Pair<Int, ByteArray>>,
+        /** A client device (laptop, phone, camera) heard by a monitor-mode adapter, not an access point. */
+        val client: Boolean = false,
+        /** The client sent a wildcard probe request (asks every network to answer, names none). */
+        val wildcardProbe: Boolean = false,
+        /** Its probe request carried the Wi-Fi Alliance element 50:6F:9A:16 03 01 03 Flock cameras send. */
+        val flockProbeIe: Boolean = false,
+        /** FlipDeFlock's probe skeleton hash of a client's probe requests (USB adapter). */
+        val probeSkeleton: Long? = null,
+        /** Its latest run of wildcard probes (USB adapter): how steadily it probes ([ProbeBehaviour]). */
+        val probeRun: ProbeBehaviour.Run? = null,
+        /** The access point a client talks to (USB adapter). */
+        val bssid: String? = null,
+        /** When an access point's WiFi came up, from its beacon clock (USB adapter). */
+        val upSince: Long? = null,
+        /** Data bytes it sent while the USB adapter heard it. */
+        val dataBytes: Long = 0
+    )
+
+    val isBle get() = source == Source.BLE
+    /**
+     * The radio reported a random address: its first bytes only look like a maker's block.
+     * shortcut: Android 14 and older don't report the type, so a random address can still read as a maker there; nothing to upgrade to.
+     */
+    val randomBle get() = addressType == AddressType.RANDOM_STATIC || addressType == AddressType.RESOLVABLE_PRIVATE ||
+        addressType == AddressType.NON_RESOLVABLE
+    val isWifi get() = source == Source.WIFI
+
+    companion object {
+        private const val BASE_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+
+        /** Expands a SIG 16-bit UUID onto the Bluetooth base UUID. */
+        fun uuid16(short: Int): UUID =
+            UUID.fromString(String.format("%08x", short and 0xFFFF) + BASE_UUID_SUFFIX)
+
+        /** The 16-bit short of a base-UUID-derived UUID, or null for a vendor 128-bit UUID. */
+        fun shortOf(uuid: UUID): Int? {
+            val s = uuid.toString()
+            if (!s.endsWith(BASE_UUID_SUFFIX) || !s.startsWith("0000")) return null
+            return s.substring(4, 8).toInt(16)
+        }
+    }
+}
+
+/**
+ * How trackable a device's address is. For BLE the controller reports public vs
+ * random (API 35+; before that it is guessed, see [guess]); the random sub-type comes from the top two bits of the
+ * most significant byte (Bluetooth Core Spec Vol 6, Part B, 1.3).
+ */
+enum class AddressType(val label: String, val trackable: String) {
+    PUBLIC("Public (IEEE-assigned)", "Trackable - this address never changes"),
+    RANDOM_STATIC("Random static", "Usually stable until reboot or reset - partly trackable"),
+    RESOLVABLE_PRIVATE("Resolvable private (RPA)", "Rotates every few minutes - hard to track"),
+    NON_RESOLVABLE("Non-resolvable private", "Rotates - not trackable"),
+    WIFI_GLOBAL("WiFi, globally unique", "Fixed hardware address - trackable"),
+    WIFI_LOCAL("WiFi, locally administered", "Randomized / private address"),
+    // This phone's Bluetooth didn't say (it does from Android 15 on): worked out from the address itself.
+    LIKELY_PUBLIC("Probably public (IEEE-assigned)", "Probably trackable - the address belongs to a registered maker"),
+    LIKELY_STATIC("Probably random static", "Probably stable until reboot or reset - partly trackable"),
+    LIKELY_RPA("Probably resolvable private (RPA)", "Probably rotates every few minutes - hard to track"),
+    LIKELY_NON_RESOLVABLE("Probably non-resolvable private", "Probably rotates - not trackable"),
+    UNKNOWN("Unknown", "This phone's Bluetooth didn't report the address type");
+
+    /**
+     * How trackable the device is in practice (after MetaRadar): what its address type says,
+     * corrected by what this app saw - the same address on several days, or its new random
+     * address linked to the old one by its advert fingerprint.
+     */
+    fun trackability(firstSeen: Long?, lastSeen: Long?, sessions: Int, rotationLinked: Boolean): String {
+        val days = if (firstSeen != null && lastSeen != null) ((lastSeen - firstSeen) / DAY_MS).toInt() else 0
+        return when {
+            sessions >= 2 && days >= 1 ->
+                "Trackable: the same address was heard over ${days + 1} days, in $sessions scans"
+            rotationLinked -> "$trackable, but its new address was linked to the old one by its advert, so it can still be followed"
+            sessions >= 2 -> "$trackable · same address in $sessions scans within a day"
+            else -> trackable
+        }
+    }
+
+    companion object {
+        private const val DAY_MS = 24 * 60 * 60_000L
+
+        /** Sub-type of a BLE random address from its most significant byte. */
+        fun ofRandom(mac: String): AddressType {
+            val msb = mac.take(2).toIntOrNull(16) ?: return UNKNOWN
+            return when (msb shr 6) {
+                0b11 -> RANDOM_STATIC
+                0b01 -> RESOLVABLE_PRIVATE
+                0b00 -> NON_RESOLVABLE
+                else -> UNKNOWN // 0b10 is reserved
+            }
+        }
+
+        /**
+         * The type of a BLE address the phone didn't report (before Android 15 it never does): public when the
+         * address belongs to a maker in the IEEE register ([registered]), unless the advert shows a device that
+         * always uses random addresses ([alwaysRandom]: Apple, Find My); otherwise the random sub-type.
+         */
+        fun guess(mac: String, registered: Boolean, alwaysRandom: Boolean): AddressType {
+            if (registered && !alwaysRandom) return LIKELY_PUBLIC
+            return when (ofRandom(mac)) {
+                RANDOM_STATIC -> LIKELY_STATIC
+                RESOLVABLE_PRIVATE -> LIKELY_RPA
+                NON_RESOLVABLE -> LIKELY_NON_RESOLVABLE
+                else -> UNKNOWN
+            }
+        }
+
+        fun ofWifi(mac: String): AddressType {
+            val msb = mac.take(2).toIntOrNull(16) ?: return UNKNOWN
+            return if (msb and 0x02 != 0) WIFI_LOCAL else WIFI_GLOBAL
+        }
+    }
+}

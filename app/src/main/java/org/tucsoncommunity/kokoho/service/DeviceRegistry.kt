@@ -1,0 +1,618 @@
+package org.tucsoncommunity.kokoho.service
+
+import org.tucsoncommunity.kokoho.data.KnownDeviceEntity
+import org.tucsoncommunity.kokoho.data.WhitelistCache
+import org.tucsoncommunity.kokoho.detect.AddressType
+import org.tucsoncommunity.kokoho.detect.Advert
+import org.tucsoncommunity.kokoho.detect.AdvertFingerprint
+import org.tucsoncommunity.kokoho.detect.Category
+import org.tucsoncommunity.kokoho.detect.PatrolCluster
+import org.tucsoncommunity.kokoho.detect.WifiFingerprint
+import org.tucsoncommunity.kokoho.detect.DeviceIntel
+import org.tucsoncommunity.kokoho.detect.Hit
+import org.tucsoncommunity.kokoho.detect.Locator
+import org.tucsoncommunity.kokoho.detect.RemoteId
+import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+/**
+ * In-memory state for every device heard recently, watchlisted or not. Kept
+ * out of Room on purpose: BLE reports each advertiser several times a second
+ * and a busy street can have hundreds of them. Only matches go to the detection
+ * log, and a throttled summary goes to known_devices.
+ *
+ * Written by scanner threads, read by the UI - both in the same process.
+ */
+object DeviceRegistry {
+
+    /** Devices not heard from for this long drop off the live list. */
+    const val PRUNE_AFTER_MS = 3 * 60 * 1000L
+    private const val HISTORY_MAX = 600
+    private const val HISTORY_MIN_SPACING_MS = 1000L
+    private const val LOCATION_SPACING_MS = 45_000L
+    private const val ROTATION_SILENCE_MS = 1_500L
+    /** Companions ([companions]): heard this close in time, at this many places this far apart, over this distance. */
+    private const val TOGETHER_MS = 90_000L
+    private const val TOGETHER_PLACES = 3
+    private const val PLACE_M = 300.0
+    private const val TOGETHER_SPREAD_M = 1_000.0
+    /** How long a device keeps a match after the evidence was last observed. */
+    const val HIT_HOLD_MS = 120_000L
+    /** Weight of each new RSSI reading (0..1): 0.3 settles in about a second of adverts. */
+    private const val RSSI_SMOOTHING = 0.3
+    private const val SMOOTH_RESET_MS = 10_000L
+    /** Heard by this phone this recently: its own distance wins over one from another Sentinel's report. */
+    private const val LOCAL_HOLD_MS = 5 * 60_000L
+    /** A client heard talking to a network within this long still counts as connected to it. */
+    private const val CONNECTED_MS = 5 * 60_000L
+    private const val ROTATION_WINDOW_MS = 30_000L
+    /** Pinpointing: readings kept per flagged device, their spacing, and how often the fit is redone. */
+    private const val LOCATE_MAX = 400
+    private const val LOCATE_SPACING_MS = 400L
+    private const val LOCATE_EVERY_MS = 5_000L
+
+    data class Sample(val time: Long, val rssi: Int)
+    data class GeoSample(val time: Long, val lat: Double, val lon: Double)
+
+    /** Immutable view of one device for the UI. */
+    data class Snapshot(
+        val mac: String,
+        val source: Advert.Source,
+        val sources: Set<Advert.Source>,
+        val name: String?,
+        val vendor: String?,
+        val deviceType: String,
+        val facts: List<Pair<String, String>>,
+        val hits: List<Hit>,
+        val rssi: Int,
+        val bestRssi: Int,
+        val distanceM: Double,
+        val addressType: AddressType,
+        val firstSeen: Long,
+        val lastSeen: Long,
+        val sightings: Int,
+        val remoteId: RemoteId.Info?,
+        val following: Boolean,
+        val known: KnownDeviceEntity?,
+        /** Latest raw observation (detail screen only). */
+        val advert: Advert?,
+        val history: List<Sample>,
+        val path: List<GeoSample>,
+        /** Where YOUR phone was when this device's signal was strongest (approximate device position). */
+        val bestPosition: GeoSample?,
+        /** Flagged devices only: pinpointed from readings at many spots (see [Locator]), when you moved enough around it. */
+        val located: Locator.Estimate? = null,
+        /** Where the device says it is (a V2X vehicle's own GPS): exact, so it wins over any estimate. */
+        val broadcast: GeoSample? = null
+    ) {
+        val best: Hit? get() = hits.firstOrNull()
+        /** Where to put it on a map: the pinpointed spot when there is one, else where YOUR phone heard it strongest. */
+        val place: GeoSample? get() = broadcast ?: located?.let { GeoSample(it.time, it.lat, it.lon) } ?: bestPosition
+        /**
+         * True when this address has no history from an earlier session. The
+         * history row is looked up once, when the device is first heard this
+         * session, so a returning device flips to "not new" within a moment.
+         */
+        val isNew: Boolean get() = known == null
+    }
+
+    private class Track(val mac: String, now: Long) {
+        /** Set (atomically with the lookup) by every [report], so pruning can't drop a track that is being updated. */
+        @Volatile var touchedAt = now
+        val sources = HashSet<Advert.Source>()
+        var advert: Advert? = null
+        var name: String? = null
+        var vendor: String? = null
+        var identity = DeviceIntel.Identity("Device", emptyList())
+        var hits: List<Hit> = emptyList()
+        var rssi = -127
+        /** Exponentially smoothed RSSI; raw readings jump by 10 dB between packets. */
+        var smoothRssi = Double.NaN
+        var bestRssi = -127
+        var distance = 0.0
+        /** Last heard by this phone itself (not through another Sentinel). */
+        var localAt = 0L
+        val firstSeen = now
+        /** Heard since (the earlier address's time when linked after an address change): for follow detection. */
+        var since = now
+        var lastSeen = now
+        var sightings = 0
+        val history = ArrayDeque<Sample>()
+        val path = ArrayDeque<GeoSample>()
+        var remoteId: RemoteId.Info? = null
+        var following = false
+        var known: KnownDeviceEntity? = null
+        var bestPosition: GeoSample? = null
+        var fingerprint: String? = null
+        /** Patrol-kit role (see [PatrolCluster.roleOf]) - sticky once known. */
+        var role: String? = null
+        /** The address this device most likely used before its address rotated. */
+        var linkedFrom: String? = null
+        var inherited: List<Hit> = emptyList()
+        /** The device's own strongest recent match, held for [HIT_HOLD_MS] after it was last seen. */
+        var heldHit: Hit? = null
+        var heldUntil = 0L
+        /** Readings (your position + signal) for pinpointing; kept only while it has a match. */
+        val readings = ArrayDeque<Locator.Reading>()
+        var located: Locator.Estimate? = null
+        var locatedAt = 0L
+        var readingsSinceFit = 0
+        var broadcast: GeoSample? = null
+        // From a USB WiFi adapter, kept apart from [advert] so the phone's own scan doesn't wipe them:
+        /** When its WiFi came up (beacon clock). */
+        var upSince: Long? = null
+        /** The access point this client talks to. */
+        var joined: String? = null
+        /** Data it sent while the adapter heard it. */
+        var dataBytes = 0L
+    }
+
+    private val tracks = ConcurrentHashMap<String, Track>()
+
+    @Volatile var sessionStart = 0L
+        private set
+
+    fun startSession(now: Long = System.currentTimeMillis()) {
+        tracks.clear()
+        sessionStart = now
+    }
+
+    /**
+     * Records one observation. Returns true the first time the device is seen
+     * this session (the caller then loads its long-term history).
+     */
+    fun report(
+        a: Advert,
+        hits: List<Hit>,
+        identity: DeviceIntel.Identity,
+        vendor: String?,
+        remoteId: RemoteId.Info?,
+        location: GeoSample?,
+        now: Long = System.currentTimeMillis(),
+        broadcast: GeoSample? = null,
+        /** Where this phone is, for the distance to a LoRa node or to the Sentinel that heard it. */
+        here: GeoSample? = null,
+        /** A Meshtastic / MeshCore node heard over LoRa ([org.tucsoncommunity.kokoho.esp.isLoRaNode]): its signal says nothing about distance. */
+        lora: Boolean = false,
+        /** Heard by another Sentinel, which was at [location]. */
+        via: Boolean = false
+    ): Boolean {
+        var isFirst = false
+        val t = tracks.compute(a.mac) { _, old -> (old ?: Track(a.mac, now).also { isFirst = true }).also { it.touchedAt = now } }!!
+        if (isFirst) linkRotatedAddress(t, a, now)
+        synchronized(t) {
+            PatrolCluster.roleOf(hits, vendor, a.name)?.let { t.role = it }
+            t.sources += a.source
+            t.advert = a
+            a.name?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotEmpty() }?.let { t.name = it }
+            vendor?.let { t.vendor = it }
+            // Keep the richest identity: a later advert may lack the fields an earlier one had.
+            if (identity.facts.size >= t.identity.facts.size || t.identity.type == "Device") t.identity = identity
+            t.hits = mergeHits(t, hits, now)
+            remoteId?.let { t.remoteId = it }
+            broadcast?.let { t.broadcast = it }
+            a.wifi?.let { w ->
+                w.upSince?.let { t.upSince = it }
+                w.bssid?.let { t.joined = it }
+                if (w.dataBytes > 0) t.dataBytes = w.dataBytes
+            }
+            // Smooth for the displayed signal, distance and radar; a jump after a pause is taken as is.
+            t.smoothRssi = if (t.smoothRssi.isNaN() || now - t.lastSeen > SMOOTH_RESET_MS) a.rssi.toDouble()
+                else t.smoothRssi + RSSI_SMOOTHING * (a.rssi - t.smoothRssi)
+            t.rssi = t.smoothRssi.roundToInt()
+            if (location != null && (a.rssi >= t.bestRssi || t.bestPosition == null)) t.bestPosition = location
+            if (a.rssi > t.bestRssi) t.bestRssi = a.rssi
+            // By GPS where the signal says nothing about how far it is from here; NaN when unknown.
+            fun from(p: GeoSample?) = if (p != null && here != null) metersBetween(here.lat, here.lon, p.lat, p.lon) else Double.NaN
+            t.distance = when {
+                via && now - t.localAt < LOCAL_HOLD_MS -> t.distance // heard here too: this phone's own distance
+                lora && via -> Double.NaN                             // the other Sentinel doesn't send the node's position
+                lora -> from(t.broadcast)                             // the position the node shares
+                via -> from(location)                                 // near the Sentinel that heard it
+                else -> DeviceIntel.distanceMeters(a, t.smoothRssi)
+            }
+            if (!via) t.localAt = now
+            t.lastSeen = now
+            t.sightings++
+            if (t.history.isEmpty() || now - t.history.last.time >= HISTORY_MIN_SPACING_MS) {
+                t.history.addLast(Sample(now, a.rssi))
+                if (t.history.size > HISTORY_MAX) t.history.removeFirst()
+            }
+            if (location != null && (t.path.isEmpty() || now - t.path.last.time >= LOCATION_SPACING_MS)) {
+                t.path.addLast(location)
+                if (t.path.size > 200) t.path.removeFirst()
+            }
+            if (location != null && t.hits.isNotEmpty() && (t.readings.isEmpty() || now - t.readings.last.time >= LOCATE_SPACING_MS)) {
+                t.readings.addLast(Locator.Reading(now, location.lat, location.lon, a.rssi))
+                if (t.readings.size > LOCATE_MAX) t.readings.removeFirst()
+                t.readingsSinceFit++
+            }
+        }
+        relocate(t, now)
+        return isFirst
+    }
+
+    /**
+     * Current matches plus the device's own strongest recent one. Payload tags
+     * can be intermittent (not every packet carries them), so a match is held
+     * for [HIT_HOLD_MS] after it was last observed instead of flickering, then
+     * fades. The patrol-vehicle hit is never held: it is recomputed from the live
+     * group every classification, so it disappears when the group breaks up.
+     */
+    private fun mergeHits(t: Track, hits: List<Hit>, now: Long): List<Hit> {
+        val own = hits.firstOrNull { it.source != PatrolCluster.SOURCE }
+        if (own != null) {
+            val held = t.heldHit
+            if (held == null || now > t.heldUntil || own.confidence >= held.confidence) t.heldHit = own
+            if (own.label == t.heldHit?.label) t.heldUntil = now + HIT_HOLD_MS
+        }
+        val held = t.heldHit?.takeIf { now <= t.heldUntil }
+        val merged = if (held != null && hits.none { it.label == held.label }) hits + held else hits
+        return merged.sortedByDescending { it.confidence }
+    }
+
+    /**
+     * Refits a flagged device's position from its readings, at most every [LOCATE_EVERY_MS] and only
+     * after new readings. A device that travels with you is never pinned to one spot. The fit runs
+     * on its own thread, outside the device's lock, so neither the scanners nor the screens wait for it.
+     */
+    private fun relocate(t: Track, now: Long) {
+        val (readings, wifi) = synchronized(t) {
+            if (t.readingsSinceFit == 0 || now - t.locatedAt < LOCATE_EVERY_MS) return
+            t.locatedAt = now
+            t.readingsSinceFit = 0
+            if (t.following) { t.located = null; return }
+            t.readings.toList() to (t.advert?.isWifi == true)
+        }
+        fitter.execute {
+            val fit = runCatching { Locator.estimate(readings, wifi, now) }.getOrNull()
+            synchronized(t) { t.located = fit }
+        }
+    }
+
+    private val fitter = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "locator").apply { isDaemon = true } }
+
+    /** Waits for the position fits already queued (tests). */
+    fun awaitFits() { fitter.submit {}.get() }
+
+    /**
+     * Address-rotation linking: if exactly one device with the same advert
+     * fingerprint went silent shortly before this new address appeared, treat
+     * them as the same device and carry its matches over. Two or more
+     * candidates (e.g. several identical earbuds) means no link. A random WiFi
+     * address uses the WPS UUID its probe requests send (USB adapter) instead.
+     */
+    private fun linkRotatedAddress(t: Track, a: Advert, now: Long) {
+        val uuid = if (a.isWifi && org.tucsoncommunity.kokoho.util.MacUtil.isRandomized(a.mac)) org.tucsoncommunity.kokoho.usb.ProbeIntel.of(a.mac)?.wps?.uuid else null
+        val fp = AdvertFingerprint.of(a) ?: uuid?.let { "uuid:$it" } ?: return
+        synchronized(t) { t.fingerprint = fp }
+        if (!AdvertFingerprint.mayRotate(a) && uuid == null) return
+        val candidates = tracks.values.filter { o ->
+            o !== t && synchronized(o) {
+                o.fingerprint == fp && o.lastSeen <= now - ROTATION_SILENCE_MS && now - o.lastSeen <= ROTATION_WINDOW_MS
+            }
+        }
+        val prev = candidates.singleOrNull() ?: return
+        val carried = synchronized(prev) {
+            (prev.hits.ifEmpty { prev.inherited }).map { h ->
+                h.copy(
+                    confidence = (h.confidence - 5).coerceAtLeast(0),
+                    evidence = "Same device as ${prev.mac} before its address rotated (identical " +
+                        (if (uuid != null) "WPS UUID" else "advert fingerprint") +
+                        ", ${(now - prev.lastSeen) / 1000} s gap). Original evidence: ${h.evidence}"
+                )
+            } to (prev.name to prev.role)
+        }
+        // The follow check carries on too: time with you, where it was heard, and a warning
+        // already given (so a tag changing its address isn't reset - nor warned about again).
+        val follow = synchronized(prev) { Triple(prev.since, prev.path.toList(), prev.following) }
+        synchronized(t) {
+            t.linkedFrom = prev.mac
+            t.inherited = carried.first
+            if (t.name == null) t.name = carried.second.first
+            if (t.role == null) t.role = carried.second.second
+            t.since = minOf(t.since, follow.first)
+            follow.second.forEach { t.path.addLast(it) }
+            t.following = t.following || follow.third
+        }
+    }
+
+    /**
+     * The address [mac] goes by now: follows its address rotations forward (a tag or phone that changed
+     * its random address and was linked by its advert fingerprint). [mac] itself when it never rotated.
+     */
+    fun currentAddress(mac: String): String {
+        var cur = mac
+        repeat(8) {
+            val next = tracks.values.firstOrNull { t -> synchronized(t) { t.linkedFrom == cur } }?.mac ?: return cur
+            if (next == cur) return cur
+            cur = next
+        }
+        return cur
+    }
+
+    /** The address this device used before its address rotated, if it was linked. */
+    fun linkedFrom(mac: String): String? = tracks[mac]?.let { synchronized(it) { it.linkedFrom } }
+
+    /** Matches carried over from this device's previous (rotated) address. */
+    fun inheritedHits(mac: String): List<Hit> = tracks[mac]?.let { synchronized(it) { it.inherited } }.orEmpty()
+
+    @Volatile private var groupCache: Pair<Long, List<PatrolCluster.Group>> = 0L to emptyList()
+
+    /** The patrol-vehicle cluster hit for [mac], if it's part of a group (groups recomputed every 2 s). */
+    fun clusterHit(mac: String, now: Long = System.currentTimeMillis()): Hit? {
+        var (time, groups) = groupCache
+        if (now - time >= 2_000L) {
+            // Devices the user trusts (whitelisted) never make others look like a patrol car.
+            val members = tracks.values.filterNot { WhitelistCache.contains(it.mac) }.mapNotNull { t ->
+                synchronized(t) {
+                    t.role?.let { role ->
+                        PatrolCluster.Member(t.mac, role, t.firstSeen, t.lastSeen, t.history.map { it.time to it.rssi })
+                    }
+                }
+            }
+            groups = PatrolCluster.groups(members, now)
+            groupCache = now to groups
+        }
+        return PatrolCluster.hitFor(mac, groups)
+    }
+
+    fun remoteIdOf(mac: String): RemoteId.Info? = tracks[mac]?.let { synchronized(it) { it.remoteId } }
+
+    fun setKnown(mac: String, known: KnownDeviceEntity?) {
+        tracks[mac]?.let { synchronized(it) { it.known = known } }
+    }
+
+    /**
+     * Follower check: the device has been heard continuously (never out of range
+     * for more than [PRUNE_AFTER_MS]) for at least [minDurationMs] while you
+     * moved at least [minDistanceM]. Returns true exactly once per device.
+     */
+    fun checkFollowing(mac: String, minDurationMs: Long, minDistanceM: Double): Boolean {
+        val t = tracks[mac] ?: return false
+        synchronized(t) {
+            if (t.following || t.path.size < 3) return false
+            val first = t.path.first
+            if (t.lastSeen - t.since < minDurationMs) return false
+            val moved = t.path.maxOf { metersBetween(first.lat, first.lon, it.lat, it.lon) }
+            if (moved < minDistanceM) return false
+            t.following = true
+            return true
+        }
+    }
+
+    /** Marks [mac] as following you ([PlaceFollow] found it at several places). True the first time only. */
+    fun markFollowing(mac: String): Boolean {
+        val t = tracks[mac] ?: return false
+        synchronized(t) {
+            if (t.following) return false
+            t.following = true
+            return true
+        }
+    }
+
+    /** Light snapshots for the live list; pruned first. */
+    fun snapshot(now: Long = System.currentTimeMillis()): List<Snapshot> {
+        // Per key and atomic with report's lookup: a device heard right now is never dropped mid-update.
+        for (mac in tracks.keys) tracks.computeIfPresent(mac) { _, t -> t.takeIf { now - maxOf(t.lastSeen, t.touchedAt) <= PRUNE_AFTER_MS || org.tucsoncommunity.kokoho.esp.HeardBy.peerMesh.recent(mac, now) } }
+        return tracks.values.map { t -> synchronized(t) { snap(t, full = false) } }
+    }
+
+    /**
+     * Addresses heard in the last [withinMs] whose adverts have the fingerprint [fp]
+     * ([AdvertFingerprint.of]): other devices of the same model nearby, or one device changing address.
+     */
+    fun sharingFingerprint(fp: String, now: Long = System.currentTimeMillis(), withinMs: Long = 10 * 60_000L): Int =
+        tracks.values.count { t -> synchronized(t) { t.fingerprint == fp && now - t.lastSeen <= withinMs } }
+
+    /** [mac]'s advert fingerprint ([AdvertFingerprint.of]), or null. */
+    fun fingerprintOf(mac: String): String? = tracks[mac]?.let { synchronized(it) { it.fingerprint } }
+
+    /**
+     * Devices that moved along with [mac]: heard within [TOGETHER_MS] of it at [TOGETHER_PLACES] or more
+     * places of your way, [PLACE_M] apart and spread over [TOGETHER_SPREAD_M]. Things that travel together
+     * (a phone with its watch and earbuds, a car's WiFi with a tag hidden in it) turn up this way.
+     * Most places first, at most [max], as (address, name or type).
+     */
+    fun companions(mac: String, max: Int = 3): List<Pair<String, String>> {
+        val t = tracks[mac] ?: return emptyList()
+        val mine = synchronized(t) { t.path.toList() }
+        if (mine.size < TOGETHER_PLACES) return emptyList()
+        return tracks.values.mapNotNull { o ->
+            if (o === t) return@mapNotNull null
+            val (theirs, label) = synchronized(o) { o.path.toList() to (o.name ?: o.identity.type) }
+            sharedPlaces(mine, theirs).takeIf { it > 0 }?.let { Triple(o.mac, label, it) }
+        }.sortedByDescending { it.third }.take(max).map { it.first to it.second }
+    }
+
+    /**
+     * The phone a tracker travels with, as its name or type, when there is one: a phone (not itself a
+     * tracker) heard with [mac] at every one of its places along your way ([sharedPlaces]). A tag that
+     * never leaves a phone's side is most likely that phone owner's (a passenger's keys or bag), the
+     * way an AirTag near its owner's iPhone doesn't report itself separated. Null otherwise.
+     */
+    fun ownerPhone(mac: String): String? {
+        val t = tracks[mac] ?: return null
+        val mine = synchronized(t) { t.path.toList() }
+        val places = sharedPlaces(mine, mine).takeIf { it > 0 } ?: return null
+        return tracks.values.firstNotNullOfOrNull { o ->
+            if (o === t) return@firstNotNullOfOrNull null
+            val (theirs, label, phone) = synchronized(o) {
+                Triple(o.path.toList(), o.name ?: o.identity.type,
+                    o.hits.none { it.category == Category.TRACKER } && DeviceIntel.isPhone(o.identity.type, o.name))
+            }
+            label.takeIf { phone && sharedPlaces(mine, theirs) >= places }
+        }
+    }
+
+    /** How many separate places of [a] had [b] heard too (within [TOGETHER_MS]), when they make a companion; else 0. */
+    internal fun sharedPlaces(a: List<GeoSample>, b: List<GeoSample>): Int {
+        if (b.size < TOGETHER_PLACES) return 0
+        val places = ArrayList<GeoSample>()
+        var j = 0
+        for (p in a) {
+            while (j < b.size && b[j].time < p.time - TOGETHER_MS) j++
+            var k = j
+            var with = false
+            while (!with && k < b.size && b[k].time <= p.time + TOGETHER_MS) {
+                with = metersBetween(p.lat, p.lon, b[k].lat, b[k].lon) < PLACE_M
+                k++
+            }
+            if (with && places.none { metersBetween(it.lat, it.lon, p.lat, p.lon) < PLACE_M }) places += p
+        }
+        if (places.size < TOGETHER_PLACES) return 0
+        val spread = places.maxOf { x -> places.maxOf { y -> metersBetween(x.lat, x.lon, y.lat, y.lon) } }
+        return if (spread >= TOGETHER_SPREAD_M) places.size else 0
+    }
+
+    /** The last advert of every device in this session (to re-check them after the watchlist changes). */
+    fun lastAdverts(): List<Advert> = tracks.values.mapNotNull { t -> synchronized(t) { t.advert } }
+
+    /**
+     * Replaces a device's matches right away (watchlist changed): a held match that the
+     * fresh evaluation no longer produces is dropped instead of lingering for [HIT_HOLD_MS].
+     */
+    fun replaceHits(mac: String, hits: List<Hit>) {
+        val t = tracks[mac] ?: return
+        synchronized(t) {
+            if (t.heldHit?.let { h -> hits.none { it.label == h.label } } == true) { t.heldHit = null; t.heldUntil = 0L }
+            t.hits = hits.sortedByDescending { it.confidence }
+        }
+    }
+
+    fun get(mac: String): Snapshot? {
+        val t = tracks[mac] ?: return null
+        val snapshot = synchronized(t) { snap(t, full = true) }
+        // Gather sibling facts without holding another device's lock.
+        return if (Advert.Source.WIFI in snapshot.sources)
+            snapshot.copy(facts = snapshot.facts + sameApFacts(mac)) else snapshot
+    }
+
+    /** When [mac] was last heard and that raw advert: unsmoothed, so a direction sweep isn't seconds behind. */
+    fun lastHeard(mac: String): Pair<Long, Advert>? = tracks[mac]?.let { t -> synchronized(t) { t.advert?.let { t.lastSeen to it } } }
+
+    /** Devices heard since [since] with their summary, for persisting to known_devices. */
+    fun summaries(since: Long): List<Snapshot> =
+        tracks.values.filter { it.lastSeen >= since }.map { t -> synchronized(t) { snap(t, full = false) } }
+
+    fun count(): Int = tracks.size
+
+    fun clear() = tracks.clear()
+
+    private fun snap(t: Track, full: Boolean) = Snapshot(
+        mac = t.mac,
+        source = t.advert?.source ?: Advert.Source.BLE,
+        sources = t.sources.toSet(),
+        name = t.name,
+        vendor = t.vendor,
+        deviceType = hiddenRouterType(t) ?: t.identity.type,
+        facts = t.identity.facts +
+            listOfNotNull(
+                t.linkedFrom?.let { "Previous address" to "$it (address rotated, same advert fingerprint)" },
+                t.role?.let { "Patrol-kit role" to it }
+            ) + if (full && Advert.Source.WIFI in t.sources) usbWifiFacts(t) else emptyList(),
+        hits = t.hits,
+        rssi = t.rssi,
+        bestRssi = t.bestRssi,
+        distanceM = t.distance,
+        addressType = t.advert?.addressType ?: AddressType.UNKNOWN,
+        firstSeen = t.firstSeen,
+        lastSeen = t.lastSeen,
+        sightings = t.sightings,
+        remoteId = t.remoteId,
+        following = t.following,
+        known = t.known,
+        advert = if (full) t.advert else null,
+        history = if (full) t.history.toList() else emptyList(),
+        path = if (full) t.path.toList() else emptyList(),
+        bestPosition = t.bestPosition,
+        located = t.located,
+        broadcast = t.broadcast
+    )
+
+    /**
+     * A hidden network broadcast by the same access point as a router is that router's: it takes the router's
+     * type ("Home router - Sagemcom (hidden network)"), so it sorts, groups and filters with it. Null otherwise.
+     */
+    private fun hiddenRouterType(t: Track): String? {
+        if (Advert.Source.WIFI !in t.sources || !t.name.isNullOrEmpty() || t.advert?.wifi?.client == true) return null
+        if (DeviceIntel.isRouter(t.identity.type) || t.identity.type.contains(" (WiFi)")) return null
+        return tracks.values.firstNotNullOfOrNull { o ->
+            if (o === t || !WifiFingerprint.sameAccessPoint(t.mac, o.mac)) null
+            // Read without locking [o]: this runs under [t]'s lock, and the sibling facts lock the other way round.
+            else o.identity.type.takeIf { !o.name.isNullOrEmpty() && o.advert?.isWifi == true && DeviceIntel.isRouter(it) }
+        }?.let { DeviceIntel.hiddenOnType(it) }
+    }
+
+    /**
+     * What a USB adapter in monitor mode heard: how long the router's WiFi had been on, which network a
+     * device talks to and which devices talk to a network, and how much data. Saved with the page (History).
+     */
+    private fun usbWifiFacts(t: Track): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        t.upSince?.let {
+            val at = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(it))
+            out += "WiFi on for" to "${upFor(t.lastSeen - it)} when last heard, since $at (beacon clock: usually since power-on)"
+        }
+        t.joined?.let { ap ->
+            out += "Connected to" to (tracks[ap]?.name?.let { "\"$it\" ($ap)" } ?: ap)
+        }
+        // Read without locking the others, like [hiddenRouterType]: this runs under [t]'s lock.
+        val clients = tracks.values.filter { o -> o !== t && o.joined == t.mac && t.lastSeen - o.lastSeen < CONNECTED_MS }
+        if (clients.isNotEmpty()) out += "Devices connected" to "${clients.size}: " + clients.take(8).joinToString("; ") { o ->
+            o.identity.type + (o.vendor?.let { " - ${DeviceIntel.shortVendor(it)}" } ?: "") + " (${o.mac})"
+        } + if (clients.size > 8) "; +${clients.size - 8} more" else ""
+        if (t.dataBytes > 0) out += "Data heard by USB adapter" to when {
+            t.dataBytes < 1_000_000 -> "${(t.dataBytes + 999) / 1000} KB"
+            else -> String.format(java.util.Locale.US, "%.1f MB", t.dataBytes / 1e6)
+        }
+        return out
+    }
+
+    private fun upFor(ms: Long): String {
+        val min = (ms / 60_000).coerceAtLeast(0)
+        return when {
+            min < 60 -> "$min min"
+            min < 48 * 60 -> "${min / 60} h ${min % 60} min"
+            else -> "${min / 1440} days"
+        }
+    }
+
+    /**
+     * Other networks broadcast by the same access point (see
+     * [WifiFingerprint.sameAccessPoint]). For a hidden network this usually
+     * reveals the visible network - and so the owner/router - it belongs to.
+     */
+    private fun sameApFacts(mac: String): List<Pair<String, String>> {
+        val siblings = tracks.values.mapNotNull { o ->
+            if (o.mac == mac || !WifiFingerprint.sameAccessPoint(mac, o.mac)) return@mapNotNull null
+            synchronized(o) {
+                if (Advert.Source.WIFI in o.sources) Triple(o.mac, o.name, o.identity.type) else null
+            }
+        }
+        if (siblings.isEmpty()) return emptyList()
+        val out = mutableListOf<Pair<String, String>>()
+        out += "Same access point as" to siblings.joinToString("; ") { (mac, ssid, _) ->
+            (ssid?.let { "\"$it\"" } ?: "hidden network") + " ($mac)"
+        }
+        // A visible sibling identified by model or maker names this network's hardware too.
+        siblings.map { it.third }.firstOrNull { it.contains(" - ") }
+            ?.let { out += "Probable hardware (from sibling)" to it.substringAfter(" - ") }
+        return out
+    }
+
+    /** Great-circle distance in metres (haversine). */
+    fun metersBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6_371_000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val h = sin(dLat / 2) * sin(dLat / 2) +
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2) * sin(dLon / 2)
+        return 2 * r * atan2(sqrt(h), sqrt(1 - h))
+    }
+}

@@ -28,7 +28,7 @@
             android:scaleType="fitCenter"
             android:visibility="gone" />
 
-        <com.rfsentinel.app.ui.ThemeHeaderView
+        <org.tucsoncommunity.kokoho.ui.ThemeHeaderView
             android:id="@+id/themeHeader"
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
@@ -234,7 +234,7 @@
             android:layout_weight="1"
             android:visibility="gone">
 
-            <com.rfsentinel.app.ui.RadarView
+            <org.tucsoncommunity.kokoho.ui.RadarView
                 android:id="@+id/radarView"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
