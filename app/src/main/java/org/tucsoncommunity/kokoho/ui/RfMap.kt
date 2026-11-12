@@ -357,8 +357,12 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         for (t in groundThreats) {
             val rawLat = t.lat ?: fallbackLat
             val rawLon = t.lon ?: fallbackLon
-            // Prioritize derived locations; if only 1 uncorroborated sample exists, apply deterministic offset so raw user GPS is never plotted
-            val (lat, lon) = if (t.isApproximatedPosition || t.sightingCount >= 2) {
+            // Display derived positions and narrow (<= 200 ft / 61 m) circles as derived;
+            // only jitter wide (200ft+) uncorroborated single-sample circles.
+            val isDerivedOrNarrow = t.isApproximatedPosition ||
+                t.sightingCount >= 2 ||
+                t.uncertaintyRadiusM <= org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.WIDE_CIRCLE_JITTER_MIN_M
+            val (lat, lon) = if (isDerivedOrNarrow) {
                 rawLat to rawLon
             } else {
                 org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.deriveJitteredCenter(t.uuid, rawLat, rawLon, t.uncertaintyRadiusM)

@@ -198,10 +198,12 @@ class KokohoTest {
         views.syncRunningState(true)
         assertEquals("Stop", views.scanToggleButton.text.toString())
 
-        // Verify Share binary pill next to Scan button & Settings master disable behavior
-        KokohoSignatures.setContributionAllowedInSettings(activity, true)
-        views.syncSharePillState()
+        // Verify Share binary pill starts OFF ("Share"), toggles to "Sharing" on tap, and greys out when disabled in Settings
+        assertEquals("Share", views.shareToggleButton.text.toString())
+        assertFalse(KokohoSignatures.isContributeObservationsEnabled(activity))
+        views.shareToggleButton.performClick()
         assertEquals("Sharing", views.shareToggleButton.text.toString())
+        assertTrue(KokohoSignatures.isContributeObservationsEnabled(activity))
         views.shareToggleButton.performClick()
         assertEquals("Share", views.shareToggleButton.text.toString())
         assertFalse(KokohoSignatures.isContributeObservationsEnabled(activity))
@@ -211,6 +213,7 @@ class KokohoTest {
         assertEquals(0.50f, views.shareToggleButton.alpha, 0.01f)
         KokohoSignatures.setContributionAllowedInSettings(activity, true)
         views.syncSharePillState()
+        assertEquals("Share", views.shareToggleButton.text.toString())
 
         // Verify intersection "rmat" traffic cabinets and retail routers are excluded while 7400 Oracle signals match
         assertNull(KokohoSignatures.matchOuiOrSsid("00:30:44:55:00:06", "rmat", "Cradlepoint"))

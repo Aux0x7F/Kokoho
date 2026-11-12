@@ -97,6 +97,7 @@ class KokohoViews(
 
     init {
         KokohoSignatures.ensureLoaded(activity)
+        KokohoSignatures.ensureSharingStartsOff(activity)
         syncSdrTargets()
 
         // Hide legacy top controls and filter chips so Kokoho has a clean, unified layout

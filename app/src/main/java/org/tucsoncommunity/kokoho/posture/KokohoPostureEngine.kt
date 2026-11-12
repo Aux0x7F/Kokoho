@@ -225,15 +225,20 @@ object KokohoPostureEngine {
     @Volatile
     private var lastEvaluateNowMs: Long = 0L
 
+    /** Minimum uncertainty radius (meters) — 200 ft ≈ 61 m — before a wide uncorroborated circle is jittered. */
+    const val WIDE_CIRCLE_JITTER_MIN_M = 61
+
     /**
-     * Deterministically offsets a single-node/1D observation by 45% of its estimated radius
-     * (clamped to 140m..320m) along a stable azimuth derived from [uuid] so raw unjittered user
-     * device coordinates are NEVER sent to the shared map.
+     * Deterministically offsets a wide (> 200 ft / 61 m) uncorroborated observation by 45% of its
+     * estimated radius along a stable azimuth derived from [uuid] so raw unjittered user device
+     * coordinates are never plotted or shared for wide single-hit circles.
+     * Circles <= 200 ft (61 m) are returned untouched.
      */
     fun deriveJitteredCenter(uuid: String, lat: Double, lon: Double, radiusM: Int): Pair<Double, Double> {
+        if (radiusM <= WIDE_CIRCLE_JITTER_MIN_M) return lat to lon
         val h = uuid.hashCode()
         val angleRad = Math.toRadians(((h and 0x7FFFFFFF) % 360).toDouble())
-        val offsetM = (radiusM * 0.45).coerceIn(140.0, 320.0)
+        val offsetM = (radiusM * 0.45).coerceIn(65.0, 320.0)
         val dLat = (offsetM * cos(angleRad)) / 111_132.0
         val dLon = (offsetM * sin(angleRad)) / (111_320.0 * cos(Math.toRadians(lat)).coerceAtLeast(0.1))
         return (lat + dLat) to (lon + dLon)
@@ -1129,9 +1134,10 @@ object KokohoPostureEngine {
                 val baseLon = t.lon ?: continue
                 // Never share isolated 1-sample ground hits; require emitter GPS, 2D triangulation, >= 2 sightings, or >= 2 signals
                 val isEmitterGps = t.isAircraft || (t.isDrone && t.isPinpointed)
-                val isCorroborated = isEmitterGps || t.isApproximatedPosition || t.sightingCount >= 2 || t.evidenceCount >= 2
+                val isDerived = isEmitterGps || t.isApproximatedPosition || t.sightingCount >= 2 || t.uncertaintyRadiusM <= WIDE_CIRCLE_JITTER_MIN_M
+                val isCorroborated = isDerived || t.evidenceCount >= 2
                 if (!isCorroborated) continue
-                val (shareLat, shareLon) = if (isEmitterGps || t.isApproximatedPosition) {
+                val (shareLat, shareLon) = if (isDerived) {
                     baseLat to baseLon
                 } else {
                     deriveJitteredCenter(t.uuid, baseLat, baseLon, t.uncertaintyRadiusM)
@@ -1150,7 +1156,9 @@ object KokohoPostureEngine {
                     additionalFacets = extraFacets,
                     agency = t.agency,
                     label = t.friendlyLabel,
-                    propagationClass = propClass
+                    propagationClass = propClass,
+                    uncertaintyRadiusM = t.uncertaintyRadiusM.toDouble(),
+                    isDerived = isDerived
                 )
             }
         }

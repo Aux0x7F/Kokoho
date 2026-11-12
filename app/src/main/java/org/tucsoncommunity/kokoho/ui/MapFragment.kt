@@ -430,11 +430,8 @@ class MapFragment : Fragment() {
     private fun systemDark() = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
         android.content.res.Configuration.UI_MODE_NIGHT_YES
 
-    /** The map's look: your choice (the sun / moon button), else - while guided - day or night where you are, else the phone's. */
-    private fun darkTiles(): Boolean = Prefs.mapDark(act) ?: run {
-        val here = if (Navigator.active && Prefs.navAutoNight(act)) lastFix ?: knownFix() else null
-        if (here != null) org.tucsoncommunity.kokoho.nav.Sun.isNight(here.latitude, here.longitude, System.currentTimeMillis()) else systemDark()
-    }
+    /** Kokoho uses the dark vector map exclusively (no theme toggle). */
+    private fun darkTiles(): Boolean = true
 
     private fun loadStyle() {
         val r = rf ?: return
@@ -644,32 +641,16 @@ class MapFragment : Fragment() {
      */
     private fun compactControls() {
         binding.controls.visibility = View.GONE
-        binding.compactControls.visibility = View.VISIBLE
-        val (accent, onAccent) = ChipStyle.accent(act)
-        binding.tracesFab.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
-        binding.tracesFab.imageTintList = android.content.res.ColorStateList.valueOf(0xFF0B5C63.toInt())
-        binding.tracesFab.setOnClickListener { startActivity(Intent(act, TripsActivity::class.java)) }
-        binding.recordFab.setOnClickListener { toggleRecording() }
-        // The map on its own screen, as before (Record trace / Traces bar, its own filter chips).
-        binding.fullscreenButton.visibility = View.VISIBLE
-        binding.fullscreenButton.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
-        binding.fullscreenButton.imageTintList = android.content.res.ColorStateList.valueOf(0xFF0B5C63.toInt())
-        binding.fullscreenButton.setOnClickListener { startActivity(fullMapIntent()) }
-        // A short pane has no room for five buttons stacked on the right: map settings, light / dark and
-        // full screen join Record and Traces along the bottom; the compass and follow stay on the right.
-        val gap = (8 * resources.displayMetrics.density).toInt()
-        for (v in listOf(binding.searchButton, binding.mapSettingsButton, binding.themeButton, binding.fullscreenButton)) {
-            (v.parent as? ViewGroup)?.removeView(v)
-            binding.compactControls.addView(v, android.widget.LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginStart = gap })
-        }
-        binding.recordFab.backgroundTintList = android.content.res.ColorStateList.valueOf(accent)
-        binding.recordFab.imageTintList = android.content.res.ColorStateList.valueOf(onAccent)
+        binding.compactControls.visibility = View.GONE
+        binding.recordFab.visibility = View.GONE
+        binding.tracesFab.visibility = View.GONE
+        binding.themeButton.visibility = View.GONE
+        binding.searchButton.visibility = View.GONE
+        binding.mapSettingsButton.visibility = View.GONE
+        binding.fullscreenButton.visibility = View.GONE
         binding.statusText.textSize = 12f
-        // On a narrower screen the row of round buttons would run into the compass and follow buttons at the right.
         val relayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSideButtonsSoon() }
         binding.root.addOnLayoutChangeListener(relayout)
-        binding.compactControls.addOnLayoutChangeListener(relayout)
         binding.navCard.addOnLayoutChangeListener(relayout)
         binding.navBar.addOnLayoutChangeListener(relayout)
     }
@@ -1399,7 +1380,7 @@ class MapFragment : Fragment() {
             Navigator.active && !showRec -> null // the guidance banner is the status
             // In the small pane the place card needs the room: the scan status is on the main screen above it anyway.
             embedded && nav?.cardShown == true && !showRec -> null
-            !ScanForegroundService.isRunning -> "Not scanning - start scanning, then Record trace to save your route"
+            !ScanForegroundService.isRunning -> null
             showRec -> {
                 val mins = (System.currentTimeMillis() - TripRecorder.startedAt) / 60000
                 String.format(

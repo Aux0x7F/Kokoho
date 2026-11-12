@@ -441,7 +441,9 @@ object KokohoHubClient {
         additionalFacets: List<String>,
         agency: KokohoAgency,
         label: String,
-        propagationClass: String
+        propagationClass: String,
+        uncertaintyRadiusM: Double? = null,
+        isDerived: Boolean = false
     ) {
         val app = context.applicationContext
         if (!KokohoSignatures.isAuxnetEnabled(app) || !isSensorContributor(app)) return
@@ -450,7 +452,7 @@ object KokohoHubClient {
         val slot = sensorSlot(app)
         scope.launch {
             runCatching {
-                val payload = mapOf(
+                val payload = mutableMapOf<String, Any>(
                     "room_id" to rId,
                     "sensor_slot" to slot,
                     "sensor_lat" to lat,
@@ -462,8 +464,12 @@ object KokohoHubClient {
                     "category" to agency.id,
                     "label" to label,
                     "propagation_class" to propagationClass,
-                    "timestamp_ms" to System.currentTimeMillis()
+                    "timestamp_ms" to System.currentTimeMillis(),
+                    "is_derived" to isDerived
                 )
+                if (uncertaintyRadiusM != null) {
+                    payload["uncertainty_radius_m"] = uncertaintyRadiusM
+                }
                 val json = gson.toJson(payload)
                 val conn = (URL("${hubUrl(app)}/v1/room/ingest").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"

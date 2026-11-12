@@ -261,6 +261,22 @@ object KokohoSignatures {
 
     // ---- Privacy & Connected Features (Offline-first with automatic room & opt-out privacy) ----
 
+    @Volatile
+    private var sessionSharingResetDone = false
+
+    /**
+     * Ensures live sharing starts OFF ("Share") whenever the app process starts,
+     * requiring an explicit tap on the Share pill to begin sharing during a session.
+     */
+    fun ensureSharingStartsOff(context: Context) {
+        if (!sessionSharingResetDone) {
+            sessionSharingResetDone = true
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+                putBoolean(KEY_SHARING_ACTIVE_PILL, false)
+            }
+        }
+    }
+
     /**
      * Master capability toggle in Settings > Privacy: controls whether Contribution is permitted at all.
      * When false, the top-bar Share pill is greyed out and tapping it prompts the user to enable in Settings.
@@ -271,11 +287,7 @@ object KokohoSignatures {
     fun setContributionAllowedInSettings(context: Context, allowed: Boolean) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putBoolean(KEY_CONTRIBUTE_OBSERVATIONS, allowed)
-            if (allowed) {
-                putBoolean(KEY_SHARING_ACTIVE_PILL, true)
-            } else {
-                putBoolean(KEY_SHARING_ACTIVE_PILL, false)
-            }
+            putBoolean(KEY_SHARING_ACTIVE_PILL, false)
         }
         if (!allowed) {
             KokohoHubClient.purgeContributedObservations(context)
@@ -283,11 +295,12 @@ object KokohoSignatures {
     }
 
     /**
-     * Quick binary Share pill state (left of Scan button). Only active when Contribution is allowed in Settings.
+     * Quick binary Share pill state (left of Scan button). Starts OFF by default and only becomes
+     * active when Contribution is allowed in Settings and the user taps the Share pill.
      */
     fun isSharingActive(context: Context): Boolean =
         isContributionAllowedInSettings(context) &&
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SHARING_ACTIVE_PILL, true)
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_SHARING_ACTIVE_PILL, false)
 
     fun setSharingActive(context: Context, active: Boolean) {
         if (!isContributionAllowedInSettings(context)) return
