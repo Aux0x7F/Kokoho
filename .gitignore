@@ -10,6 +10,7 @@ captures/
 # Release signing - never commit
 keystore/
 keystore.properties
+*.jks
 
 # Raw registry downloads for tools/gen_assets.py
 tools/data/

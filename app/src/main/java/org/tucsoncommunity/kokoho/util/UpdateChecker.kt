@@ -113,7 +113,8 @@ object UpdateChecker {
             val vCode = json.optInt("version_code", 0)
             val apkUrl = json.optString("apk_url", "").takeIf { it.isNotBlank() }
             val size = json.optLong("apk_size", 0L)
-            val sha = json.optString("apk_sha256", "").takeIf { it.isNotBlank() }?.removePrefix("sha256:")
+            val rawSha = json.optString("apk_sha256", "").ifBlank { json.optString("sha256", "") }
+            val sha = rawSha.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }?.removePrefix("sha256:")
             val notesUrl = json.optString("notes_url", apkUrl ?: KokohoHubClient.DEFAULT_HUB_URL)
             val notes = json.optString("notes", "")
             return Latest(ver, apkUrl, notesUrl, size, sha, vCode, notes)
@@ -148,12 +149,15 @@ object UpdateChecker {
 
     private fun fetchFromHub(context: Context): Latest {
         val base = KokohoHubClient.hubUrl(context)
-        val url = "$base/v1/update/latest"
+        val pkg = Uri.encode(context.packageName)
+        val url = "$base/v1/update/latest?pkg=$pkg&vc=${BuildConfig.VERSION_CODE}"
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000
             readTimeout = 10_000
+            useCaches = false
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "Kokoho/${BuildConfig.VERSION_NAME}")
+            setRequestProperty("Cache-Control", "no-cache")
+            setRequestProperty("User-Agent", "${context.packageName}/${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         }
         try {
             if (conn.responseCode != 200) throw IllegalStateException("Update server answered HTTP ${conn.responseCode}")
@@ -169,8 +173,8 @@ object UpdateChecker {
         }
     }
 
-    private const val AUTO_INTERVAL_MS = 5 * 60 * 1000L
-    private const val RETRY_MS = 2 * 60 * 1000L
+    private const val AUTO_INTERVAL_MS = 60 * 1000L
+    private const val RETRY_MS = 30 * 1000L
     @Volatile
     private var checking = false
 
@@ -182,7 +186,7 @@ object UpdateChecker {
      * a dismissable dialog and adds the "Update App" card to the Utility tab.
      */
     fun checkOnStartup(activity: AppCompatActivity) {
-        if (!KokohoSignatures.isAuxnetEnabled(activity) || checking) return
+        if (checking) return
         if (!due(Prefs.lastUpdateCheck(activity), System.currentTimeMillis())) return
         check(activity, silent = true)
     }

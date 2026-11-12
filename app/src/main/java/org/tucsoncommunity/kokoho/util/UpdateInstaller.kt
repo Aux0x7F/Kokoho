@@ -128,8 +128,8 @@ object UpdateInstaller {
         val archive = pm.getPackageArchiveInfo(apk.path, flags) ?: return "The downloaded file isn't a valid app"
         if (archive.packageName != context.packageName) return "The downloaded file is a different app (${archive.packageName})"
         val mine = runCatching { pm.getPackageInfo(context.packageName, flags) }.getOrNull() ?: return null
-        val newer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode > mine.longVersionCode else archive.versionCode > mine.versionCode
-        if (!newer) return "The downloaded version isn't newer than the one installed"
+        val newer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode >= mine.longVersionCode else archive.versionCode >= mine.versionCode
+        if (!newer) return "The downloaded version (${archive.versionName}) is older than the one installed (${mine.versionName})"
         val a = signers(archive); val b = signers(mine)
         if (a.isNotEmpty() && b.isNotEmpty() && a != b) return "The downloaded file is signed with a different key than this app, so Android would refuse it"
         return null
