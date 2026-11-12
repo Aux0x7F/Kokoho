@@ -138,102 +138,91 @@ object NotificationHelper {
     }
 
     /**
-     * The ongoing "Passive scan active" notification. Tapping it returns to the
-     * app; the Stop action ends scanning without opening it.
+     * Evaluates the current Kokoho posture and returns the single persistent notification
+     * summary (either "No threats detected" or "[comma separated agencies] [nearest current detection]").
+     * Never includes verbose help text or spawns multiple notification entries (#13).
      */
-    fun buildServiceNotification(context: Context, text: String): Notification {
+    fun currentPostureSummary(context: Context): Pair<String, String?> {
+        val snap = runCatching {
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(context)
+        }.getOrNull()
+        val groups = snap?.monitorGroups.orEmpty()
+        if (groups.isEmpty()) {
+            return "No threats detected" to null
+        }
+        val agencies = groups.joinToString(", ") { it.agency.friendlyLabel }
+        val nearest = groups.flatMap { it.distinctUnits }.minByOrNull { it.nearestEdgeDistanceM }
+            ?: groups.first().leadThreat
+        val nowMs = System.currentTimeMillis()
+        val distPart = if (nearest.nearestEdgeDistanceM <= 15.0) {
+            "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(context, nearest.uncertaintyRadiusM)}"
+        } else {
+            val edge = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(context, nearest.nearestEdgeDistanceM)
+            val rad = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(context, nearest.uncertaintyRadiusM)
+            "$edge (±$rad)"
+        }
+        val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, nearest.lastSeenMs)
+        return "$agencies · $distPart" to staleness
+    }
+
+    /**
+     * The single ongoing persistent notification (#13):
+     * "No threats detected" or "[comma separated agencies] [nearest current detection]".
+     * Zero help text, zero duplicate notification spam.
+     */
+    fun buildServiceNotification(context: Context, @Suppress("UNUSED_PARAMETER") text: String = ""): Notification {
         val discreet = Prefs.discreetMode(context)
+        val (titleLine, subLine) = currentPostureSummary(context)
         val stop = PendingIntent.getService(
             context, 1,
             Intent(context, ScanForegroundService::class.java).setAction(ScanForegroundService.ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return NotificationCompat.Builder(context, CHANNEL_SERVICE)
-            .setContentTitle(if (discreet) "Scanner active" else "Passive scan active")
-            .setContentText(if (discreet) "Tap to open" else text)
+        val builder = NotificationCompat.Builder(context, CHANNEL_SERVICE)
+            .setContentTitle(if (discreet) "Kokoho" else titleLine)
             .setSmallIcon(R.drawable.ic_tile_scan)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openAppIntent(context))
             .addAction(0, "Stop", stop)
-            // One tap at the wheel: what is in the list now, kept to look at later (History > Snapshots).
-            .addAction(0, "Snapshot", PendingIntent.getService(context, 3,
-                Intent(context, ScanForegroundService::class.java).setAction(ScanForegroundService.ACTION_SNAPSHOT),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
-            .build()
+        if (!discreet && !subLine.isNullOrBlank()) {
+            builder.setContentText(subLine)
+        }
+        return builder.build()
     }
 
-    fun updateServiceNotification(context: Context, text: String) {
+    fun updateServiceNotification(context: Context, text: String = "") {
         try {
-            context.getSystemService(NotificationManager::class.java)
-                .notify(SERVICE_NOTIFICATION_ID, buildServiceNotification(context, text))
+            val nm = context.getSystemService(NotificationManager::class.java) ?: return
+            // Cancel any legacy multi-entry alert notifications so only the single persistent notification exists
+            runCatching {
+                nm.activeNotifications.filter { it.id >= ALERT_NOTIFICATION_ID_BASE }.forEach { nm.cancel(it.id) }
+            }
+            nm.notify(SERVICE_NOTIFICATION_ID, buildServiceNotification(context, text))
         } catch (e: SecurityException) {
             // Notifications denied.
         }
     }
 
     /**
-     * Posts an alert about a mapped place rather than a device (e.g. a known plate
-     * camera): tapping it opens the map. Sound/vibration/voice are played by the caller.
+     * Updates the single persistent notification rather than spawning extra notification entries (#13).
      */
     fun sendMapAlert(
         context: Context, key: String, hit: Hit,
-        target: Class<out android.app.Activity> = org.tucsoncommunity.kokoho.ui.MapActivity::class.java,
-        /** Where the thing is (a camera); else where you were. */
+        @Suppress("UNUSED_PARAMETER") target: Class<out android.app.Activity> = org.tucsoncommunity.kokoho.ui.MapActivity::class.java,
         lat: Double? = null, lon: Double? = null,
-        /** An internet alert's key ("air:..." aircraft, "waze:..." report): tapping opens the map on it ([lat] / [lon] where it was). */
-        online: String? = null,
-        /** False: only logged (its category's banner is turned off). */
+        @Suppress("UNUSED_PARAMETER") online: String? = null,
         banner: Boolean = true,
-        /** Shown in place of the evidence on this notification only, never logged (a page's text). */
-        shown: String? = null
+        @Suppress("UNUSED_PARAMETER") shown: String? = null
     ) {
         recordAlert(context, key, null, hit, null, false, lat, lon, card = banner)
+        updateServiceNotification(context)
         if (!banner) return
-        val evidence = shown ?: hit.evidence
         val discreet = Prefs.discreetMode(context)
-        org.tucsoncommunity.kokoho.ui.ThreatBubble.popup(context, if (discreet) "New alert" else hit.label,
-            if (discreet) null else hit.category.shortTag, hit.category.colorArgb)
-        if (toCar(context, if (discreet) "New alert" else "${hit.label}. $evidence", null)) return
-        val open = PendingIntent.getActivity(
-            context, key.hashCode(),
-            (online?.let { org.tucsoncommunity.kokoho.ui.MapActivity.onlineIntent(context, it, lat, lon) } ?: Intent(context, target))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val builder = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle(if (discreet) "Kokoho" else hit.label)
-            .setContentText(if (discreet) "New alert - tap to view" else evidence)
-            .setStyle(if (discreet) null else NotificationCompat.BigTextStyle().bigText(evidence))
-            .setSmallIcon(R.drawable.ic_tile_scan)
-            .setColor(hit.category.colorArgb)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setAutoCancel(true)
-            .setSilent(true)
-            .setContentIntent(open)
-            .setVisibility(if (discreet) NotificationCompat.VISIBILITY_SECRET else NotificationCompat.VISIBILITY_PRIVATE)
-            .addAction(0, "Snooze all ${Prefs.snoozeMinutes(context)} min",
-                org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.snoozeIntent(context, ALERT_NOTIFICATION_ID_BASE + key.hashCode()))
-            .extend(
-                CarAppExtender.Builder()
-                    .setContentTitle(if (discreet) "Kokoho" else hit.label)
-                    .setContentText(if (discreet) "New alert" else evidence)
-                    .setSmallIcon(R.drawable.ic_tile_scan)
-                    .setImportance(NotificationManagerCompat.IMPORTANCE_HIGH)
-                    .addAction(R.drawable.ic_car_volume_off, "Mute ${Prefs.snoozeMinutes(context)} min",
-                        org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.snoozeIntent(context, ALERT_NOTIFICATION_ID_BASE + key.hashCode()))
-                    .build()
-            )
-        try {
-            // Through CarNotificationManager: Android Auto shows CarAppExtender alerts only
-            // when they're posted this way (it also posts the normal phone notification).
-            CarNotificationManager.from(context).notify(ALERT_NOTIFICATION_ID_BASE + key.hashCode(), builder)
-        } catch (e: SecurityException) {
-            // POST_NOTIFICATIONS denied - sound and voice still alert.
-        }
+        toCar(context, if (discreet) "New alert" else hit.label, null)
     }
 
     /**
@@ -295,91 +284,17 @@ object NotificationHelper {
     /** [via]: the linked Sentinel that heard it (Sentinel Link); [rssi] is then that phone's. */
     /** [banner] false: the alert is only logged (its watchlist entry turned the banner off). */
     fun sendAlert(context: Context, mac: String, hit: Hit, rssi: Int, following: Boolean = false, via: String? = null, banner: Boolean = true) {
-        // A drone with a Remote ID position is logged where it is; anything else where you were.
         val rid = org.tucsoncommunity.kokoho.service.DeviceRegistry.get(mac)?.remoteId?.takeIf { it.hasPosition }
         recordAlert(context, mac, mac, hit, rssi, following, rid?.latitude, rid?.longitude, card = banner)
+        updateServiceNotification(context)
         if (!banner) return
         val discreet = Prefs.discreetMode(context)
-        org.tucsoncommunity.kokoho.ui.ThreatBubble.popup(context,
-            if (discreet) "New alert" else if (following) "Following you: ${hit.label}" else hit.label,
-            if (discreet) null else listOfNotNull(hit.category.shortTag, via?.let { "via $it" },
-                org.tucsoncommunity.kokoho.service.DeviceRegistry.get(mac)?.distanceM?.takeIf { it > 0 }
-                    ?.let { "~" + org.tucsoncommunity.kokoho.detect.DeviceIntel.formatDistance(it) },
-                ProximityUtil.band(rssi).lowercase()).joinToString(" · "),
-            hit.category.colorArgb)
-        val detail = PendingIntent.getActivity(
-            context, mac.hashCode(),
-            Intent(context, DeviceDetailActivity::class.java)
-                .putExtra(DeviceDetailActivity.EXTRA_MAC, mac)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         val title = when {
             following -> "May be following you: ${hit.label}"
             via != null -> "Near $via: ${hit.label}"
             else -> "Nearby: ${hit.label}"
         }
         val snap = org.tucsoncommunity.kokoho.service.DeviceRegistry.get(mac)
-        if (toCar(context, if (discreet) "New alert" else carMessageText(title, hit, rssi, snap?.distanceM?.takeUnless { it.isNaN() }), mac)) return
-        val others = org.tucsoncommunity.kokoho.service.DeviceRegistry.snapshot()
-            .count { it.mac != mac && org.tucsoncommunity.kokoho.ui.DeviceColors.isFlagged(it) }
-        val text = "${hit.category.title} · ${hit.tier.label} (${hit.confidence}%) · $rssi dBm" +
-            (snap?.let { " · " + org.tucsoncommunity.kokoho.detect.DeviceIntel.formatDistance(it.distanceM) } ?: "") +
-            (via?.let { " · via $it" } ?: "")
-
-        val publicVersion = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle("Kokoho")
-            .setContentText("New alert")
-            .setSmallIcon(R.drawable.ic_tile_scan)
-            .build()
-
-        val builder = NotificationCompat.Builder(context, CHANNEL_ALERTS)
-            .setContentTitle(if (discreet) "Kokoho" else title)
-            .setContentText(if (discreet) "New alert - tap to view" else text)
-            .setStyle(if (discreet) null else NotificationCompat.BigTextStyle().bigText("$text\n$mac\n${hit.evidence}"))
-            .setSmallIcon(R.drawable.ic_tile_scan)
-            .setColor(hit.category.colorArgb)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setAutoCancel(true)
-            .setSilent(true)
-            .setContentIntent(detail)
-            .setVisibility(if (discreet) NotificationCompat.VISIBILITY_SECRET else NotificationCompat.VISIBILITY_PRIVATE)
-            .setPublicVersion(publicVersion)
-            // From the notification shade, without opening the app (the car has its own buttons below).
-            .addAction(0, "Snooze all ${Prefs.snoozeMinutes(context)} min",
-                org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.snoozeIntent(context, ALERT_NOTIFICATION_ID_BASE + mac.hashCode()))
-            .addAction(0, "Mute this ${org.tucsoncommunity.kokoho.data.AlertMutes.TAP_MS / 60_000} min",
-                org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.muteIntent(context, mac, ALERT_NOTIFICATION_ID_BASE + mac.hashCode()))
-            // Android Auto: show as a heads-up on the car screen; tapping it opens
-            // this device in the car app. (The tone/voice come from AlertPlayer.)
-            .extend(
-                CarAppExtender.Builder()
-                    .setContentTitle(if (discreet) "Kokoho" else title)
-                    .setContentText(if (discreet) "New alert" else carAlertText(hit, rssi, snap?.distanceM?.takeUnless { it.isNaN() }, others))
-                    .setSmallIcon(R.drawable.ic_tile_scan)
-                    .setImportance(NotificationManagerCompat.IMPORTANCE_HIGH)
-                    .setContentIntent(
-                        CarPendingIntent.getCarApp(
-                            context, mac.hashCode(),
-                            Intent(Intent.ACTION_VIEW)
-                                .setComponent(ComponentName(context, KokohoCarAppService::class.java))
-                                .putExtra(KokohoCarAppService.EXTRA_MAC, mac),
-                            PendingIntent.FLAG_UPDATE_CURRENT
-                        )
-                    )
-                    // One tap from the car screen: silence alerts for a while, or stop
-                    // alerting about this device (undo from its details).
-                    .addAction(R.drawable.ic_car_volume_off, "Mute ${Prefs.snoozeMinutes(context)} min",
-                        org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.snoozeIntent(context, ALERT_NOTIFICATION_ID_BASE + mac.hashCode()))
-                    .addAction(R.drawable.ic_car_star_outline, "Ignore",
-                        org.tucsoncommunity.kokoho.receiver.AlertActionReceiver.ignoreIntent(context, mac, ALERT_NOTIFICATION_ID_BASE + mac.hashCode()))
-                    .build()
-            )
-        try {
-            CarNotificationManager.from(context).notify(ALERT_NOTIFICATION_ID_BASE + mac.hashCode(), builder)
-        } catch (e: SecurityException) {
-            // POST_NOTIFICATIONS denied - the in-app list and sound still alert.
-        }
+        toCar(context, if (discreet) "New alert" else carMessageText(title, hit, rssi, snap?.distanceM?.takeUnless { it.isNaN() }), mac)
     }
 }

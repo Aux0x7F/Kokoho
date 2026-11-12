@@ -1,12 +1,18 @@
 package org.tucsoncommunity.kokoho.posture
 
+import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
-import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
+import android.util.Base64
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -16,7 +22,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.TooltipCompat
 import com.google.android.material.button.MaterialButton
 import org.tucsoncommunity.kokoho.R
 import org.tucsoncommunity.kokoho.databinding.ActivityMainBinding
@@ -37,12 +45,12 @@ import java.util.Locale
 /**
  * Manages Kokoho's 3 top-level activity categories and full-bleed posture UI:
  *  1. [Tab.MONITOR] (Default): Full-screen background color screen (Green / Yellow / Orange / Red)
- *     displaying the status pill ("PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY", hidden when clear),
- *     the concise friendly label ("No threats detected" or "CBP", "ICE", "DHS Air", "Federal Interop", etc.),
- *     the estimated distance ("Distance: ~1.2 mi", default imperial, no bearing), and the combined
- *     confidence + evidence count pinned at the bottom of the screen (clicking opens Entity Details).
- *  2. [Tab.MAP]: Full-screen FOSS Map view showing radius circles for flagged signals (stable status background color).
- *  3. [Tab.UTILITY]: P25 trunking monitor, radio waterfall, antenna check, Logs, Update App (when available), and Settings (last item).
+ *     displaying each currently detected agency in strict priority order:
+ *     ICE -> DHS Air -> CBP -> HSI -> Other Federal -> Sheriff / TPD / Tactical Drone.
+ *     Beneath each agency headline is its inline subtext: `x2 · ±650 ft · 1m ago` (and optional `+1 (~0.5 mi)`).
+ *     Tapping any agency opens the Distinct Agents List modal for that agency; tapping an agent opens Entity Details.
+ *  2. [Tab.MAP]: Full-screen FOSS Map view showing merged radius circles, aircraft tracks, and drone altitude.
+ *  3. [Tab.UTILITY]: P25 trunking monitor, radio waterfall, antenna check, Logs, Update App, and Settings.
  */
 class KokohoViews(
     private val activity: AppCompatActivity,
@@ -67,6 +75,7 @@ class KokohoViews(
     private val headerLogo: ImageView
     private val headerTitle: TextView
     private val headerSubtitle: TextView
+    val shareToggleButton: MaterialButton
     val scanToggleButton: MaterialButton
 
     private val tabRow: LinearLayout
@@ -74,9 +83,10 @@ class KokohoViews(
 
     private val monitorContainer: LinearLayout
     private val postureBadge: TextView
-    private val postureHeadline: TextView
-    private val postureDistance: TextView
-    private val bottomConfidenceBar: TextView
+    val postureHeadline: TextView
+    val postureDistance: TextView
+    private val agencyStackContainer: LinearLayout
+    val bottomConfidenceBar: TextView
 
     private val utilityContainer: ScrollView
     private val logsContainer: ScrollView
@@ -89,7 +99,7 @@ class KokohoViews(
         KokohoSignatures.ensureLoaded(activity)
         syncSdrTargets()
 
-        // Hide legacy Kokoho top controls and filter chips so Kokoho has a clean, unified layout
+        // Hide legacy top controls and filter chips so Kokoho has a clean, unified layout
         binding.themedHeader.visibility = View.GONE
         binding.threatBanner.visibility = View.GONE
         binding.bannerClose.visibility = View.GONE
@@ -99,11 +109,10 @@ class KokohoViews(
         binding.toolsButton.visibility = View.GONE
         (binding.filterChips.parent as? View)?.visibility = View.GONE
 
-        // Remove tight side paddings on root so full-screen background color is edge-to-edge
         val rootLinear = binding.root as LinearLayout
         rootLinear.setPadding(0, 0, 0, 0)
 
-        // 1. Unified Top Header Bar (Theme-aware Kokoho icon + Title/Status + Scan/Stop Toggle Button)
+        // 1. Unified Top Header Bar
         headerLogo = ImageView(activity).apply {
             setImageResource(R.drawable.ic_kokoho_logo)
             contentDescription = "Kokoho"
@@ -134,6 +143,42 @@ class KokohoViews(
             addView(headerSubtitle)
         }
 
+        shareToggleButton = MaterialButton(activity).apply {
+            minHeight = dp(38)
+            minimumHeight = dp(38)
+            insetTop = 0
+            insetBottom = 0
+            cornerRadius = dp(999)
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), 0, dp(12), 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginEnd = dp(8)
+            }
+            setOnClickListener {
+                if (!KokohoSignatures.isContributionAllowedInSettings(activity)) {
+                    Toast.makeText(
+                        activity,
+                        "Contribution is disabled. Enable it in Settings > Privacy to share observations.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    val next = !KokohoSignatures.isSharingActive(activity)
+                    KokohoSignatures.setSharingActive(activity, next)
+                    syncSharePillState()
+                    val msg = if (next) {
+                        "Sharing ON (derived locations only)"
+                    } else {
+                        "Sharing OFF (local-only mode)"
+                    }
+                    Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
         scanToggleButton = MaterialButton(activity).apply {
             minHeight = dp(38)
             minimumHeight = dp(38)
@@ -157,10 +202,11 @@ class KokohoViews(
             setPadding(dp(16), dp(10), dp(16), dp(8))
             addView(headerLogo)
             addView(titleCol)
+            addView(shareToggleButton)
             addView(scanToggleButton)
         }
 
-        // 2. Clean 5-Category Segmented Tab Bar (Monitor | Map | List | Utility | Logs)
+        // 2. 3-Category Segmented Tab Bar (Monitor | Map | Utility)
         tabRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -189,14 +235,13 @@ class KokohoViews(
         rootLinear.addView(tabRow, 1)
 
         // 3. Build Full-Screen MONITOR View:
-        //    - No repeated logo in the body
-        //    - Status pill ("CLEAR", "PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY")
-        //    - Friendly title ("No threats detected" or "CBP", "ICE", "Federal Interop", etc.)
-        //    - Distance line ("Distance: ~1.2 mi", hidden when CLEAR)
-        //    - Bottom combined confidence & evidence count ("82% confidence · 2 signals", hidden when CLEAR)
+        //    - Status pill ("PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY")
+        //    - Stacked agency blocks in strict priority rank order (ICE, DHS Air, CBP, HSI, Other Fed, Sheriff/TPD/Drone)
+        //    - Inline subtext below each agency: `x2 · ±650 ft · 1m ago`
+        //    - Tapping an agency opens the Distinct Agents List modal
         postureBadge = TextView(activity).apply {
             text = PostureColor.GREEN.badgeLabel
-            textSize = 12.5f
+            textSize = 12f
             letterSpacing = 0.08f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
@@ -207,42 +252,80 @@ class KokohoViews(
                 setColor(0x38000000)
                 setStroke(dp(1), 0x44FFFFFF)
             }
+            visibility = View.GONE
         }
 
         postureHeadline = TextView(activity).apply {
             text = "No threats detected"
-            textSize = 38f
+            textSize = 36f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(dp(20), dp(16), dp(20), dp(8))
+            setPadding(dp(20), dp(14), dp(20), dp(4))
         }
 
         postureDistance = TextView(activity).apply {
-            textSize = 19f
+            textSize = 16.5f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(0xF2FFFFFF.toInt())
+            setTextColor(0xEEFFFFFF.toInt())
             gravity = Gravity.CENTER
-            setPadding(dp(20), dp(4), dp(20), dp(4))
+            setPadding(dp(20), dp(2), dp(20), dp(10))
             visibility = View.GONE
         }
 
-        val heroZone = LinearLayout(activity).apply {
+        agencyStackContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            visibility = View.GONE
+        }
+
+        val heroInner = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            setPadding(dp(18), dp(16), dp(18), dp(16))
+            addView(postureBadge, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(8)
+            })
+            addView(postureHeadline)
+            addView(postureDistance)
+            addView(agencyStackContainer)
+        }
+
+        val heroScroll = ScrollView(activity).apply {
+            isFillViewport = true
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f
             )
-            setPadding(dp(20), dp(16), dp(20), dp(16))
-            addView(postureBadge, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-            addView(postureHeadline)
-            addView(postureDistance)
+            addView(
+                FrameLayout(activity).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    addView(
+                        heroInner,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            Gravity.CENTER
+                        )
+                    )
+                }
+            )
         }
 
         bottomConfidenceBar = TextView(activity).apply {
-            textSize = 14f
+            textSize = 13.5f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -254,11 +337,16 @@ class KokohoViews(
             }
             visibility = View.GONE
             setOnClickListener {
-                val primary = latestSnapshot?.primaryThreat ?: return@setOnClickListener
-                activity.startActivity(
-                    Intent(activity, DeviceDetailActivity::class.java)
-                        .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${primary.uuid}")
-                )
+                val primaryGroup = latestSnapshot?.monitorGroups?.firstOrNull()
+                if (primaryGroup != null) {
+                    showDistinctAgentsDialog(primaryGroup, System.currentTimeMillis())
+                } else {
+                    val primary = latestSnapshot?.primaryThreat ?: return@setOnClickListener
+                    activity.startActivity(
+                        Intent(activity, DeviceDetailActivity::class.java)
+                            .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${primary.uuid}")
+                    )
+                }
             }
         }
 
@@ -267,7 +355,7 @@ class KokohoViews(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            setPadding(dp(16), dp(8), dp(16), dp(24))
+            setPadding(dp(16), dp(6), dp(16), dp(22))
             addView(
                 bottomConfidenceBar,
                 FrameLayout.LayoutParams(
@@ -284,11 +372,11 @@ class KokohoViews(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            addView(heroZone)
+            addView(heroScroll)
             addView(bottomFooterWrapper)
         }
 
-        // 4. Build UTILITY View (with Settings as the last item)
+        // 4. Build UTILITY View
         utilityContainer = buildUtilityView()
 
         // 5. Build LOGS View
@@ -304,14 +392,57 @@ class KokohoViews(
         selectTab(Tab.MONITOR)
     }
 
+    fun syncSharePillState() {
+        val allowedInSettings = KokohoSignatures.isContributionAllowedInSettings(activity)
+        val sharingNow = KokohoSignatures.isSharingActive(activity)
+        when {
+            !allowedInSettings -> {
+                shareToggleButton.text = "Share Off"
+                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x33455A64)
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0x44FFFFFF)
+                shareToggleButton.strokeWidth = dp(1)
+                shareToggleButton.setTextColor(0x99FFFFFF.toInt())
+                shareToggleButton.alpha = 0.50f
+                TooltipCompat.setTooltipText(
+                    shareToggleButton,
+                    "Contribution disabled — enable in Settings > Privacy"
+                )
+            }
+            sharingNow -> {
+                shareToggleButton.text = "Sharing"
+                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0xFF00796B.toInt())
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0xCCFFFFFF.toInt())
+                shareToggleButton.strokeWidth = dp(1)
+                shareToggleButton.setTextColor(Color.WHITE)
+                shareToggleButton.alpha = 1.0f
+                TooltipCompat.setTooltipText(
+                    shareToggleButton,
+                    "Tap to pause sharing observations"
+                )
+            }
+            else -> {
+                shareToggleButton.text = "Share"
+                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x44000000)
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
+                shareToggleButton.strokeWidth = dp(1)
+                shareToggleButton.setTextColor(Color.WHITE)
+                shareToggleButton.alpha = 0.90f
+                TooltipCompat.setTooltipText(
+                    shareToggleButton,
+                    "Tap to share derived observations"
+                )
+            }
+        }
+    }
+
     fun syncRunningState(running: Boolean) {
         runningState = running
-        // Hide legacy Kokoho status bars & filter chips that MainActivity might re-show
         binding.threatBanner.visibility = View.GONE
         binding.bannerClose.visibility = View.GONE
         binding.statusText.visibility = View.GONE
         (binding.startStopButton.parent as? View)?.visibility = View.GONE
         (binding.filterChips.parent as? View)?.visibility = View.GONE
+        syncSharePillState()
 
         val auxStatus = if (KokohoSignatures.isAuxnetEnabled(activity)) {
             "Auxnet ${KokohoHubClient.statusLabel}"
@@ -348,7 +479,6 @@ class KokohoViews(
 
     fun selectTab(tab: Tab) {
         currentTab = tab
-        // Never show legacy filter chips in any tab
         (binding.filterChips.parent as? View)?.visibility = View.GONE
 
         when (tab) {
@@ -383,7 +513,6 @@ class KokohoViews(
     private fun applySurfaceThemeColors() {
         val snapColor = (latestSnapshot?.color ?: PostureColor.GREEN).colorArgb
 
-        // Stable status color background across Monitor, Map, List, and Utility
         binding.root.setBackgroundColor(snapColor)
         monitorContainer.setBackgroundColor(snapColor)
         utilityContainer.setBackgroundColor(snapColor)
@@ -409,6 +538,7 @@ class KokohoViews(
     }
 
     fun updatePosture(nowMs: Long = System.currentTimeMillis()) {
+        syncSharePillState()
         if (ScanForegroundService.isRunning && KokohoSignatures.isAuxnetEnabled(activity)) {
             KokohoHubClient.start(activity)
         }
@@ -416,25 +546,202 @@ class KokohoViews(
         latestSnapshot = snap
 
         postureHeadline.text = snap.headline
+        val groups = snap.monitorGroups
 
-        val primary = snap.primaryThreat
-        if (primary != null) {
+        if (groups.isNotEmpty() && snap.primaryThreat != null) {
             postureBadge.text = snap.color.badgeLabel
             postureBadge.visibility = View.VISIBLE
-            postureDistance.text = snap.distanceAndBearingText
+
+            // Keep postureHeadline / postureDistance populated for the lead agency and render
+            // all active agencies in strict priority rank order (ICE, DHS Air, CBP, HSI, Other Fed, Sheriff/TPD/Drone).
+            val leadGroup = groups.first()
+            postureHeadline.text = leadGroup.agency.friendlyLabel
+            postureHeadline.visibility = View.VISIBLE
+            postureHeadline.setOnClickListener {
+                showDistinctAgentsDialog(leadGroup, nowMs)
+            }
+
+            postureDistance.text = leadGroup.formatMonitorSubtext(activity, nowMs)
             postureDistance.visibility = View.VISIBLE
+            postureDistance.setOnClickListener {
+                showDistinctAgentsDialog(leadGroup, nowMs)
+            }
+
+            agencyStackContainer.removeAllViews()
+            if (groups.size > 1) {
+                agencyStackContainer.visibility = View.VISIBLE
+                for (g in groups.drop(1)) {
+                    val block = LinearLayout(activity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        gravity = Gravity.CENTER
+                        setPadding(dp(16), dp(12), dp(16), dp(8))
+                        setOnClickListener {
+                            showDistinctAgentsDialog(g, nowMs)
+                        }
+                    }
+                    val titleTv = TextView(activity).apply {
+                        text = g.agency.friendlyLabel
+                        textSize = 32f
+                        typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
+                        setTextColor(Color.WHITE)
+                        gravity = Gravity.CENTER
+                    }
+                    val subTv = TextView(activity).apply {
+                        text = g.formatMonitorSubtext(activity, nowMs)
+                        textSize = 15.5f
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextColor(0xEEFFFFFF.toInt())
+                        gravity = Gravity.CENTER
+                        setPadding(0, dp(2), 0, 0)
+                    }
+                    block.addView(titleTv)
+                    block.addView(subTv)
+                    agencyStackContainer.addView(block)
+                }
+            } else {
+                agencyStackContainer.visibility = View.GONE
+            }
+
             bottomConfidenceBar.text = snap.bottomConfidenceText
             bottomConfidenceBar.visibility = View.VISIBLE
         } else {
             postureBadge.text = ""
             postureBadge.visibility = View.GONE
+            postureHeadline.text = "No threats detected"
+            postureHeadline.visibility = View.VISIBLE
+            postureHeadline.setOnClickListener(null)
             postureDistance.text = ""
             postureDistance.visibility = View.GONE
+            agencyStackContainer.removeAllViews()
+            agencyStackContainer.visibility = View.GONE
             bottomConfidenceBar.text = ""
             bottomConfidenceBar.visibility = View.GONE
         }
 
         applySurfaceThemeColors()
+    }
+
+    /**
+     * Opens the Distinct Agents List modal for a tapped [AgencyMonitorGroup] (#25):
+     * Shows each distinct agent/unit with its photo or deterministic Gravatar/Identicon avatar,
+     * verified Name/Badge/Vehicle or RID/OUI/UAS ID/ICAO Hex, accuracy radius, and staleness time.
+     * Tapping an agent opens [DeviceDetailActivity].
+     */
+    fun showDistinctAgentsDialog(group: AgencyMonitorGroup, nowMs: Long = System.currentTimeMillis()) {
+        val scroll = ScrollView(activity)
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setBackgroundColor(0xFF121822.toInt())
+        }
+        scroll.addView(container)
+
+        val headerTv = TextView(activity).apply {
+            text = "${group.agency.friendlyLabel} — ${group.totalDistinctCount} Distinct ${if (group.totalDistinctCount == 1) "Agent / Unit" else "Agents / Units"}"
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(dp(4), dp(2), dp(4), dp(10))
+        }
+        container.addView(headerTv)
+
+        var dialogRef: AlertDialog? = null
+
+        for ((idx, unit) in group.distinctUnits.withIndex()) {
+            val witness = KokohoSignatures.getWitnessReport(activity, unit.uuid)
+            val customLabel = KokohoSignatures.getCustomEntityLabel(activity, unit.uuid)
+
+            val row = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(12), dp(10), dp(12), dp(10))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(10).toFloat()
+                    setColor(0xFF1E2634.toInt())
+                    setStroke(dp(1), 0x44FFFFFF)
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = dp(8)
+                }
+                setOnClickListener {
+                    dialogRef?.dismiss()
+                    activity.startActivity(
+                        Intent(activity, DeviceDetailActivity::class.java)
+                            .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${unit.uuid}")
+                    )
+                }
+            }
+
+            val avatarView = ImageView(activity).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
+                    marginEnd = dp(12)
+                }
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageBitmap(renderAgentAvatarBitmap(activity, unit.uuid, witness?.photoDataUrl, dp(44)))
+            }
+
+            val textCol = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val primaryTitle = when {
+                witness != null && (witness.agentName.isNotBlank() || witness.badgeNumber.isNotBlank()) -> {
+                    listOfNotNull(
+                        witness.agentName.takeIf { it.isNotBlank() },
+                        witness.badgeNumber.takeIf { it.isNotBlank() }?.let { "Badge #$it" },
+                        witness.vehicleNumber.takeIf { it.isNotBlank() }?.let { "Veh $it" }
+                    ).joinToString(" · ")
+                }
+                !customLabel.isNullOrBlank() -> customLabel
+                else -> "${group.agency.friendlyLabel} Unit #${idx + 1}"
+            }
+
+            val hwLine = unit.hardwareIdentifier
+                ?: unit.evidenceSources.firstOrNull()?.facetKey
+                ?: unit.uuid.take(8)
+
+            val accStr = KokohoPostureEngine.formatAccuracyOrEdge(activity, unit)
+            val ageStr = KokohoPostureEngine.formatStalenessAge(nowMs - unit.updatedAtMs)
+            val altExtra = if (unit.altitudeFtAgl != null) " · ${unit.altitudeFtAgl} ft AGL" else ""
+
+            val nameTv = TextView(activity).apply {
+                text = primaryTitle
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
+            }
+            val idTv = TextView(activity).apply {
+                text = hwLine
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setTextColor(0xFF93C5FD.toInt())
+                setPadding(0, dp(2), 0, 0)
+            }
+            val metaTv = TextView(activity).apply {
+                text = "$accStr$altExtra · $ageStr · ${unit.combinedConfidence}% conf"
+                textSize = 12.5f
+                setTextColor(0xDDFFFFFF.toInt())
+                setPadding(0, dp(2), 0, 0)
+            }
+
+            textCol.addView(nameTv)
+            textCol.addView(idTv)
+            textCol.addView(metaTv)
+
+            row.addView(avatarView)
+            row.addView(textCol)
+            container.addView(row)
+        }
+
+        dialogRef = AlertDialog.Builder(activity)
+            .setView(scroll)
+            .setNegativeButton("Close", null)
+            .create()
+        dialogRef.show()
     }
 
     private fun buildUtilityView(): ScrollView {
@@ -495,7 +802,6 @@ class KokohoViews(
             "Chronological detection & telemetry log with archive export"
         ) { activity.startActivity(Intent(activity, DetectionLogActivity::class.java)) }
 
-        // Dynamic "Update App" item — visible in Utility whenever an update is available
         val updateCardTitle = TextView(activity).apply {
             text = "Update App"
             textSize = 15.5f
@@ -544,7 +850,7 @@ class KokohoViews(
 
         addCard(
             "Settings",
-            "Agencies (DHS, ICE, CBP, Police, Sheriff, SAR, Fire), ADS-B aircraft, decay time, privacy, channel import, and units"
+            "Agencies (DHS, ICE, DHS Air, CBP, HSI, Sheriff, TPD, Drones), ADS-B aircraft, map fade, privacy, crash log export, and units"
         ) { activity.startActivity(Intent(activity, SettingsActivity::class.java)) }
 
         return ScrollView(activity).apply {
@@ -607,36 +913,60 @@ class KokohoViews(
         return scroll to logTv
     }
 
-    private fun refreshLogsText() {
-        val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
-        val lines = mutableListOf<String>()
-        val now = System.currentTimeMillis()
-        val snap = latestSnapshot ?: KokohoPostureEngine.evaluate(activity, now)
+    companion object {
+        /**
+         * Renders either the Witness Report uploaded photo (if present) or a deterministic
+         * 5x5 symmetric Gravatar/Identicon avatar for `entityUuid`.
+         */
+        fun renderAgentAvatarBitmap(
+            context: Context,
+            entityUuid: String,
+            photoDataUrl: String?,
+            sizePx: Int
+        ): Bitmap {
+            if (!photoDataUrl.isNullOrBlank()) {
+                runCatching {
+                    val base64 = photoDataUrl.substringAfter("base64,", photoDataUrl)
+                    val bytes = Base64.decode(base64, Base64.DEFAULT)
+                    val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (decoded != null) {
+                        return Bitmap.createScaledBitmap(decoded, sizePx, sizePx, true)
+                    }
+                }
+            }
+            val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            val hash = entityUuid.hashCode()
+            val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFF0F172A.toInt()
+            }
+            val r = sizePx / 8f
+            canvas.drawRoundRect(0f, 0f, sizePx.toFloat(), sizePx.toFloat(), r, r, bgPaint)
 
-        for (threat in snap.activeThreats) {
-            val t = fmt.format(Date(threat.updatedAtMs))
-            val dist = KokohoPostureEngine.formatShortDistance(activity, threat.estimatedDistanceM)
-            val mode = if (threat.isApproximatedPosition) "triangulated" else "radius"
-            lines += "[$t] [${threat.friendlyLabel}] $dist · ${threat.combinedConfidence}% conf (${threat.evidenceCount} signals, $mode)"
-        }
-        for (rf in RadioLog.current(now)) {
-            val t = fmt.format(Date(rf.lastSeen))
-            val sig = KokohoSignatures.matchFrequency(rf.freqHz)
-            val tag = sig?.friendlyLabel ?: "%.4f MHz".format(Locale.US, rf.freqHz / 1e6)
-            lines += "[$t] [RF] $tag · peak ${rf.peakSnrDb} dB SNR"
-        }
-        for (tg in SdrRadio.p25Log.rows().take(25)) {
-            val tgId = tg.tg ?: continue
-            val t = fmt.format(Date(tg.lastAt))
-            val sig = KokohoSignatures.matchTalkgroup(tgId)
-            val tag = sig?.friendlyLabel ?: "TG $tgId"
-            lines += "[$t] [P25] $tag (TG $tgId) · ${tg.calls} calls"
-        }
-
-        logsText.text = if (lines.isEmpty()) {
-            "No active detections in current window.\nMonitoring: ${snap.enabledScopeText}"
-        } else {
-            lines.joinToString("\n")
+            val hue = ((hash and 0x7FFFFFFF) % 360).toFloat()
+            val fgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.HSVToColor(floatArrayOf(hue, 0.72f, 0.92f))
+            }
+            val pad = sizePx * 0.14f
+            val cell = (sizePx - pad * 2f) / 5f
+            var bitIdx = 0
+            for (row in 0 until 5) {
+                for (col in 0..2) {
+                    val on = ((hash ushr (bitIdx % 28)) and 1) == 1
+                    bitIdx++
+                    if (on) {
+                        val x1 = pad + col * cell
+                        val y1 = pad + row * cell
+                        canvas.drawRect(x1, y1, x1 + cell, y1 + cell, fgPaint)
+                        val mirrorCol = 4 - col
+                        if (mirrorCol != col) {
+                            val mx1 = pad + mirrorCol * cell
+                            canvas.drawRect(mx1, y1, mx1 + cell, y1 + cell, fgPaint)
+                        }
+                    }
+                }
+            }
+            return bmp
         }
     }
 }

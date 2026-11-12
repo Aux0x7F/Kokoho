@@ -261,8 +261,8 @@ class SettingsActivity : AppCompatActivity() {
 
         masterDhsSwitch = addSwitchRow(
             section = secAgencies,
-            titleText = "DHS (Master Radio)",
-            subtitleText = "Master toggle for all Department of Homeland Security sub-agencies",
+            titleText = "DHS",
+            subtitleText = "Master toggle for Department of Homeland Security sub-agencies",
             checked = KokohoSignatures.isMasterDhsEnabled(this),
             keywords = "dhs master radio homeland security border patrol ice cbp hsi amo fps interop"
         ) { isOn ->
@@ -275,11 +275,11 @@ class SettingsActivity : AppCompatActivity() {
 
         val dhsOrdered = listOf(
             KokohoAgency.DHS_ICE to "ICE (ERO Tactical channels & fleet)",
-            KokohoAgency.DHS_CBP to "CBP (Border Patrol repeaters, tactical & fleet)",
+            KokohoAgency.DHS_AMO to "DHS Air (Air & Marine Operations & circling aircraft)",
+            KokohoAgency.DHS_CBP to "CBP (Border Patrol mobile inputs, tactical & fleet)",
             KokohoAgency.DHS_HSI to "HSI (Homeland Security Investigations)",
-            KokohoAgency.DHS_AMO to "DHS Air (Air & Marine Operations air-to-ground)",
-            KokohoAgency.DHS_FPS to "FPS (Federal Protective Service)",
-            KokohoAgency.DHS_INTEROP to "Federal Interop ( National / AZ federal interop channels)"
+            KokohoAgency.DHS_FPS to "FPS (Federal Protective Service — default OFF)",
+            KokohoAgency.DHS_INTEROP to "Federal Interop (National / AZ federal interop — default OFF)"
         )
         val enabledNow = KokohoSignatures.getEnabledAgencies(this)
         for ((ag, desc) in dhsOrdered) {
@@ -301,10 +301,11 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         val optionalOrdered = listOf(
-            KokohoAgency.FIRE to "Fire (TFD / Regional Fire & Wildland)",
+            KokohoAgency.DRONE to "Pro / Enterprise / Military Drones (Skydio, BRINC, Teal, Anafi USA, Enterprise & Remote ID with altitude)",
+            KokohoAgency.SHERIFF to "Sheriff (PCSO / County Sheriff)",
             KokohoAgency.POLICE to "Police (TPD / Municipal dispatch & tactical)",
-            KokohoAgency.SAR to "SAR (Search & Rescue / Mountain & Desert SAR)",
-            KokohoAgency.SHERIFF to "Sheriff (PCSO / County Sheriff)"
+            KokohoAgency.FIRE to "Fire (TFD / Regional Fire & Wildland)",
+            KokohoAgency.SAR to "SAR (Search & Rescue / Mountain & Desert SAR)"
         )
         for ((ag, desc) in optionalOrdered) {
             val sw = addSwitchRow(
@@ -312,7 +313,8 @@ class SettingsActivity : AppCompatActivity() {
                 titleText = ag.friendlyLabel,
                 subtitleText = desc,
                 checked = ag in enabledNow,
-                keywords = "optional ${ag.friendlyLabel} ${ag.fullName} tpd pcso tfd"
+                keywords = "optional ${ag.friendlyLabel} ${ag.fullName} drone skydio brinc tpd pcso tfd",
+                indentDp = 14
             ) { _ ->
                 if (!updatingAgencySwitches) {
                     KokohoSignatures.toggleAgency(this, ag)
@@ -413,14 +415,16 @@ class SettingsActivity : AppCompatActivity() {
 
         addSwitchRow(
             section = secPrivacy,
-            titleText = "Contribute observations",
-            subtitleText = "Trusts a hardened server and works without a VPN with minimal privacy concern. Observations are ephemeral in volatile memory; turning this off triggers an immediate and automatic purge of your contributed data.",
-            checked = KokohoSignatures.isContributeObservationsEnabled(this),
-            keywords = "privacy contribute observations server vpn ephemeral purge opt out"
+            titleText = "Enable Contribution (Share Pill)",
+            subtitleText = "Master switch for observation sharing. When disabled, the top-bar Share pill is greyed out and your contributed observations are purged immediately. When enabled, use the Share pill next to Scan to toggle live sharing of derived positions.",
+            checked = KokohoSignatures.isContributionAllowedInSettings(this),
+            keywords = "privacy contribute observations share sharing pill server vpn ephemeral purge opt out"
         ) { isOn ->
-            KokohoSignatures.setContributeObservationsEnabled(this, isOn)
+            KokohoSignatures.setContributionAllowedInSettings(this, isOn)
             if (!isOn) {
-                Toast.makeText(this, "Contributed observations purged", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Contribution disabled & observations purged", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Contribution enabled — use the Share pill next to Scan", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -434,26 +438,10 @@ class SettingsActivity : AppCompatActivity() {
             KokohoSignatures.setPushNotificationsEnabled(this, isOn)
         }
 
-        // ---- SECTION 4: Channel Lists ----
-        val secChannels = createSection(
-            "Channel Lists",
-            "Bundled catalog includes 51 AZ DHS/CBP/ICE/AMO channels + PCWIN talkgroups."
-        )
-
-        addActionRow(
-            section = secChannels,
-            titleText = "Import Channel List",
-            subtitleText = "Paste RadioReference CSV/TSV tables or SDRTrunk XML playlists",
-            buttonLabel = "Import",
-            keywords = "import channel list radioreference sdrtrunk csv tsv xml frequencies"
-        ) { _ ->
-            showChannelImportDialog()
-        }
-
-        // ---- SECTION 5: Units, Alerts & Appearance ----
+        // ---- SECTION 5: Units, Alerts & Diagnostics ----
         val secDisplay = createSection(
-            "Units, Alerts & Appearance",
-            "Distance formatting, alert sound/vibration, and light/dark theme."
+            "Units, Alerts & Diagnostics",
+            "Distance formatting, alert sound/vibration, live updates, and crash/debug log export."
         )
 
         addActionRow(
@@ -499,39 +487,22 @@ class SettingsActivity : AppCompatActivity() {
 
         addActionRow(
             section = secDisplay,
-            titleText = "Theme",
-            subtitleText = "Current: ${ThemeManager.current(this).title}",
-            buttonLabel = "Change",
-            keywords = "theme dark light appearance mode"
-        ) { subTv ->
-            val themes = listOf(
-                ThemeManager.AppTheme.SYSTEM,
-                ThemeManager.AppTheme.DARK,
-                ThemeManager.AppTheme.LIGHT
-            )
-            val labels = themes.map { it.title }.toTypedArray()
-            val cur = themes.indexOf(ThemeManager.current(this)).coerceAtLeast(0)
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Theme")
-                .setSingleChoiceItems(labels, cur) { dialog, which ->
-                    val picked = themes[which]
-                    ThemeManager.set(this, picked)
-                    subTv.text = "Current: ${picked.title}"
-                    dialog.dismiss()
-                    recreate()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-
-        addActionRow(
-            section = secDisplay,
             titleText = "Live App Updates",
             subtitleText = "Check Auxnet Hub (${KokohoHubClient.hubUrl(this)}) for newer Kokoho builds",
             buttonLabel = "Check Now",
             keywords = "update live apk version upgrade"
         ) { _ ->
             UpdateChecker.check(this, silent = false)
+        }
+
+        addActionRow(
+            section = secDisplay,
+            titleText = "Export Crash & Debug Logs",
+            subtitleText = "Share crash_log.txt, SDR telemetry, and process logcat for diagnostics",
+            buttonLabel = "Export",
+            keywords = "crash log debug export diagnostics share bug report"
+        ) { _ ->
+            exportCrashAndDebugLogs()
         }
 
         // Live search filtering
@@ -577,78 +548,52 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
-    private fun showAuxnetConfigDialog(subTv: TextView) {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(4))
-        }
-        val urlInput = EditText(this).apply {
-            hint = "Auxnet Hub URL"
-            setText(KokohoHubClient.hubUrl(this@SettingsActivity))
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        }
-        val contributeCheck = CheckBox(this).apply {
-            text = "Contribute detections to trusted Sensor Room"
-            isChecked = KokohoHubClient.isSensorContributor(this@SettingsActivity)
-        }
-        val roomInput = EditText(this).apply {
-            hint = "Detection Room ID (e.g. tucson-sector-1)"
-            setText(KokohoHubClient.roomId(this@SettingsActivity))
-        }
-        val keyInput = EditText(this).apply {
-            hint = "Room Capability Key (optional)"
-            setText(KokohoHubClient.roomKey(this@SettingsActivity))
-        }
-        layout.addView(urlInput)
-        layout.addView(contributeCheck)
-        layout.addView(roomInput)
-        layout.addView(keyInput)
+    private fun exportCrashAndDebugLogs() {
+        val sb = StringBuilder()
+        sb.appendLine("=== KOKOHO DIAGNOSTIC & CRASH LOG EXPORT ===")
+        sb.appendLine("Version: ${org.tucsoncommunity.kokoho.BuildConfig.VERSION_NAME} (${org.tucsoncommunity.kokoho.BuildConfig.VERSION_CODE})")
+        sb.appendLine("Timestamp: ${java.util.Date()}")
+        sb.appendLine()
 
+        val crashFile = java.io.File(filesDir, "crash_log.txt")
+        sb.appendLine("--- crash_log.txt ---")
+        if (crashFile.exists()) {
+            sb.appendLine(runCatching { crashFile.readText().takeLast(32_000) }.getOrDefault("(read error)"))
+        } else {
+            sb.appendLine("(No crash_log.txt recorded)")
+        }
+        sb.appendLine()
+
+        sb.appendLine("--- Recent SDR RadioLog ---")
+        for (r in org.tucsoncommunity.kokoho.sdr.RadioLog.current().take(30)) {
+            sb.appendLine("${r.mhz} MHz | name=${r.name ?: "none"} | snr=${r.peakSnrDb} dB | last=${r.lastSeen}")
+        }
+        sb.appendLine()
+
+        sb.appendLine("--- Recent Process Logcat ---")
+        runCatching {
+            val proc = Runtime.getRuntime().exec(arrayOf("logcat", "-d", "-t", "250"))
+            val logText = proc.inputStream.bufferedReader().use { it.readText() }
+            sb.appendLine(logText.takeLast(32_000))
+        }
+
+        val fullReport = sb.toString()
         MaterialAlertDialogBuilder(this)
-            .setTitle("Auxnet Hub & Detection Room")
-            .setView(layout)
-            .setPositiveButton("Save") { _, _ ->
-                KokohoHubClient.setHubUrl(this, urlInput.text.toString())
-                KokohoHubClient.setSensorContributor(
-                    this,
-                    contributeCheck.isChecked,
-                    roomInput.text.toString(),
-                    keyInput.text.toString()
-                )
-                subTv.text =
-                    "Endpoint: ${KokohoHubClient.hubUrl(this)} · Room contributor: ${if (KokohoHubClient.isSensorContributor(this)) "ON" else "OFF"}"
-                if (KokohoSignatures.isAuxnetEnabled(this)) {
-                    KokohoHubClient.checkinNow(this)
+            .setTitle("Crash & Debug Logs")
+            .setMessage(fullReport.take(4000))
+            .setPositiveButton("Share / Export") { _, _ ->
+                val share = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Kokoho Crash & Debug Logs")
+                    putExtra(Intent.EXTRA_TEXT, fullReport)
                 }
-                Toast.makeText(this, "Auxnet configuration saved", Toast.LENGTH_SHORT).show()
+                startActivity(Intent.createChooser(share, "Export Crash & Debug Logs"))
             }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showChannelImportDialog() {
-        val input = EditText(this).apply {
-            hint = "Paste RadioReference TSV/CSV lines or SDRTrunk <playlist> XML…"
-            minLines = 6
-            maxLines = 12
-            gravity = Gravity.TOP or Gravity.START
-        }
-        val pad = dp(18)
-        val container = FrameLayout(this).apply {
-            setPadding(pad, dp(8), pad, 0)
-            addView(input)
-        }
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Import Channels (RadioReference / SDRTrunk)")
-            .setMessage("Paste RadioReference CSV/TSV frequency tables or SDRTrunk XML playlists below:")
-            .setView(container)
-            .setPositiveButton("Import") { _, _ ->
-                val text = input.text?.toString().orEmpty()
-                val count = KokohoSignatures.importChannelText(this, text, "User Import")
-                syncRuntimeTargets()
-                Toast.makeText(this, "Imported $count channel entries", Toast.LENGTH_SHORT).show()
+            .setNeutralButton("Clear Crash Log") { _, _ ->
+                runCatching { if (crashFile.exists()) crashFile.delete() }
+                Toast.makeText(this, "Crash log cleared", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton("Close", null)
             .show()
     }
 

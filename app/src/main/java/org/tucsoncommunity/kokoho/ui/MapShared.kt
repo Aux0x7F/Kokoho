@@ -20,7 +20,8 @@ internal data class MapPin(
     /** Pinpointed (see [org.tucsoncommunity.kokoho.detect.Locator]): the circle it is very likely in. */
     val radiusM: Double? = null,
     val whereNote: String = "Position = where your phone was when this device's signal was strongest (approximate).",
-    val showDot: Boolean = true
+    val showDot: Boolean = true,
+    val opacity: Double = 1.0
 )
 
 internal object MapPins {

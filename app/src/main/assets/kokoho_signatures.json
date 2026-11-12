@@ -1,24 +1,25 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "defaultMasterGroups": {
     "DHS": {
-      "label": "DHS (Master)",
+      "label": "DHS",
       "defaultEnabled": true,
       "subAgencies": [
-        { "id": "DHS_CBP", "label": "CBP (Border Patrol)", "defaultEnabled": true },
         { "id": "DHS_ICE", "label": "ICE (ERO Tactical)", "defaultEnabled": true },
+        { "id": "DHS_AMO", "label": "DHS Air (AMO & Spy Planes)", "defaultEnabled": true },
+        { "id": "DHS_CBP", "label": "CBP (Border Patrol)", "defaultEnabled": true },
         { "id": "DHS_HSI", "label": "HSI (Investigations)", "defaultEnabled": true },
-        { "id": "DHS_AMO", "label": "AMO (Air & Marine)", "defaultEnabled": true },
-        { "id": "DHS_FPS", "label": "FPS (Federal Protective)", "defaultEnabled": true },
-        { "id": "DHS_INTEROP", "label": "DHS / Federal Interop", "defaultEnabled": true }
+        { "id": "DHS_FPS", "label": "FPS (Federal Protective)", "defaultEnabled": false },
+        { "id": "DHS_INTEROP", "label": "Federal Interop", "defaultEnabled": false }
       ]
     },
     "OTHER": {
-      "label": "Local & Emergency Services",
+      "label": "Local, Tactical Drones & Emergency",
       "defaultEnabled": false,
       "subAgencies": [
-        { "id": "POLICE", "label": "Police (TPD / Municipal)", "defaultEnabled": false },
         { "id": "SHERIFF", "label": "Sheriff (PCSO / County)", "defaultEnabled": false },
+        { "id": "POLICE", "label": "Police (TPD / Municipal)", "defaultEnabled": false },
+        { "id": "DRONE", "label": "Pro / Enterprise / Military Drones", "defaultEnabled": true },
         { "id": "FIRE", "label": "Fire (TFD / Wildland)", "defaultEnabled": false },
         { "id": "SAR", "label": "SAR (Search & Rescue)", "defaultEnabled": false }
       ]
@@ -31,8 +32,10 @@
     { "hz": 165237500, "nac": "169", "mode": "P25e", "alpha": "ICE-OMAHA", "description": "ICE / AMO Omaha Air-to-Ground & Tactical", "agency": "DHS_AMO", "role": "AIR_ASSET" },
     { "hz": 168862500, "nac": "293", "mode": "P25", "alpha": "AMO-A2G", "description": "DHS AMO Tactical Air-to-Ground", "agency": "DHS_AMO", "role": "AIR_ASSET" },
 
-    { "hz": 162062500, "nac": null, "mode": "P25e", "alpha": "CBP-WEST", "description": "BP West Law Tac", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
-    { "hz": 162312500, "nac": null, "mode": "P25e", "alpha": "CBP-EAST", "description": "BP East Law Tac", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
+    { "hz": 162062500, "nac": null, "mode": "P25e", "alpha": "CBP-WEST", "description": "BP West Law Tac (Direct Simplex)", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
+    { "hz": 162312500, "nac": null, "mode": "P25e", "alpha": "CBP-EAST", "description": "BP East Law Tac (Direct Simplex)", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
+    { "hz": 162850000, "nac": "210", "mode": "P25e", "alpha": "CBP-TUS-IN", "description": "Tucson Sector Vote Scan Mobile Input (Close Unit)", "agency": "DHS_CBP", "role": "MOBILE_INPUT" },
+    { "hz": 163025000, "nac": "001", "mode": "P25e", "alpha": "CBP-LEMM-IN", "description": "Tucson Mt Lemmon Mobile Input (Close Unit)", "agency": "DHS_CBP", "role": "MOBILE_INPUT" },
     { "hz": 163625000, "nac": null, "mode": "P25e", "alpha": "CBP-YUMA", "description": "Yuma Law Dispatch", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 163650000, "nac": "001", "mode": "P25e", "alpha": "CBP-MULTI(C)", "description": "South Mountain / Multiple Locations Law Tac", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
     { "hz": 163675000, "nac": "505", "mode": "P25e", "alpha": "CBP-MULTI(B)", "description": "Multiple Locations / Yuma Law Tac", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
@@ -40,8 +43,10 @@
     { "hz": 163700000, "nac": "169", "mode": "P25e", "alpha": "CBP TAC-a", "description": "DHS CBP / ICE Tactical (a)", "agency": "DHS_ICE", "role": "DIRECT_TACTICAL" },
     { "hz": 163712500, "nac": "115", "mode": "P25e", "alpha": "CBP-CochiseCo", "description": "CBP Cochise County Law Dispatch", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 163725000, "nac": "001", "mode": "P25e", "alpha": "CBP-LEMM 1", "description": "Tucson (Pima County) - Mt Lemmon 1", "agency": "DHS_CBP", "role": "REPEATER" },
-    { "hz": 163775000, "nac": null, "mode": "P25e", "alpha": "CBP-Multi(D)", "description": "Multiple Locations Law Dispatch", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
+    { "hz": 163775000, "nac": null, "mode": "P25e", "alpha": "CBP-Multi(D)", "description": "Multiple Locations Law Tactical", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
     { "hz": 164100000, "nac": "169", "mode": "P25e", "alpha": "CBP TAC-b", "description": "DHS CBP / ICE Tactical (b)", "agency": "DHS_ICE", "role": "DIRECT_TACTICAL" },
+    { "hz": 164600000, "nac": "201", "mode": "P25e", "alpha": "CBP-KEY-IN", "description": "Keystone Peak Mobile Input (Close Unit)", "agency": "DHS_CBP", "role": "MOBILE_INPUT" },
+    { "hz": 164775000, "nac": "302", "mode": "P25e", "alpha": "CBP-RED-IN", "description": "Red Mountain Mobile Input (Close Unit)", "agency": "DHS_CBP", "role": "MOBILE_INPUT" },
     { "hz": 165337500, "nac": "340", "mode": "P25e", "alpha": "CBP VS14 Input", "description": "Vote Scan 14 Mobile Input (Close Unit)", "agency": "DHS_CBP", "role": "MOBILE_INPUT" },
     { "hz": 165900000, "nac": null, "mode": "P25e", "alpha": "CBP-MULTI(A)", "description": "Multiple Locations Law Tac", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
     { "hz": 165975000, "nac": "001", "mode": "P25e", "alpha": "CBP-RED MTN", "description": "Red Mountain (Santa Cruz) Law Dispatch", "agency": "DHS_CBP", "role": "REPEATER" },
@@ -57,13 +62,14 @@
     { "hz": 170337500, "nac": "670", "mode": "P25e", "alpha": "CBP UIScna", "description": "Vote Scan (a)", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 170350000, "nac": "230", "mode": "P25e", "alpha": "CBP-Wide C/D/E", "description": "Wide C/D/E Nogales & Phoenix VS14a", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 170437500, "nac": "301", "mode": "P25e", "alpha": "CBP Ajo A/B", "description": "Ajo A / Ajo B / Far East AZ", "agency": "DHS_CBP", "role": "REPEATER" },
+    { "hz": 167862500, "nac": null, "mode": "P25e", "alpha": "ICE-TAC-ORA", "description": "DHS ICE / Federal Tactical Simplex (167.8625 MHz)", "agency": "DHS_ICE", "role": "DIRECT_TACTICAL" },
     { "hz": 170625000, "nac": "001", "mode": "P25e", "alpha": "CBP TAC", "description": "BP Tactical Simplex", "agency": "DHS_CBP", "role": "DIRECT_TACTICAL" },
     { "hz": 171037500, "nac": "201", "mode": "P25e", "alpha": "CBP Keystone", "description": "Keystone Peak - I-19, Sahuarita & Green Valley South of Tucson", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 171187500, "nac": "110", "mode": "P25e", "alpha": "CBP VS1", "description": "Vote Scan 1", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 171212500, "nac": "340", "mode": "P25e", "alpha": "CBP VS14b", "description": "Phoenix Area - Vote Scan 14 (b)", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 171325000, "nac": "20C", "mode": "P25e", "alpha": "CBP Lmn-1", "description": "Mt Lemmon-1 / Kendrick Peak", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 171337500, "nac": "310", "mode": "P25e", "alpha": "CBP VS5d", "description": "Vote Scan 5 - Childs Mountain", "agency": "DHS_CBP", "role": "REPEATER" },
-    { "hz": 171387500, "nac": "CC9", "mode": "DMR", "alpha": "FED-DMR-TUS", "description": "Tucson Verified VHF Federal/Aux DMR (Color Code 9)", "agency": "DHS_ICE", "role": "DIRECT_TACTICAL" },
+    { "hz": 171387500, "nac": "CC9", "mode": "DMR", "alpha": "FED-DMR-TUS", "description": "Tucson VHF Federal/Aux DMR Repeater (Color Code 9)", "agency": "DHS_ICE", "role": "REPEATER" },
     { "hz": 172062500, "nac": "20A", "mode": "P25e", "alpha": "CBP Sacaton", "description": "Sacaton", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 172237500, "nac": "710", "mode": "P25e", "alpha": "CBP VS13a", "description": "Vote Scan 13 (a) Phoenix", "agency": "DHS_CBP", "role": "REPEATER" },
     { "hz": 172712500, "nac": "310", "mode": "P25e", "alpha": "CBP VS5b", "description": "Vote Scan 5 - Sacaton", "agency": "DHS_CBP", "role": "REPEATER" },
@@ -80,6 +86,7 @@
     { "hz": 173937500, "nac": "230", "mode": "P25e", "alpha": "CBP VS14c", "description": "Tucson Verified P25 (NAC 230) / VS14c", "agency": "DHS_CBP", "role": "REPEATER" },
 
     { "hz": 165925000, "nac": "169", "mode": "P25e", "alpha": "HSI-SURV-1", "description": "DHS HSI Surveillance / Tactical 1", "agency": "DHS_HSI", "role": "DIRECT_TACTICAL" },
+    { "hz": 167712500, "nac": "653", "mode": "P25e", "alpha": "ICE-ERO-TAC", "description": "DHS ICE ERO Tactical Simplex", "agency": "DHS_ICE", "role": "DIRECT_TACTICAL" },
     { "hz": 168350000, "nac": "169", "mode": "P25e", "alpha": "HSI-TAC-2", "description": "DHS HSI Tactical 2", "agency": "DHS_HSI", "role": "DIRECT_TACTICAL" },
     { "hz": 170750000, "nac": "301", "mode": "P25e", "alpha": "HSI-AZ-OPS", "description": "DHS HSI Arizona Operations", "agency": "DHS_HSI", "role": "REPEATER" },
 
@@ -109,10 +116,21 @@
     { "minTg": 60000, "maxTg": 65535, "agency": "DHS_INTEROP", "label": "Federal / DHS Interop Patch Talkgroups" }
   ],
   "fleetOuis": [
+    { "prefix": "38:1D:14", "agency": "DRONE", "label": "Skydio Autonomous Tactical Drone (X2/X10)", "confidence": 95 },
+    { "prefix": "D8:80:39", "agency": "DRONE", "label": "Teal Golden Eagle Tactical sUAS", "confidence": 92 },
+    { "prefix": "90:03:B7", "agency": "DRONE", "label": "Parrot Anafi USA / Gov Tactical Drone", "confidence": 90 },
+    { "prefix": "A0:14:3D", "agency": "DRONE", "label": "Parrot Anafi USA / Gov Tactical Drone", "confidence": 90 },
+    { "prefix": "EC:5B:73", "agency": "DRONE", "label": "Autel Robotics EVO II Enterprise sUAS", "confidence": 88 },
+    { "prefix": "18:D7:93", "agency": "DRONE", "label": "Autel Robotics Enterprise sUAS", "confidence": 88 },
+    { "prefix": "60:60:1F", "agency": "DRONE", "label": "DJI Matrice / Mavic Enterprise sUAS", "confidence": 85 },
+    { "prefix": "48:1C:B9", "agency": "DRONE", "label": "DJI Enterprise sUAS", "confidence": 85 },
+    { "prefix": "D4:13:F8", "agency": "DHS_HSI", "label": "Peplink Unmarked Fleet Vehicle Router (MAX BR1/BR2)", "confidence": 86 },
+    { "prefix": "10:56:CA", "agency": "DHS_HSI", "label": "Peplink Tactical / Fleet Vehicle Router", "confidence": 82 },
     { "prefix": "00:30:44", "agency": "DHS_CBP", "label": "Cradlepoint Fleet Vehicle Router (IBR900/IBR1700)", "confidence": 80 },
     { "prefix": "00:14:3E", "agency": "DHS_CBP", "label": "Sierra Wireless AirLink Fleet Telemetry Router", "confidence": 78 },
     { "prefix": "00:A0:D5", "agency": "DHS_CBP", "label": "Sierra Wireless AirLink MG90/XR80 Vehicle Router", "confidence": 78 },
     { "prefix": "00:25:DF", "agency": "POLICE", "label": "Axon Body Camera / Fleet Hub", "confidence": 75 },
+    { "prefix": "24:B2:B9", "agency": "POLICE", "label": "Flock Safety / LPR Optical Sensor", "confidence": 80 },
     { "prefix": "00:04:7D", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX / Vehicle Interface", "confidence": 65 },
     { "prefix": "00:18:85", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX Radio / Mission Critical", "confidence": 65 },
     { "prefix": "4C:CC:34", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX / Vehicular Repeater", "confidence": 65 }

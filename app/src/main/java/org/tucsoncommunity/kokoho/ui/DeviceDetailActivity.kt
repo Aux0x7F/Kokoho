@@ -1,9 +1,13 @@
 package org.tucsoncommunity.kokoho.ui
 
+import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
@@ -13,8 +17,10 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
+import android.util.Base64
 import android.view.Gravity
 import android.view.Menu
 import android.view.MenuItem
@@ -22,15 +28,22 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.PopupMenu
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.button.MaterialButton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.tucsoncommunity.kokoho.data.DeviceNames
 import org.tucsoncommunity.kokoho.data.Favorites
 import org.tucsoncommunity.kokoho.data.WhitelistCache
@@ -39,27 +52,25 @@ import org.tucsoncommunity.kokoho.posture.EvidenceBadge
 import org.tucsoncommunity.kokoho.posture.KokohoAgency
 import org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
 import org.tucsoncommunity.kokoho.posture.KokohoSignatures
+import org.tucsoncommunity.kokoho.posture.KokohoViews
 import org.tucsoncommunity.kokoho.posture.PostureColor
+import org.tucsoncommunity.kokoho.posture.WitnessReportRecord
 import org.tucsoncommunity.kokoho.service.DeviceRegistry
 import org.tucsoncommunity.kokoho.service.ScanForegroundService
 import org.tucsoncommunity.kokoho.util.applySystemBarInsets
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Kokoho Entity Details Activity — opened by tapping an item in List or tapping the confidence pill
- * at the bottom of Monitor:
- *  1. Entity classification row with a right-aligned pencil icon that edits in-place (turning into a
- *     checkmark symbol while editing; saved locally only).
- *  2. Full-width 1/4-screen Map of the current supposed radius position.
- *  3. Center radius coordinates (clicking copies coords to clipboard) and accuracy radius.
- *  4. Section for details of all evidence.
- *  5. Top-right '...' overflow menu (replacing the chart icon and action pills) with items limited to:
- *     Whitelist (local only), Watch (equivalent to Favorite), and Share.
+ * Kokoho Entity Details Activity — opened by tapping an agent in the Distinct Agents List or Map:
+ *  1. Agent photo / Gravatar identicon + classification row with inline edit pencil/checkmark.
+ *  2. Full-width 1/4-screen Map of the last-seen radius position (or aircraft/drone position).
+ *  3. Center radius coordinates (click to copy), accuracy radius, staleness time, and altitude (if airborne).
+ *  4. Verified Witness Report card + "Witness Report" button to submit/update verified agency,
+ *     department, badge number, agent name, vehicle number, notes, and optional photo upload (#23, #25).
+ *  5. Evidence Details list.
  */
 class DeviceDetailActivity : AppCompatActivity() {
 
@@ -70,6 +81,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         private const val MENU_WHITELIST = 101
         private const val MENU_WATCH = 102
         private const val MENU_SHARE = 103
+        private const val MENU_WITNESS = 104
 
         /** The frequency in a radio transmission's log key ("RADIO 154.4300 MHz"), else null. */
         fun radioHz(key: String): Long? =
@@ -80,6 +92,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     private lateinit var entityUuid: String
 
     private lateinit var rootLayout: LinearLayout
+    lateinit var avatarImageView: ImageView
+        private set
     lateinit var classificationText: TextView
         private set
     lateinit var classificationEdit: EditText
@@ -90,7 +104,15 @@ class DeviceDetailActivity : AppCompatActivity() {
         private set
     lateinit var coordsText: TextView
         private set
+    lateinit var stalenessAndMetaText: TextView
+        private set
     lateinit var accuracyRadiusText: TextView
+        private set
+    lateinit var witnessSummaryCard: LinearLayout
+        private set
+    lateinit var witnessSummaryText: TextView
+        private set
+    lateinit var witnessReportButton: MaterialButton
         private set
     lateinit var evidenceContainer: LinearLayout
         private set
@@ -101,13 +123,26 @@ class DeviceDetailActivity : AppCompatActivity() {
     private var mapEngine: MapEngine? = null
     private var rfMap: RfMap? = null
 
+    private var currentAgency: KokohoAgency = KokohoAgency.DHS_CBP
     private var currentClassification: String = "CBP"
     private var currentLat: Double = 32.2226
     private var currentLon: Double = -110.9747
     private var currentRadiusM: Int = 450
     private var currentIsPinpointed: Boolean = false
     private var currentPostureColor: Int = PostureColor.YELLOW.colorArgb
+    private var currentUpdatedAtMs: Long = System.currentTimeMillis()
+    private var currentAltitudeFt: Int? = null
+    private var currentHardwareId: String? = null
     private var currentEvidence: List<EvidenceBadge> = emptyList()
+
+    private var pendingPhotoCallback: ((String) -> Unit)? = null
+    private val pickPhotoLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+        if (uri != null) {
+            encodeUriToDataUrl(uri)?.let { dataUrl ->
+                pendingPhotoCallback?.invoke(dataUrl)
+            }
+        }
+    }
 
     private val density get() = resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * density).toInt()
@@ -122,7 +157,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         }
         entityUuid = KokohoSignatures.normalizeEntityId(rawKey)
 
-        title = "Details"
+        title = "Agent / Unit Details"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
         val statusBgColor = KokohoPostureEngine.currentPostureColorArgb(this)
@@ -137,22 +172,30 @@ class DeviceDetailActivity : AppCompatActivity() {
         }
         rootLayout.applySystemBarInsets()
 
-        // 1. Entity Classification Row (Left: Classification label / inline EditText; Right: Pencil <-> Checkmark icon)
+        // 1. Entity Header Row (Avatar/Photo + Classification label / inline EditText + Pencil/Checkmark)
         val classificationRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), dp(14), dp(14), dp(12))
+            setPadding(dp(16), dp(12), dp(14), dp(12))
+        }
+
+        avatarImageView = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                marginEnd = dp(12)
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setOnClickListener { showWitnessReportDialog() }
         }
 
         classificationText = TextView(this).apply {
-            textSize = 26f
+            textSize = 24f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
             setTextColor(Color.WHITE)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
         classificationEdit = EditText(this).apply {
-            textSize = 24f
+            textSize = 22f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setHintTextColor(0xAAFFFFFF.toInt())
@@ -198,13 +241,14 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
         }
 
+        classificationRow.addView(avatarImageView)
         classificationRow.addView(classificationText)
         classificationRow.addView(classificationEdit)
         classificationRow.addView(editCheckButton)
         rootLayout.addView(classificationRow)
 
-        // 2. Full-Width 1/4-Screen Map of Current Supposed Radius Position
-        val quarterScreenPx = (resources.displayMetrics.heightPixels / 4).coerceAtLeast(dp(180))
+        // 2. Full-Width 1/4-Screen Last-Seen Map
+        val quarterScreenPx = (resources.displayMetrics.heightPixels / 4).coerceAtLeast(dp(175))
         mapContainer = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -239,7 +283,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
         }
 
-        // 3. Scrollable lower pane: Center Radius Coordinates (click to copy) + Accuracy Radius + Evidence Details
+        // 3. Scrollable lower pane: Coordinates + Staleness + Witness Report + Evidence Details
         val lowerScroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -265,7 +309,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = dp(14)
+                bottomMargin = dp(12)
             }
             setOnClickListener {
                 copyCoordsToClipboard()
@@ -273,7 +317,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         }
 
         coordsText = TextView(this).apply {
-            textSize = 15.5f
+            textSize = 15f
             typeface = Typeface.MONOSPACE
             setTextColor(Color.WHITE)
             setOnClickListener {
@@ -281,15 +325,80 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
         }
 
+        stalenessAndMetaText = TextView(this).apply {
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xDDFFFFFF.toInt())
+            setPadding(0, dp(4), 0, 0)
+        }
+
         accuracyRadiusText = TextView(this).apply {
             visibility = View.GONE
         }
 
         coordsCard.addView(coordsText)
+        coordsCard.addView(stalenessAndMetaText)
         coordsCard.addView(accuracyRadiusText)
         lowerContent.addView(coordsCard)
 
-        // 4. Section for Details of All Evidence
+        // 4. Witness Report Summary Card & Action Button (#23, #25)
+        witnessSummaryCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(12).toFloat()
+                setColor(0x44000000)
+                setStroke(dp(1), 0x88FFFFFF.toInt())
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(10)
+            }
+            visibility = View.GONE
+        }
+
+        val witnessCardHeader = TextView(this).apply {
+            text = "VERIFIED WITNESS REPORT"
+            textSize = 11.5f
+            letterSpacing = 0.08f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xFF93C5FD.toInt())
+        }
+
+        witnessSummaryText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(4), 0, 0)
+        }
+
+        witnessSummaryCard.addView(witnessCardHeader)
+        witnessSummaryCard.addView(witnessSummaryText)
+        lowerContent.addView(witnessSummaryCard)
+
+        witnessReportButton = MaterialButton(this).apply {
+            text = "Submit / Update Witness Report"
+            textSize = 13.5f
+            typeface = Typeface.DEFAULT_BOLD
+            cornerRadius = dp(10)
+            backgroundTintList = ColorStateList.valueOf(0x3D000000)
+            strokeColor = ColorStateList.valueOf(Color.WHITE)
+            strokeWidth = dp(1)
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(14)
+            }
+            setOnClickListener {
+                showWitnessReportDialog()
+            }
+        }
+        lowerContent.addView(witnessReportButton)
+
+        // 5. Section for Details of All Evidence
         val evidenceHeader = TextView(this).apply {
             text = "Evidence Details"
             textSize = 16f
@@ -351,6 +460,7 @@ class DeviceDetailActivity : AppCompatActivity() {
     }
 
     private fun refreshDetails() {
+        val nowMs = System.currentTimeMillis()
         val statusColor = KokohoPostureEngine.currentPostureColorArgb(this)
         rootLayout.setBackgroundColor(statusColor)
 
@@ -358,12 +468,16 @@ class DeviceDetailActivity : AppCompatActivity() {
         val userFix = ScanForegroundService.lastFix
 
         if (threat != null) {
+            currentAgency = threat.agency
             currentClassification = KokohoSignatures.resolveEntityLabel(this, entityUuid, threat.friendlyLabel)
             currentLat = threat.lat ?: userFix?.latitude ?: 32.2226
             currentLon = threat.lon ?: userFix?.longitude ?: -110.9747
             currentRadiusM = threat.mapCircleRadiusM
             currentIsPinpointed = threat.isPinpointed
             currentPostureColor = threat.posture.colorArgb
+            currentUpdatedAtMs = threat.updatedAtMs
+            currentAltitudeFt = threat.altitudeFtAgl
+            currentHardwareId = threat.hardwareIdentifier
             currentEvidence = threat.evidenceSources
         } else {
             val snap = DeviceRegistry.get(rawKey)
@@ -379,6 +493,9 @@ class DeviceDetailActivity : AppCompatActivity() {
             currentRadiusM = 400
             currentIsPinpointed = false
             currentPostureColor = statusColor
+            currentUpdatedAtMs = snap?.lastSeen ?: nowMs
+            currentAltitudeFt = (snap?.remoteId?.heightM ?: snap?.remoteId?.altitudeGeoM)?.let { (it * 3.28084).toInt() }
+            currentHardwareId = snap?.mac ?: entityUuid.take(12)
             currentEvidence = if (snap != null) {
                 snap.hits.map { h ->
                     EvidenceBadge(
@@ -394,6 +511,11 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
         }
 
+        val witness = KokohoSignatures.getWitnessReport(this, entityUuid)
+        avatarImageView.setImageBitmap(
+            KokohoViews.renderAgentAvatarBitmap(this, entityUuid, witness?.photoDataUrl, dp(48))
+        )
+
         if (!isEditingClassification) {
             classificationText.text = currentClassification
         }
@@ -403,9 +525,153 @@ class DeviceDetailActivity : AppCompatActivity() {
         coordsText.text = "$coordStr ($radiusStr)"
         accuracyRadiusText.text = radiusStr
 
+        val ageStr = KokohoPostureEngine.formatStalenessAge(nowMs - currentUpdatedAtMs)
+        val extraParts = mutableListOf("Last seen: $ageStr")
+        currentHardwareId?.takeIf { it.isNotBlank() }?.let { extraParts += it }
+        currentAltitudeFt?.let { extraParts += "$it ft AGL" }
+        stalenessAndMetaText.text = extraParts.joinToString(" · ")
+
+        if (witness != null) {
+            val lines = mutableListOf<String>()
+            val agLabel = KokohoAgency.fromCode(witness.agencyCode)?.friendlyLabel ?: witness.agencyCode
+            lines += "Agency: $agLabel${if (witness.department.isNotBlank()) " (${witness.department})" else ""}"
+            if (witness.agentName.isNotBlank()) lines += "Name: ${witness.agentName}"
+            if (witness.badgeNumber.isNotBlank()) lines += "Badge #: ${witness.badgeNumber}"
+            if (witness.vehicleNumber.isNotBlank()) lines += "Vehicle / Tail #: ${witness.vehicleNumber}"
+            if (witness.notes.isNotBlank()) lines += "Notes: ${witness.notes}"
+            witnessSummaryText.text = lines.joinToString("\n")
+            witnessSummaryCard.visibility = View.VISIBLE
+            witnessReportButton.text = "Update Witness Report"
+        } else {
+            witnessSummaryCard.visibility = View.GONE
+            witnessReportButton.text = "Submit Witness Report"
+        }
+
         renderEvidenceList()
         renderMapPosition()
     }
+
+    /**
+     * Opens the Witness Report dialog (#23, #25) to submit/update verified agency, department,
+     * badge number, agent name, vehicle number, notes, and optional photo upload.
+     */
+    fun showWitnessReportDialog() {
+        val existing = KokohoSignatures.getWitnessReport(this, entityUuid)
+        val scroll = ScrollView(this)
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(14), dp(18), dp(10))
+        }
+        scroll.addView(form)
+
+        val agencies = KokohoAgency.entries.sortedBy { it.priorityRank }
+        val agencyLabels = agencies.map { "${it.friendlyLabel} — ${it.fullName}" }
+        val agencySpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@DeviceDetailActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                agencyLabels
+            )
+        }
+        val initialAgency = existing?.agencyCode?.let { KokohoAgency.fromCode(it) } ?: currentAgency
+        val initialIdx = agencies.indexOf(initialAgency).coerceAtLeast(0)
+        agencySpinner.setSelection(initialIdx)
+
+        fun field(hintText: String, initialValue: String): EditText = EditText(this).apply {
+            hint = hintText
+            setText(initialValue)
+            textSize = 14.5f
+            setSingleLine(true)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+            }
+        }
+
+        val deptInput = field("Department / Station (e.g. ERO Tucson, PCSO)", existing?.department.orEmpty())
+        val badgeInput = field("Badge Number", existing?.badgeNumber.orEmpty())
+        val nameInput = field("Agent / Officer Name", existing?.agentName.orEmpty())
+        val vehicleInput = field("Vehicle / License / Tail Number", existing?.vehicleNumber.orEmpty())
+        val notesInput = field("Notes / Uniform / Activity", existing?.notes.orEmpty()).apply {
+            setSingleLine(false)
+            minLines = 2
+        }
+
+        var selectedPhotoDataUrl: String? = existing?.photoDataUrl
+        val photoStatusTv = TextView(this).apply {
+            text = if (selectedPhotoDataUrl != null) "Photo attached ✓" else "No photo attached"
+            textSize = 12.5f
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+        }
+
+        val attachPhotoBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            text = "Attach / Replace Photo"
+            textSize = 12.5f
+            setOnClickListener {
+                pendingPhotoCallback = { dataUrl ->
+                    selectedPhotoDataUrl = dataUrl
+                    photoStatusTv.text = "Photo attached ✓"
+                }
+                runCatching { pickPhotoLauncher.launch("image/*") }
+            }
+        }
+
+        form.addView(TextView(this).apply {
+            text = "Verified Agency"
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        form.addView(agencySpinner)
+        form.addView(deptInput)
+        form.addView(badgeInput)
+        form.addView(nameInput)
+        form.addView(vehicleInput)
+        form.addView(notesInput)
+        form.addView(photoStatusTv)
+        form.addView(attachPhotoBtn)
+
+        AlertDialog.Builder(this)
+            .setTitle("Witness Report")
+            .setView(scroll)
+            .setPositiveButton("Save & Sync") { _, _ ->
+                val chosenAgency = agencies.getOrElse(agencySpinner.selectedItemPosition) { currentAgency }
+                val primaryFacet = currentEvidence.firstOrNull()?.facetKey ?: entityUuid
+                val report = WitnessReportRecord(
+                    targetKey = primaryFacet,
+                    entityUuid = entityUuid,
+                    agencyCode = chosenAgency.id,
+                    department = deptInput.text?.toString()?.trim().orEmpty(),
+                    badgeNumber = badgeInput.text?.toString()?.trim().orEmpty(),
+                    agentName = nameInput.text?.toString()?.trim().orEmpty(),
+                    vehicleNumber = vehicleInput.text?.toString()?.trim().orEmpty(),
+                    notes = notesInput.text?.toString()?.trim().orEmpty(),
+                    photoDataUrl = selectedPhotoDataUrl,
+                    updatedAtMs = System.currentTimeMillis()
+                )
+                KokohoSignatures.saveWitnessReport(this, report, syncRemote = true)
+                Toast.makeText(this, "Witness report saved", Toast.LENGTH_SHORT).show()
+                refreshDetails()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun encodeUriToDataUrl(uri: Uri): String? = runCatching {
+        contentResolver.openInputStream(uri)?.use { stream ->
+            val raw = BitmapFactory.decodeStream(stream) ?: return@use null
+            val maxDim = 256
+            val scale = minOf(maxDim.toFloat() / raw.width.coerceAtLeast(1), maxDim.toFloat() / raw.height.coerceAtLeast(1), 1f)
+            val w = (raw.width * scale).toInt().coerceAtLeast(1)
+            val h = (raw.height * scale).toInt().coerceAtLeast(1)
+            val scaled = Bitmap.createScaledBitmap(raw, w, h, true)
+            val bos = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 78, bos)
+            val b64 = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+            "data:image/jpeg;base64,$b64"
+        }
+    }.getOrNull()
 
     private fun renderEvidenceList() {
         evidenceContainer.removeAllViews()
@@ -494,16 +760,17 @@ class DeviceDetailActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        // Only '...' overflow items: Whitelist (local only), Watch (Favorite), and Share. No chart icon.
         menu.clear()
         val whitelisted = KokohoSignatures.isEntityWhitelisted(this, entityUuid) || WhitelistCache.contains(rawKey)
         val watched = KokohoSignatures.isEntityWatched(this, entityUuid) || Favorites.contains(rawKey)
 
-        menu.add(0, MENU_WHITELIST, 0, if (whitelisted) "Remove from Whitelist" else "Whitelist")
+        menu.add(0, MENU_WITNESS, 0, "Witness Report")
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        menu.add(0, MENU_WATCH, 1, if (watched) "Unwatch" else "Watch")
+        menu.add(0, MENU_WHITELIST, 1, if (whitelisted) "Remove from Whitelist" else "Whitelist")
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
-        menu.add(0, MENU_SHARE, 2, "Share")
+        menu.add(0, MENU_WATCH, 2, if (watched) "Unwatch" else "Watch")
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+        menu.add(0, MENU_SHARE, 3, "Share")
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         return true
     }
@@ -520,6 +787,10 @@ class DeviceDetailActivity : AppCompatActivity() {
         return when (item.itemId) {
             android.R.id.home -> {
                 finish()
+                true
+            }
+            MENU_WITNESS -> {
+                showWitnessReportDialog()
                 true
             }
             MENU_WHITELIST -> {
@@ -620,14 +891,12 @@ class DeviceDetailActivity : AppCompatActivity() {
             val w = b.width().toFloat()
             val h = b.height().toFloat()
             val path = Path().apply {
-                // Classic angled edit pencil icon (bottom-left tip to top-right eraser)
                 moveTo(w * 0.26f, h * 0.74f)
                 lineTo(w * 0.30f, h * 0.58f)
                 lineTo(w * 0.64f, h * 0.24f)
                 lineTo(w * 0.76f, h * 0.36f)
                 lineTo(w * 0.42f, h * 0.70f)
                 close()
-                // Ferrule collar line near eraser
                 moveTo(w * 0.57f, h * 0.31f)
                 lineTo(w * 0.69f, h * 0.43f)
             }

@@ -37,7 +37,33 @@ object KokohoHubClient {
     private const val KEY_SENSOR_SLOT = "sensor_slot"
 
     private const val CHECKIN_INTERVAL_MS = 5 * 60_000L
-    private const val OBJECT_TTL_MS = 15 * 60_000L
+    private const val OBJECT_TTL_MS = 150 * 60_000L
+
+    data class RemoteFlightTrack(
+        @SerializedName("track_uuid") val trackUuid: String = "",
+        @SerializedName("entity_uuid") val entityUuid: String = "",
+        val category: String = "DHS_AMO",
+        val label: String = "",
+        @SerializedName("started_at_ms") val startedAtMs: Long = 0L,
+        @SerializedName("ended_at_ms") val endedAtMs: Long = 0L,
+        @SerializedName("simplified_polyline") val simplifiedPolyline: List<List<Double>> = emptyList()
+    ) {
+        val points: List<Pair<Double, Double>>
+            get() = simplifiedPolyline.mapNotNull { if (it.size >= 2) it[0] to it[1] else null }
+    }
+
+    private data class RemoteWitnessDto(
+        @SerializedName("target_key") val targetKey: String = "",
+        @SerializedName("entity_uuid") val entityUuid: String? = null,
+        @SerializedName("agency_code") val agencyCode: String = "DHS_ICE",
+        val department: String = "",
+        @SerializedName("badge_number") val badgeNumber: String = "",
+        @SerializedName("agent_name") val agentName: String = "",
+        @SerializedName("vehicle_number") val vehicleNumber: String = "",
+        val notes: String = "",
+        @SerializedName("photo_data_url") val photoDataUrl: String? = null,
+        @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
+    )
 
     data class RemoteConfidence(
         val overall: Double = 0.8,
@@ -279,6 +305,120 @@ object KokohoHubClient {
                             lastCheckinMs = System.currentTimeMillis()
                             statusLabel = "live (seq ${snap.seq})"
                         }
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }
+            syncWitnessReports(app)
+        }
+    }
+
+    /** Fetches recent aircraft/drone flight tracks from `/v1/flights`. */
+    fun fetchFlightTracks(
+        context: Context,
+        target: String? = null,
+        onResult: (List<RemoteFlightTrack>) -> Unit
+    ) {
+        val app = context.applicationContext
+        scope.launch {
+            val tracks = runCatching {
+                val base = hubUrl(app)
+                val q = if (!target.isNullOrBlank()) {
+                    "?target=" + java.net.URLEncoder.encode(target.trim(), "UTF-8")
+                } else {
+                    ""
+                }
+                val conn = (URL("$base/v1/flights$q").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val type = object : com.google.gson.reflect.TypeToken<List<RemoteFlightTrack>>() {}.type
+                        gson.fromJson<List<RemoteFlightTrack>>(body, type) ?: emptyList()
+                    } else {
+                        emptyList()
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrDefault(emptyList())
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onResult(tracks)
+            }
+        }
+    }
+
+    /** Submits a verified Witness Report to `/v1/witness`. */
+    fun submitWitnessReport(report: WitnessReportRecord, context: Context? = null) {
+        scope.launch {
+            runCatching {
+                val base = if (context != null) hubUrl(context) else DEFAULT_HUB_URL
+                val dto = RemoteWitnessDto(
+                    targetKey = report.targetKey,
+                    entityUuid = report.entityUuid,
+                    agencyCode = report.agencyCode,
+                    department = report.department,
+                    badgeNumber = report.badgeNumber,
+                    agentName = report.agentName,
+                    vehicleNumber = report.vehicleNumber,
+                    notes = report.notes,
+                    photoDataUrl = report.photoDataUrl,
+                    updatedAtMs = report.updatedAtMs
+                )
+                val json = gson.toJson(dto)
+                val conn = (URL("$base/v1/witness").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                try {
+                    conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                    conn.responseCode
+                } finally {
+                    conn.disconnect()
+                }
+            }
+        }
+    }
+
+    /** Synchronizes verified Witness Reports from `/v1/witness`. */
+    fun syncWitnessReports(context: Context) {
+        val app = context.applicationContext
+        if (!KokohoSignatures.isAuxnetEnabled(app)) return
+        scope.launch {
+            runCatching {
+                val base = hubUrl(app)
+                val conn = (URL("$base/v1/witness").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val type = object : com.google.gson.reflect.TypeToken<List<RemoteWitnessDto>>() {}.type
+                        val list = gson.fromJson<List<RemoteWitnessDto>>(body, type) ?: emptyList()
+                        val mapped = list.map {
+                            WitnessReportRecord(
+                                targetKey = it.targetKey,
+                                entityUuid = it.entityUuid,
+                                agencyCode = it.agencyCode,
+                                department = it.department,
+                                badgeNumber = it.badgeNumber,
+                                agentName = it.agentName,
+                                vehicleNumber = it.vehicleNumber,
+                                notes = it.notes,
+                                photoDataUrl = it.photoDataUrl,
+                                updatedAtMs = it.updatedAtMs
+                            )
+                        }
+                        KokohoSignatures.mergeRemoteWitnessReports(app, mapped)
                     }
                 } finally {
                     conn.disconnect()

@@ -16,6 +16,7 @@ import org.tucsoncommunity.kokoho.sdr.RadioLog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -41,14 +42,27 @@ class KokohoTest {
         assertTrue(dhs.contains(KokohoAgency.DHS_HSI))
         assertTrue(dhs.contains(KokohoAgency.DHS_AMO))
         assertTrue(dhs.contains(KokohoAgency.DHS_FPS))
-        assertTrue(dhs.all { it.isDhs && it.defaultEnabled })
+        assertTrue(dhs.contains(KokohoAgency.DHS_INTEROP))
+        assertTrue(KokohoAgency.DHS_ICE.defaultEnabled)
+        assertTrue(KokohoAgency.DHS_AMO.defaultEnabled)
+        assertTrue(KokohoAgency.DHS_CBP.defaultEnabled)
+        assertTrue(KokohoAgency.DHS_HSI.defaultEnabled)
+        assertFalse(KokohoAgency.DHS_FPS.defaultEnabled)
+        assertFalse(KokohoAgency.DHS_INTEROP.defaultEnabled)
+        assertTrue(KokohoAgency.DRONE.defaultEnabled)
+
+        // Verify strict priority order: ICE (1) < DHS Air (2) < CBP (3) < HSI (4) < FPS/Interop (5) < Sheriff/TPD/Drone (6)
+        assertTrue(KokohoAgency.DHS_ICE.priorityRank < KokohoAgency.DHS_AMO.priorityRank)
+        assertTrue(KokohoAgency.DHS_AMO.priorityRank < KokohoAgency.DHS_CBP.priorityRank)
+        assertTrue(KokohoAgency.DHS_CBP.priorityRank < KokohoAgency.DHS_HSI.priorityRank)
+        assertTrue(KokohoAgency.DHS_HSI.priorityRank < KokohoAgency.DHS_INTEROP.priorityRank)
+        assertTrue(KokohoAgency.DHS_INTEROP.priorityRank < KokohoAgency.SHERIFF.priorityRank)
 
         val opt = KokohoAgency.OPTIONAL_AGENCIES
         assertTrue(opt.contains(KokohoAgency.POLICE))
         assertTrue(opt.contains(KokohoAgency.SHERIFF))
         assertTrue(opt.contains(KokohoAgency.FIRE))
         assertTrue(opt.contains(KokohoAgency.SAR))
-        assertTrue(opt.none { it.defaultEnabled })
     }
 
     @Test
@@ -78,9 +92,11 @@ class KokohoTest {
         assertEquals(KokohoAgency.DHS_AMO, air1!!.agencyEnum)
         assertEquals("293", air1.nac)
 
-        val cbpVs2 = KokohoSignatures.matchFrequency(173_737_500L)
-        assertNotNull(cbpVs2)
-        assertEquals(KokohoAgency.DHS_CBP, cbpVs2!!.agencyEnum)
+        // CBP VS2 (173.7375 MHz) is a repeater downlink and must be excluded; CBP VS3A (173.8000 MHz) is Direct Tactical
+        assertNull(KokohoSignatures.matchFrequency(173_737_500L))
+        val cbpVs3a = KokohoSignatures.matchFrequency(173_800_000L)
+        assertNotNull(cbpVs3a)
+        assertEquals(KokohoAgency.DHS_CBP, cbpVs3a!!.agencyEnum)
 
         // Verify RadioReference TSV/CSV & header import
         val imported = KokohoSignatures.importChannelText(
@@ -103,12 +119,12 @@ class KokohoTest {
         KokohoSignatures.setImperialUnits(activity, true)
         KokohoPostureEngine.clearLocalState()
 
-        // Default is Imperial (ft / mi), no bearing, and ± for accuracy radius
-        val distMi = KokohoPostureEngine.formatUserDistance(activity, 1609)
-        assertEquals("Distance: ~1.0 mi", distMi)
+        // Default is Imperial (ft / mi), nearest-edge distance, and ± for accuracy radius
+        val distMi = KokohoPostureEngine.formatUserDistance(activity, 0.0, 1609)
+        assertEquals("Accuracy: ±1.0 mi", distMi)
         assertEquals("±1.0 mi", KokohoPostureEngine.formatAccuracyRadius(activity, 1609))
-        val distFt = KokohoPostureEngine.formatUserDistance(activity, 150)
-        assertTrue(distFt.startsWith("Distance: ~") && distFt.endsWith(" ft"))
+        val distFt = KokohoPostureEngine.formatUserDistance(activity, 150.0, 150)
+        assertTrue(distFt.startsWith("Distance: ~") && distFt.contains("±500 ft"))
         assertEquals("±500 ft", KokohoPostureEngine.formatAccuracyRadius(activity, 150))
 
         // Verify top-level tabs are Monitor, Map, Utility (no List tab)
@@ -116,30 +132,34 @@ class KokohoTest {
 
         // Metric option in Settings
         KokohoSignatures.setImperialUnits(activity, false)
-        assertEquals("Distance: ~16.8 km", KokohoPostureEngine.formatUserDistance(activity, 16800))
+        assertEquals("Accuracy: ±16.8 km", KokohoPostureEngine.formatUserDistance(activity, 0.0, 16800))
         KokohoSignatures.setImperialUnits(activity, true)
 
         val now = 1794373000000L
         val decayMs = 30 * 60_000L
         val uuid = KokohoPostureEngine.deterministicUuidV5("rf:chan:173737500:130")
 
-        // 1. Single GPS point (< 60m spread) -> user-centered radius circle at estimatedDistanceM
+        // 1. Single GPS point (< 80m spread) -> user-centered radius circle at estimatedDistanceM
         val tri1 = KokohoPostureEngine.recordAndTriangulate(uuid, 32.2226, -110.9747, 22, 600, now, decayMs)
         assertFalse(tri1.isApproximatedPosition)
         assertFalse(tri1.isPinpointed)
         assertEquals(600, tri1.uncertaintyRadiusM)
 
-        // 2. Wide GPS baseline (>= 60m spread across 3 points) -> approximated source position circle
+        // 2. Wide 2D GPS baseline (>= 80m spread and >= 25m cross-track spread across 3 points) -> approximated source position circle
         KokohoPostureEngine.recordAndTriangulate(uuid, 32.2236, -110.9747, 25, 500, now + 10_000L, decayMs)
         val tri3 = KokohoPostureEngine.recordAndTriangulate(uuid, 32.2236, -110.9735, 28, 420, now + 20_000L, decayMs)
         assertTrue(tri3.isApproximatedPosition)
         assertNotNull(tri3.centerLat)
         assertNotNull(tri3.centerLon)
 
-        // 3. ADS-B aircraft classification
+        // 3. ADS-B aircraft classification (including unlisted circling spy planes -> DHS_AMO)
         assertEquals(
             KokohoAgency.DHS_AMO,
             KokohoSignatures.classifyAircraftAgency("US CUSTOMS AND BORDER PROTECTION", "N123BP", "OMAHA1", null)
+        )
+        assertEquals(
+            KokohoAgency.DHS_AMO,
+            KokohoSignatures.classifyAircraftAgency(null, null, null, org.tucsoncommunity.kokoho.online.PoliceAircraft.CIRCLING)
         )
         assertEquals(
             KokohoAgency.POLICE,
@@ -177,6 +197,34 @@ class KokohoTest {
         assertEquals("Scan", views.scanToggleButton.text.toString())
         views.syncRunningState(true)
         assertEquals("Stop", views.scanToggleButton.text.toString())
+
+        // Verify Share binary pill next to Scan button & Settings master disable behavior
+        KokohoSignatures.setContributionAllowedInSettings(activity, true)
+        views.syncSharePillState()
+        assertEquals("Sharing", views.shareToggleButton.text.toString())
+        views.shareToggleButton.performClick()
+        assertEquals("Share", views.shareToggleButton.text.toString())
+        assertFalse(KokohoSignatures.isContributeObservationsEnabled(activity))
+        KokohoSignatures.setContributionAllowedInSettings(activity, false)
+        views.syncSharePillState()
+        assertEquals("Share Off", views.shareToggleButton.text.toString())
+        assertEquals(0.50f, views.shareToggleButton.alpha, 0.01f)
+        KokohoSignatures.setContributionAllowedInSettings(activity, true)
+        views.syncSharePillState()
+
+        // Verify intersection "rmat" traffic cabinets and retail routers are excluded while 7400 Oracle signals match
+        assertNull(KokohoSignatures.matchOuiOrSsid("00:30:44:55:00:06", "rmat", "Cradlepoint"))
+        assertNull(KokohoSignatures.matchOuiOrSsid("00:30:44:9B:BE:48", "Chill N NW", "Cradlepoint"))
+        assertNotNull(KokohoSignatures.matchOuiOrSsid("D4:13:F8:7F:C6:49", null, "Peplink"))
+        assertNotNull(KokohoSignatures.matchCloseRangeFederalBand(167_862_500L, 42))
+
+        // Verify multi-detection corroboration opacity scaling (1 -> 2 -> 3+ detections & radius tightness)
+        val op1 = KokohoSignatures.mapCorroborationOpacity(activity, 60_000L, totalSightings = 1, distinctSignals = 1, radiusM = 900)
+        val op2 = KokohoSignatures.mapCorroborationOpacity(activity, 60_000L, totalSightings = 2, distinctSignals = 1, radiusM = 400)
+        val op3 = KokohoSignatures.mapCorroborationOpacity(activity, 60_000L, totalSightings = 5, distinctSignals = 3, radiusM = 120)
+        assertTrue("1 isolated wide hit must be subtle (< 0.30)", op1 < 0.30f)
+        assertTrue("2 hits must be stronger than 1 hit", op2 > op1)
+        assertTrue("3+ hits with tight radius must reach full opacity", op3 > op2 && op3 >= 0.95f)
 
         val nowMs = 1794373000000L
 
@@ -315,9 +363,9 @@ class KokohoTest {
         val redSnap = KokohoPostureEngine.evaluate(activity, nowMs)
         assertEquals(PostureColor.RED, redSnap.color)
         assertEquals("CBP", redSnap.headline)
-        assertEquals("", redSnap.subheadline)
-        assertTrue(redSnap.distanceAndBearingText.startsWith("Distance: ~"))
-        assertFalse(redSnap.distanceAndBearingText.contains("Bearing"))
+        assertTrue(redSnap.subheadline.startsWith("x1 · "))
+        assertTrue(redSnap.subheadline.contains("±500 ft"))
+        assertEquals("Distance: ~500 ft", redSnap.distanceAndBearingText)
         assertEquals("94% confidence · 2 signals", redSnap.bottomConfidenceText)
         assertEquals(2, redSnap.primaryThreat!!.evidenceSources.size)
         renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#0B0F14"), "kokoho_sandbox_monitor_red.png")
@@ -412,6 +460,56 @@ class KokohoTest {
         canvas.drawText("Dark Theme: #FFFFFF / Transparent", 810f, 490f, paint)
 
         saveBitmap(sheet, "kokoho_sandbox_theme_icons_proof.png")
+    }
+
+    @Test
+    fun rankedAgencyPriorityAndRepeaterExclusionAndWitnessReportWork() {
+        val controller = Robolectric.buildActivity(AppCompatActivity::class.java).setup()
+        val ctx = controller.get()
+        KokohoSignatures.ensureLoaded(ctx)
+
+        // Strict priority rank order: ICE < DHS Air < CBP < HSI < Other Fed < Sheriff/TPD
+        assertTrue(KokohoAgency.DHS_ICE.priorityRank < KokohoAgency.DHS_AMO.priorityRank)
+        assertTrue(KokohoAgency.DHS_AMO.priorityRank < KokohoAgency.DHS_CBP.priorityRank)
+        assertTrue(KokohoAgency.DHS_CBP.priorityRank < KokohoAgency.DHS_HSI.priorityRank)
+        assertTrue(KokohoAgency.DHS_HSI.priorityRank < KokohoAgency.DHS_INTEROP.priorityRank)
+        assertTrue(KokohoAgency.DHS_INTEROP.priorityRank < KokohoAgency.SHERIFF.priorityRank)
+        assertEquals("DHS Air", KokohoAgency.DHS_AMO.friendlyLabel)
+
+        // Repeaters (e.g., 172.900 MHz ICE repeater downlink) and unknown commercial VHF are solidly excluded
+        assertNull(KokohoSignatures.matchFrequency(172_900_000L))
+        assertNull(KokohoSignatures.matchFrequency(154_600_000L))
+
+        // Direct tactical & mobile input uplink frequencies match cleanly
+        val iceTac = KokohoSignatures.matchFrequency(167_712_500L)
+        assertNotNull(iceTac)
+        assertEquals(KokohoAgency.DHS_ICE, iceTac!!.agencyEnum)
+
+        val cbpMobileInput = KokohoSignatures.matchFrequency(162_850_000L)
+        assertNotNull(cbpMobileInput)
+        assertEquals(KokohoAgency.DHS_CBP, cbpMobileInput!!.agencyEnum)
+
+        // Pro/Enterprise/Military drone OUI matching works
+        val skydio = KokohoSignatures.matchOui("38:1D:14:AA:BB:CC")
+        assertNotNull(skydio)
+        assertEquals(KokohoAgency.DRONE, skydio!!.agencyEnum)
+
+        // Witness Report round-trip works
+        val report = WitnessReportRecord(
+            targetKey = "unit-test-entity-1",
+            agencyCode = "DHS_ICE",
+            department = "ERO Tucson",
+            badgeNumber = "4412",
+            agentName = "J. Doe",
+            vehicleNumber = "G62-1194A",
+            notes = "Unmarked white Tahoe at Grant & Oracle"
+        )
+        KokohoSignatures.saveWitnessReport(ctx, report, syncRemote = false)
+        val loaded = KokohoSignatures.getWitnessReport(ctx, "unit-test-entity-1")
+        assertNotNull(loaded)
+        assertEquals("4412", loaded!!.badgeNumber)
+        assertEquals("G62-1194A", loaded.vehicleNumber)
+        controller.pause().stop().destroy()
     }
 
     private fun renderViewToPng(view: View, widthPx: Int, heightPx: Int, bgColor: Int, fileName: String) {

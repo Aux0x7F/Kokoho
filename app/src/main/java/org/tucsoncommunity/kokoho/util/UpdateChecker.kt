@@ -80,6 +80,9 @@ object UpdateChecker {
     }
 
     fun isUpdateAvailable(latest: Latest): Boolean {
+        if (latest.versionCode > 0 && latest.versionCode != BuildConfig.VERSION_CODE) {
+            return latest.versionCode > BuildConfig.VERSION_CODE
+        }
         val currentVer = BuildConfig.VERSION_NAME.substringBefore('-')
         val remoteVer = latest.version.trimStart('v', 'V').substringBefore('-')
         if (remoteVer == currentVer) return false
@@ -166,8 +169,8 @@ object UpdateChecker {
         }
     }
 
-    private const val AUTO_INTERVAL_MS = 6 * 60 * 60 * 1000L
-    private const val RETRY_MS = 30 * 60 * 1000L
+    private const val AUTO_INTERVAL_MS = 5 * 60 * 1000L
+    private const val RETRY_MS = 2 * 60 * 1000L
     @Volatile
     private var checking = false
 

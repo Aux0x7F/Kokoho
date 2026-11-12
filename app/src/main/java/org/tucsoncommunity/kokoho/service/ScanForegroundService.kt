@@ -807,6 +807,18 @@ class ScanForegroundService : Service() {
         process(a)
     }
 
+    private fun isBleTrackerAdvert(a: Advert): Boolean {
+        if (!a.isBle) return false
+        // Apple FindMy / AirTag (0x004C type 0x12 or 0x07), Samsung SmartTag (0xFD5A/0xFD59),
+        // Tile (0xFEED/0xFEEC), Google Find My Device (0xFEAA), Chipolo/Pebblebee (0xFE63)
+        a.manufacturerData[0x004C]?.let { bytes ->
+            if (bytes.isNotEmpty() && (bytes[0].toInt() and 0xFF == 0x12 || bytes[0].toInt() and 0xFF == 0x07)) return true
+        }
+        val trackerUuids = listOf(0xFD5A, 0xFD59, 0xFEED, 0xFEEC, 0xFEAA, 0xFE63).map { Advert.uuid16(it) }
+        if (a.serviceUuids.any { it in trackerUuids } || a.serviceData.keys.any { it in trackerUuids }) return true
+        return false
+    }
+
     /**
      * @param via the linked Sentinel that heard it (Sentinel Link), with [peerAt] where that Sentinel was;
      * null for what this phone and its hardware heard. [quiet]: listed and logged, no alert (Sentinel Link screen).
@@ -816,7 +828,6 @@ class ScanForegroundService : Service() {
         val now = a.timestamp
         val mac = a.mac
         if (OuiWatchlist.version != watchlistVersion) recheckWatchlist(now)
-        if (a.isWifi) org.tucsoncommunity.kokoho.data.TrustedNetworks.onSeen(mac, a.name) // before anything asks whether it's whitelisted
 
         // Remote ID messages arrive one type at a time; merge every packet.
         var remoteId: RemoteId.Info? = reportedRemoteId
@@ -826,6 +837,22 @@ class ScanForegroundService : Service() {
             a.wifi?.infoElements?.firstOrNull { it.first == 221 && RemoteId.isWifiIe(it.second) }
                 ?.let { remoteId = RemoteId.decodeWifiIe(it.second, DeviceRegistry.remoteIdOf(mac)) }
         }
+
+        // Drop consumer Wi-Fi APs, iPhones, AirPods, TVs, and non-matching BLE clutter before classification/DB (#21)
+        val fastVendor = if (a.randomBle) null else VendorDb.macVendor(mac)
+        val isTrackerPayload = isBleTrackerAdvert(a)
+        if (!org.tucsoncommunity.kokoho.posture.KokohoSignatures.isRelevantBleOrWifiCandidate(
+                mac = mac,
+                nameOrSsid = a.name,
+                vendor = fastVendor,
+                hasRemoteId = remoteId != null,
+                isBleTrackerPayload = isTrackerPayload
+            )
+        ) {
+            return
+        }
+
+        if (a.isWifi) org.tucsoncommunity.kokoho.data.TrustedNetworks.onSeen(mac, a.name) // before anything asks whether it's whitelisted
 
         // Every tracker advert counts toward a fake-tracker flood (HackerWatch).
         if (a.isBle) org.tucsoncommunity.kokoho.detect.HackerWatch.tagFlood(a, now)?.let { onTagFlood(it) }
@@ -866,16 +893,22 @@ class ScanForegroundService : Service() {
         if (via == null) remoteId?.let { info -> if (loc != null) maybeAlertDroneOverhead(a, info, loc, now) }
         if (via == null && loc != null && !WhitelistCache.contains(mac)) {
             val ouiMatch = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchOuiOrSsid(mac, a.name, c.vendor)
-            if (ouiMatch != null && ouiMatch.first in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this)) {
+            if (ouiMatch != null &&
+                ouiMatch.first in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this) &&
+                (a.rssi >= -76 || ouiMatch.first == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE || remoteId != null)
+            ) {
                 val cleanHex = mac.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
                 val primaryFacet = if (!a.randomBle && cleanHex.length >= 12) "hw:mac:$cleanHex" else "hw:oui:${cleanHex.take(6)}"
                 val extraFacets = if (cleanHex.length >= 6) listOf("hw:oui:${cleanHex.take(6)}") else emptyList()
+                val modality = if (ouiMatch.first == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE || remoteId != null) "REMOTE_ID" else "WIFI_BLE_OUI"
+                val reportLat = remoteId?.latitude?.takeIf { remoteId.hasPosition } ?: loc.latitude
+                val reportLon = remoteId?.longitude?.takeIf { remoteId.hasPosition } ?: loc.longitude
                 org.tucsoncommunity.kokoho.posture.KokohoHubClient.publishSensorReportIfEnabled(
                     context = this,
-                    lat = loc.latitude,
-                    lon = loc.longitude,
+                    lat = reportLat,
+                    lon = reportLon,
                     snrDb = (a.rssi + 95).coerceAtLeast(3).toDouble(),
-                    modality = "WIFI_BLE_OUI",
+                    modality = modality,
                     primaryFacet = primaryFacet,
                     additionalFacets = extraFacets,
                     agency = ouiMatch.first,
@@ -1475,7 +1508,8 @@ class ScanForegroundService : Service() {
         // Settings › Sentinel Link: devices only a linked Sentinel heard are saved only when that's on.
         val saveLinked = Prefs.saveLinked(this)
         val seen = DeviceRegistry.summaries(since).filter {
-            saveLinked || !org.tucsoncommunity.kokoho.esp.HeardBy.peer.recent(it.mac) || org.tucsoncommunity.kokoho.esp.HeardBy.ownRecent(it.mac)
+            (it.hits.isNotEmpty() || it.remoteId != null || org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchOuiOrSsid(it.mac, it.name, it.vendor) != null) &&
+                (saveLinked || !org.tucsoncommunity.kokoho.esp.HeardBy.peer.recent(it.mac) || org.tucsoncommunity.kokoho.esp.HeardBy.ownRecent(it.mac))
         }
         if (seen.isEmpty()) return null
         // A page is saved when first heard, when its matches change, and otherwise every few minutes.
@@ -1728,19 +1762,20 @@ class ScanForegroundService : Service() {
      */
     private fun onRadio(e: org.tucsoncommunity.kokoho.sdr.RadioWatch.Event, via: String? = null, quiet: Boolean = false) {
         val now = System.currentTimeMillis()
+        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        // Solidly exclude unknown commercial/municipal VHF/UHF and repeater downlinks (#2, #17, Question 2, Review #2)
+        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz) ?: return
+        if (!kokohoFreq.isAlertableDirectOrMobile) return
+        if (kokohoFreq.agencyEnum !in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this)) return
+
         if (via == null && sharing()) linkOutbox?.addRadio(LinkCodec.Radio(e.freqHz, e.snrDb, e.band.label, e.band.startHz, e.band.endHz,
             e.band.kind.name, e.confidence, e.target?.label, e.repeat, e.tdma, now))
-        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
-        // Who uses this frequency: a watched frequency's own label, the imported list, or RadioReference.
-        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz)
-        val named = org.tucsoncommunity.kokoho.sdr.FreqNames.lookup(e.freqHz, Prefs.radioMatchKhz(this) * 1000L)
-        val name = kokohoFreq?.let { "${it.alpha} (${it.description})" } ?: e.target?.label ?: named?.name
-        if (via == null && kokohoFreq != null && kokohoFreq.agencyEnum in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this)) {
+
+        val name = "${kokohoFreq.alpha} (${kokohoFreq.description})"
+        if (via == null) {
             (lastLocation ?: lastFix)?.let { fix ->
                 val nacFacet = kokohoFreq.nac ?: "ANY"
                 val propClass = when (kokohoFreq.role.uppercase()) {
-                    "REPEATER" -> "REPEATER_OUTPUT"
-                    "MOBILE_INPUT", "DIRECT_TACTICAL" -> "GROUND_DIRECT"
                     "AIR_ASSET" -> "AIR_TO_GROUND"
                     else -> "GROUND_DIRECT"
                 }
@@ -1758,53 +1793,21 @@ class ScanForegroundService : Service() {
                 )
             }
         }
-        if (named == null && org.tucsoncommunity.kokoho.sdr.RadioReference.ready(this)) (lastLocation ?: lastFix)?.let { l ->
-            serviceScope.launch { org.tucsoncommunity.kokoho.sdr.RadioReference.refreshAround(this@ScanForegroundService, l.latitude, l.longitude) }
-        }
         val threshold = Prefs.alertThreshold(this, Category.RADIO)
         val trend = org.tucsoncommunity.kokoho.sdr.RadioLog.observe(e, name, Prefs.radioTrendDb(this), now)
-        val cell = e.band.kind == org.tucsoncommunity.kokoho.sdr.RadioWatch.Kind.CELLULAR_UPLINK
         if (trend != null && e.confidence >= threshold && via == null) {
-            AlertPlayer.callout(this, (if (cell) "Cellular signal " else "Radio ${spokenMhz(e.freqHz)} ") +
+            AlertPlayer.callout(this, "Radio ${spokenMhz(e.freqHz)} " +
                 if (trend == org.tucsoncommunity.kokoho.sdr.RadioLog.Trend.CLOSER) "getting closer" else "moving away")
         }
-        if (e.repeat) return // same channel within 2 minutes: list and trend only, no new log entry or alert
+        if (e.repeat) {
+            NotificationHelper.updateServiceNotification(this)
+            return
+        }
         val near = when { e.snrDb >= 40 -> "very close"; e.snrDb >= 30 -> "close" else -> "nearby" }
-        val heardBy = via?.let { "Heard by $it (Sentinel Link): \"$near\" is from that phone. " } ?: ""
-        val detail = heardBy + "A radio transmitted on ${e.mhz} MHz (${e.band.label}), ${e.snrDb} dB above the noise - $near. " +
-            (named?.let { "Matches ${"%.4f".format(java.util.Locale.US, it.hz / 1e6)} MHz: ${it.name} (${it.source}). " } ?: "") +
-            when (e.band.kind) {
-                org.tucsoncommunity.kokoho.sdr.RadioWatch.Kind.PUBLIC_SAFETY_MOBILE ->
-                    "Public-safety radios (police, fire, EMS) transmit on this band; not proof of who it is."
-                org.tucsoncommunity.kokoho.sdr.RadioWatch.Kind.TETRA -> if (e.tdma)
-                    "It came in TETRA time-slot bursts: an emergency-services (police, fire, ambulance) TETRA handset or car radio. " +
-                        "Encrypted, nothing decoded; not proof of who it is."
-                else "Emergency-service TETRA handsets transmit on this band, but this signal had no TETRA time slots; a weak sign on its own."
-                org.tucsoncommunity.kokoho.sdr.RadioWatch.Kind.TARGET -> "One of the frequencies you watch (Settings > RTL-SDR radio)."
-                org.tucsoncommunity.kokoho.sdr.RadioWatch.Kind.CUSTOM -> "A band you added in Settings > RTL-SDR radio."
-                else -> (if (e.tdma) "It came in time-slot bursts like a DMR handset's (a P25 Phase 2 radio looks the same). Nothing decoded. " else "") +
-                    "Police use this band, but so do businesses, schools and transit; a weak sign on its own."
-            }
-        val cellDetail = heardBy + "A cellular transmitter is on the air nearby on ${e.mhz} MHz (${e.band.label}), " +
-            "${e.snrDb} dB above the quiet level - $near. Something is transmitting on the phone / modem side of an " +
-            "LTE band: a phone, but also a vehicle modem, a Cradlepoint-style router or a camera with a SIM. Signal " +
-            "strength only, nothing decoded - it can't tell devices or carriers apart. On its own it means little " +
-            "(phones are everywhere); it matters most when it travels with you or lines up with a device flagged over Wi-Fi / Bluetooth."
-        val label = when {
-            cell -> "Cellular transmitter nearby (LTE uplink)"
-            name != null -> "Radio transmitting: $name"
-            e.tdma -> "${e.slots} radio transmitting nearby"
-            else -> "Two-way radio transmitting nearby"
-        } + (via?.let { " · via $it" } ?: "")
-        val hit = Hit(Category.RADIO, label, e.confidence, if (cell) cellDetail else detail,
-            if (e.tdma) "SDR signal strength and ${e.slots} burst timing (no decoding)" else "SDR signal strength (no decoding)")
-        // Spoken: the frequency (and its name) when that's on, else the short phrase.
-        val spoken = when {
-            cell -> "Cellular transmitter nearby"
-            Prefs.radioSpeakFreq(this) -> (if (e.tdma) "${e.slots} radio " else "Radio ") + spokenMhz(e.freqHz) + (name?.let { ", $it" } ?: "")
-            e.tdma -> "${e.slots} radio nearby"
-            else -> "Radio transmitting nearby"
-        } + (via?.let { ", via $it" } ?: "")
+        val detail = "${kokohoFreq.agencyEnum.friendlyLabel}: ${kokohoFreq.alpha} (${kokohoFreq.description}) on ${e.mhz} MHz, ${e.snrDb} dB SNR ($near)."
+        val label = "${kokohoFreq.agencyEnum.friendlyLabel}: ${kokohoFreq.alpha}" + (via?.let { " · via $it" } ?: "")
+        val hit = Hit(Category.RADIO, label, e.confidence, detail, "SDR direct/mobile tactical signature")
+        val spoken = if (Prefs.radioSpeakFreq(this)) "Radio ${spokenMhz(e.freqHz)}, $name" else "${kokohoFreq.agencyEnum.friendlyLabel} radio nearby"
         radioDetection(hit, "RADIO " + e.mhz + " MHz", e.snrDb, now, "radio:" + e.freqHz, spoken, e.confidence >= threshold && !quiet, via)
     }
 
