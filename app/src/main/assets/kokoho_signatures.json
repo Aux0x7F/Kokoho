@@ -130,7 +130,6 @@
     { "prefix": "00:14:3E", "agency": "DHS_CBP", "label": "Sierra Wireless AirLink Fleet Telemetry Router", "confidence": 78 },
     { "prefix": "00:A0:D5", "agency": "DHS_CBP", "label": "Sierra Wireless AirLink MG90/XR80 Vehicle Router", "confidence": 78 },
     { "prefix": "00:25:DF", "agency": "POLICE", "label": "Axon Body Camera / Fleet Hub", "confidence": 75 },
-    { "prefix": "24:B2:B9", "agency": "POLICE", "label": "Flock Safety / LPR Optical Sensor", "confidence": 80 },
     { "prefix": "00:04:7D", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX / Vehicle Interface", "confidence": 65 },
     { "prefix": "00:18:85", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX Radio / Mission Critical", "confidence": 65 },
     { "prefix": "4C:CC:34", "agency": "DHS_INTEROP", "label": "Motorola Solutions APX / Vehicular Repeater", "confidence": 65 }

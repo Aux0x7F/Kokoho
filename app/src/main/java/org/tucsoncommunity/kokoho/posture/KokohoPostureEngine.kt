@@ -419,6 +419,8 @@ object KokohoPostureEngine {
                 Triple(x to y, s.estDistanceM.toDouble(), w)
             }
             val totalWeight = sampleXY.sumOf { it.third }.coerceAtLeast(1e-9)
+            val meanX = sampleXY.sumOf { it.first.first * it.third } / totalWeight
+            val meanY = sampleXY.sumOf { it.first.second * it.third } / totalWeight
 
             for (ix in -steps..steps) {
                 val cx = (ix.toDouble() / steps) * searchSpanM
@@ -430,6 +432,8 @@ object KokohoPostureEngine {
                         val diff = d - r
                         err += w * diff * diff
                     }
+                    // Symmetry-breaking regularizer toward weighted sample centroid so N-S road travel does not bias Westward
+                    err += 0.015 * totalWeight * ((cx - meanX).pow(2) + (cy - meanY).pow(2))
                     if (err < bestScore) {
                         bestScore = err
                         bestX = cx
@@ -515,6 +519,11 @@ object KokohoPostureEngine {
         // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub
         if (auxnetOn) {
             for (remote in KokohoHubClient.activeObjects(nowMs, mapVisibilityMs)) {
+                if (KokohoSignatures.isFlockCamera(remote.uuid, remote.classification.label) ||
+                    remote.classification.evidenceSources.any { KokohoSignatures.isFlockCamera(it.facetKey, it.detail) }
+                ) {
+                    continue
+                }
                 val isAir = remote.location.propagationClass.equals("AIR_TO_GROUND", ignoreCase = true) ||
                     remote.location.propagationClass.equals("AIRBORNE", ignoreCase = true) ||
                     remote.classification.evidenceSources.any { it.kind.contains("ADSB", ignoreCase = true) }
@@ -577,6 +586,12 @@ object KokohoPostureEngine {
                 val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
                 val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
 
+                val remoteSightings = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1)
+                val isRemoteDerived = isAir ||
+                    remote.corroborationCount >= 2 ||
+                    remote.sightingCount >= 2 ||
+                    uncertM <= WIDE_CIRCLE_JITTER_MIN_M
+
                 evaluated[remote.uuid] = EvaluatedThreat(
                     uuid = remote.uuid,
                     trackUuid = remote.trackUuid,
@@ -595,11 +610,12 @@ object KokohoPostureEngine {
                     updatedAtMs = remote.updatedAtMs,
                     lat = remote.location.lat,
                     lon = remote.location.lon,
-                    isApproximatedPosition = true,
+                    isApproximatedPosition = isRemoteDerived,
                     isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
                     isAircraft = isAir,
                     aircraftTrackDeg = remote.location.bearingDeg,
-                    hardwareIdentifier = badges.firstOrNull()?.facetKey
+                    hardwareIdentifier = badges.firstOrNull()?.facetKey,
+                    sightingCount = remoteSightings
                 )
             }
         }

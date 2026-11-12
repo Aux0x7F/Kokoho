@@ -280,6 +280,7 @@ class MapFragment : Fragment() {
         setupSettingsButton()
         setupOrientationButton()
         setupMenu()
+        if (tripId == null) setupMapTimeWindowPills()
         if (!embedded) setupImmersiveButton()
         binding.bottomPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSideButtonsSoon() }
         // The scale and the map credit sit just under the status banner, or at the very top when there is none.
@@ -418,7 +419,18 @@ class MapFragment : Fragment() {
         m.onUserGesture = { touchedAt = android.os.SystemClock.elapsedRealtime(); if (following) userZoom = true }
         m.onFollowDismissed = { touchedAt = android.os.SystemClock.elapsedRealtime(); if (alive && following) { following = false; styleFollowButton() } }
         m.onCameraMove = { updateScale() }
-        m.onIdle = { r.safe("static") { r.maybeRedrawStatic(); updateScale() } }
+        var lastIdleZoom = m.camera.zoom
+        m.onIdle = {
+            r.safe("static") {
+                r.maybeRedrawStatic()
+                updateScale()
+                val curZoom = m.camera.zoom
+                if (tripId == null && kotlin.math.abs(curZoom - lastIdleZoom) >= 0.3) {
+                    lastIdleZoom = curZoom
+                    renderLive()
+                }
+            }
+        }
         m.onClick = { x, y -> r.safe("tap") { r.onTap(x, y, myPosition()) } }
         if (tripId == null) m.onLongClick = { lat, lon -> r.safe("long press") { nav?.onLongPress(lat, lon) } }
         if (restore != null) { m.jumpTo(restore.lat, restore.lon, restore.zoom); centeredOnce = true }
@@ -442,7 +454,14 @@ class MapFragment : Fragment() {
         r.loadStyle(dark) {
             if (!alive) return@loadStyle
             r.safe("location") { startLocation() }
-            if (tripId != null) loadTrip() else renderLive()
+            if (tripId != null) {
+                loadTrip()
+            } else {
+                renderLive()
+                org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
+                    if (alive) renderLive()
+                }
+            }
             r.safe("static") { r.maybeRedrawStatic(force = true) }
             r.safe("nav") { nav?.redraw() }
             // Opened from a search on the main screen's map: the routes to that place.
@@ -549,6 +568,81 @@ class MapFragment : Fragment() {
             Toast.makeText(act, if (dark) "Dark map" else "Light map", Toast.LENGTH_SHORT).show()
         }
         styleThemeButton()
+    }
+
+    /** Floating 30m | 24h | All Time selector pills at the top of the mobile Map tab. */
+    private fun setupMapTimeWindowPills() {
+        val density = resources.displayMetrics.density
+        val bar = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val padH = (6 * density).toInt()
+            val padV = (4 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                setColor(0xD90F1622.toInt())
+                setStroke((1 * density).toInt(), 0x38FFFFFF)
+            }
+            elevation = 6f * density
+        }
+
+        val buttons = mutableMapOf<org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow, android.widget.TextView>()
+
+        fun stylePills(selected: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow) {
+            for ((win, tv) in buttons) {
+                val active = win == selected
+                tv.setTextColor(if (active) 0xFFFECACA.toInt() else 0xFFCBD5E1.toInt())
+                tv.background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                    cornerRadius = 999f * density
+                    if (active) {
+                        setColor(0x47EF4444)
+                        setStroke((1 * density).toInt(), 0xB3EF4444.toInt())
+                    } else {
+                        setColor(0x00000000)
+                    }
+                }
+            }
+        }
+
+        for (win in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.values()) {
+            val pill = android.widget.TextView(act).apply {
+                text = win.label
+                textSize = 12f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                val ph = (11 * density).toInt()
+                val pv = (4 * density).toInt()
+                setPadding(ph, pv, ph, pv)
+                setOnClickListener {
+                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, win)
+                    stylePills(win)
+                    org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
+                        if (alive) renderLive()
+                    }
+                    renderLive()
+                }
+            }
+            buttons[win] = pill
+            bar.addView(pill, android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (bar.childCount > 0) marginStart = (3 * density).toInt()
+            })
+        }
+
+        stylePills(org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(act))
+
+        val lp = android.widget.FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
+        ).apply {
+            topMargin = (10 * density).toInt()
+        }
+        binding.root.addView(bar, lp)
     }
 
     /** The gear on the map: Settings > Map (the map provider, what the map shows). */

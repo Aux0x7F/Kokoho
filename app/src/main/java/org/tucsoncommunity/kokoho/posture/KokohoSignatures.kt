@@ -98,6 +98,7 @@ object KokohoSignatures {
     private const val KEY_SHARING_ACTIVE_PILL = "sharing_active_pill"
     private const val KEY_PUSH_NOTIFICATIONS = "push_notifications"
     private const val KEY_SIGNAL_DECAY_MINUTES = "signal_decay_minutes"
+    private const val KEY_MAP_TIME_WINDOW = "map_time_window"
     private const val KEY_ADSB_ENABLED = "adsb_enabled"
     private const val KEY_DRONE_ENABLED = "drone_detection_enabled"
     private const val KEY_ENABLED_AIRCRAFT_AGENCIES = "enabled_aircraft_agencies"
@@ -484,7 +485,30 @@ object KokohoSignatures {
         prefs.edit { putStringSet(KEY_WATCHED_ENTITIES, next) }
     }
 
-    // ---- Map Signal Solid Opacity Window (Default 30 min solid, then 2h linear fade) ----
+    // ---- Map Time Window ("30m", "24h", "All Time") & Signal Opacity ----
+
+    enum class MapTimeWindow(val id: String, val label: String, val windowMs: Long) {
+        MIN_30("30M", "30m", 30 * 60_000L),
+        HOURS_24("24H", "24h", 24 * 60 * 60_000L),
+        ALL_TIME("ALL", "All Time", 3650L * 24 * 60 * 60_000L);
+
+        companion object {
+            fun fromId(id: String?): MapTimeWindow =
+                entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: ALL_TIME
+        }
+    }
+
+    fun getMapTimeWindow(context: Context): MapTimeWindow {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MAP_TIME_WINDOW, MapTimeWindow.ALL_TIME.id)
+        return MapTimeWindow.fromId(raw)
+    }
+
+    fun setMapTimeWindow(context: Context, window: MapTimeWindow) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_MAP_TIME_WINDOW, window.id)
+        }
+    }
 
     fun signalDecayMinutes(context: Context): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -501,9 +525,9 @@ object KokohoSignatures {
     fun signalDecayMs(context: Context): Long =
         signalDecayMinutes(context) * 60_000L
 
-    /** Total map visibility lifetime (solid window + 2-hour fade window). */
+    /** Total map visibility lifetime governed by the active MapTimeWindow (30m, 24h, or All Time). */
     fun mapMaxVisibilityMs(context: Context): Long =
-        signalDecayMs(context) + MAP_FADE_SPAN_MS
+        getMapTimeWindow(context).windowMs
 
     /** Computes opacity multiplier [0.18 .. 1.0] for a map detection of age [ageMs]. */
     fun mapStalenessOpacity(context: Context, ageMs: Long): Float {
@@ -511,7 +535,8 @@ object KokohoSignatures {
         if (ageMs <= solidMs) return 1.0f
         val over = (ageMs - solidMs).toFloat()
         val frac = (over / MAP_FADE_SPAN_MS.toFloat()).coerceIn(0f, 1f)
-        return (1.0f - 0.82f * frac).coerceIn(0.18f, 1.0f)
+        val floor = if (getMapTimeWindow(context) == MapTimeWindow.MIN_30) 0.18f else 0.42f
+        return (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
     }
 
     /**
@@ -695,7 +720,8 @@ object KokohoSignatures {
     private val IGNORED_INFRA_MAC_PREFIXES = listOf(
         "00:30:44:55:", // City of Tucson "rmat" Regional Metropolitan Arterial Traffic signal cabinets
         "06:30:44:55:", // AMR / GMR ambulance ePCR ("GMREPCR") & arterial traffic cabinet virtual APs
-        "04:F0:21:"     // Compex Systems municipal intersection V2X / traffic backhaul modules
+        "04:F0:21:",    // Compex Systems municipal intersection V2X / traffic backhaul modules
+        "24:B2:B9:"     // Flock Safety / Liteon ALPR cameras (collected in local DB, never shown on maps)
     )
 
     private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
@@ -703,10 +729,28 @@ object KokohoSignatures {
     )
 
     /**
+     * Returns true if a device/entity is a Flock / ALPR camera (which may be collected in the
+     * local database to improve third-party services, but must never appear on any map).
+     */
+    fun isFlockCamera(macOrKey: String?, labelOrName: String?): Boolean {
+        val m = macOrKey?.trim()?.uppercase().orEmpty()
+        if (m.startsWith("24:B2:B9") || m.contains("24:B2:B9")) return true
+        val txt = labelOrName?.trim().orEmpty()
+        if (txt.contains("Flock", ignoreCase = true) ||
+            txt.contains("ALPR", ignoreCase = true) ||
+            txt.contains("LPR Optical", ignoreCase = true)
+        ) {
+            return true
+        }
+        return false
+    }
+
+    /**
      * Returns true if a MAC / SSID belongs to a known municipal traffic-signal cabinet (`"rmat"`),
-     * intersection V2X bridge, ambulance ePCR, or fixed commercial/retail POS backup router.
+     * intersection V2X bridge, ambulance ePCR, Flock camera, or fixed commercial/retail POS backup router.
      */
     fun isIgnoredInfrastructureOrRetail(mac: String, ssidOrName: String?): Boolean {
+        if (isFlockCamera(mac, ssidOrName)) return true
         val normMac = mac.trim().uppercase()
         if (IGNORED_INFRA_MAC_PREFIXES.any { normMac.startsWith(it) }) return true
         val ssid = ssidOrName?.trim().orEmpty()

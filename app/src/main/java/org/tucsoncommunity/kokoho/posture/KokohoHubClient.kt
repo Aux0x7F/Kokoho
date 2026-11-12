@@ -105,7 +105,28 @@ object KokohoHubClient {
         @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L,
         val confidence: RemoteConfidence = RemoteConfidence(),
         val location: RemoteLocation = RemoteLocation(),
-        val classification: RemoteClassification = RemoteClassification()
+        val classification: RemoteClassification = RemoteClassification(),
+        val sightingCount: Int = 1,
+        val corroborationCount: Int = 1
+    )
+
+    private data class RemoteTrendEntity(
+        @SerializedName("entity_uuid") val entityUuid: String = "",
+        @SerializedName("primary_facet_key") val primaryFacetKey: String = "",
+        val category: String = "DHS_CBP",
+        val label: String = "",
+        @SerializedName("first_seen_ms") val firstSeenMs: Long = 0L,
+        @SerializedName("last_seen_ms") val lastSeenMs: Long = 0L,
+        @SerializedName("sighting_count") val sightingCount: Int = 1,
+        @SerializedName("estimated_lat") val estimatedLat: Double = 32.2226,
+        @SerializedName("estimated_lon") val estimatedLon: Double = -110.9747,
+        @SerializedName("uncertainty_radius_m") val uncertaintyRadiusM: Double = 350.0,
+        @SerializedName("corroboration_count") val corroborationCount: Int = 1,
+        val facets: List<String> = emptyList()
+    )
+
+    private data class TrendsSnapshot(
+        val entities: List<RemoteTrendEntity> = emptyList()
     )
 
     data class StateSnapshot(
@@ -186,8 +207,7 @@ object KokohoHubClient {
     }
 
     fun activeObjects(nowMs: Long = System.currentTimeMillis(), ttlMs: Long = OBJECT_TTL_MS): List<RemoteThreatObject> {
-        objects.entries.removeIf { nowMs - it.value.updatedAtMs > ttlMs }
-        return objects.values.toList()
+        return objects.values.filter { nowMs - it.updatedAtMs <= ttlMs }
     }
 
     fun ingestThreatObjectJson(json: String): RemoteThreatObject? {
@@ -310,7 +330,95 @@ object KokohoHubClient {
                     conn.disconnect()
                 }
             }
+            syncHistoricalEntities(app)
             syncWitnessReports(app)
+        }
+    }
+
+    /** Synchronizes persisted derived entities from `/v1/trends` so 24h and All Time map modes have full history. */
+    fun syncHistoricalEntities(context: Context, onComplete: (() -> Unit)? = null) {
+        val app = context.applicationContext
+        if (!KokohoSignatures.isAuxnetEnabled(app)) {
+            onComplete?.invoke()
+            return
+        }
+        scope.launch {
+            runCatching {
+                val base = hubUrl(app)
+                val conn = (URL("$base/v1/trends?since_ms=0&limit=500").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 10_000
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val snap = gson.fromJson(body, TrendsSnapshot::class.java)
+                        for (e in snap?.entities.orEmpty()) {
+                            if (e.entityUuid.isBlank()) continue
+                            if (e.estimatedLon > -110.8752) continue
+                            if (KokohoSignatures.isFlockCamera(e.primaryFacetKey, e.label)) continue
+                            val existing = objects[e.entityUuid]
+                            if (existing != null && existing.updatedAtMs > e.lastSeenMs) continue
+                            val isAir = e.category.equals("DHS_AMO", ignoreCase = true) ||
+                                e.primaryFacetKey.startsWith("ICAO:", ignoreCase = true) ||
+                                e.primaryFacetKey.startsWith("adsb:", ignoreCase = true)
+                            val propClass = if (isAir) "AIRBORNE" else "GROUND_DIRECT"
+                            val evidenceList = (listOf(e.primaryFacetKey) + e.facets)
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() }
+                                .distinct()
+                                .map { fk ->
+                                    RemoteEvidence(
+                                        kind = if (isAir) "ADSB_AIR" else "DERIVED_ENTITY",
+                                        facetKey = fk,
+                                        detail = e.label.ifBlank { fk },
+                                        weight = 0.85,
+                                        lastSeenMs = e.lastSeenMs
+                                    )
+                                }
+                            val confVal = when {
+                                e.corroborationCount >= 3 || e.sightingCount >= 3 -> 0.92
+                                e.corroborationCount == 2 || e.sightingCount == 2 -> 0.78
+                                else -> 0.62
+                            }
+                            objects[e.entityUuid] = RemoteThreatObject(
+                                uuid = e.entityUuid,
+                                trackUuid = e.entityUuid,
+                                updatedAtMs = e.lastSeenMs,
+                                confidence = RemoteConfidence(
+                                    overall = confVal,
+                                    classification = confVal,
+                                    spatial = confVal,
+                                    temporalFreshness = 1.0
+                                ),
+                                location = RemoteLocation(
+                                    lat = e.estimatedLat,
+                                    lon = e.estimatedLon,
+                                    uncertaintyRadiusM = e.uncertaintyRadiusM,
+                                    propagationClass = propClass
+                                ),
+                                classification = RemoteClassification(
+                                    masterGroup = if (e.category.startsWith("DHS")) "DHS" else "OTHER",
+                                    category = e.category,
+                                    label = e.label,
+                                    recurrenceSummary = e.label,
+                                    evidenceSources = evidenceList
+                                ),
+                                sightingCount = e.sightingCount.coerceAtLeast(1),
+                                corroborationCount = e.corroborationCount.coerceAtLeast(1)
+                            )
+                        }
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }
+            if (onComplete != null) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete.invoke()
+                }
+            }
         }
     }
 

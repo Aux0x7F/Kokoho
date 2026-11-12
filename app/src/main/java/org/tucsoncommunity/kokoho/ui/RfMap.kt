@@ -344,7 +344,12 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val fallbackLat = ScanForegroundService.lastFix?.latitude ?: map.camera.lat.takeIf { kotlin.math.abs(it) > 1e-4 } ?: 32.2226
         val fallbackLon = ScanForegroundService.lastFix?.longitude ?: map.camera.lon.takeIf { kotlin.math.abs(it) > 1e-4 } ?: -110.9747
 
-        val groundThreats = snap.mapThreats.filter { !it.isAircraft && !(it.isDrone && it.isPinpointed) }
+        val groundThreats = snap.mapThreats.filter {
+            !it.isAircraft &&
+                !(it.isDrone && it.isPinpointed) &&
+                !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
+        }
+        val zoom = map.camera.zoom
 
         data class MergedCluster(
             val threats: MutableList<org.tucsoncommunity.kokoho.posture.EvaluatedThreat>,
@@ -370,7 +375,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             val r = if (t.isPinpointed) 0.0 else t.mapCircleRadiusM.toDouble()
             val match = clusters.firstOrNull { c ->
                 val d = DeviceRegistry.metersBetween(lat, lon, c.lat, c.lon)
-                val overlapThreshold = kotlin.math.max(80.0, kotlin.math.min(r, c.radiusM) * 0.65)
+                // Multiple colocated derived dots collapse into one aggregate centroid until closer zoom levels (>= 15.5)
+                val bothDerivedDots = (isDerivedOrNarrow && r <= 180.0) && c.radiusM <= 180.0
+                val overlapThreshold = if (bothDerivedDots && zoom >= 15.5) {
+                    14.0
+                } else {
+                    kotlin.math.max(95.0, kotlin.math.min(r, c.radiusM) * 0.65)
+                }
                 d <= overlapThreshold
             }
             if (match != null) {
@@ -421,6 +432,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 val st = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
                 "• ${t.friendlyLabel}: ${t.title} ($st)"
             }
+            val showCenterDot = isPinpointed || sorted.size >= 2 || totalSightings >= 2 || effRadiusM <= 180
             MapPin(
                 mac = "kokoho:${lead.uuid}",
                 lat = c.lat,
@@ -431,7 +443,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 details = "${lead.posture.badgeLabel}\n$fullDist · Last seen $staleness\n$unitLines",
                 radiusM = radius,
                 whereNote = note,
-                showDot = isPinpointed,
+                showDot = showCenterDot,
                 opacity = opacity
             )
         }
