@@ -102,6 +102,20 @@ object KokohoDirectory {
     val isDirectoryAvailable: Boolean
         get() = hasPackagedDirectoryDb
 
+    /**
+     * Fast capability check (`< 0.5 ms`, no gunzip I/O) indicating whether the extended directory
+     * database asset is packaged in this build.
+     */
+    fun hasExtendedDirectoryCapability(context: Context): Boolean {
+        if (hasPackagedDirectoryDb) return true
+        val app = context.applicationContext ?: context
+        val stream = runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET) }.getOrElse {
+            runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET.removeSuffix(".gz")) }.getOrNull()
+        } ?: return false
+        runCatching { stream.close() }
+        return true
+    }
+
     private fun openAssetStreamSmart(context: Context, pathWithGz: String): java.io.InputStream? {
         val raw = runCatching { context.assets.open(pathWithGz) }.getOrElse {
             runCatching { context.assets.open(pathWithGz.removeSuffix(".gz")) }.getOrNull()

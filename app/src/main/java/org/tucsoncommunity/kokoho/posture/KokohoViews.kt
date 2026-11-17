@@ -159,10 +159,11 @@ class KokohoViews(
 
     private val tabRow: LinearLayout
     private val tabButtons = LinkedHashMap<Tab, TextView>()
+    val visibleTabs: List<Tab>
     fun tabButton(tab: Tab): TextView? = tabButtons[tab]
 
     private val monitorContainer: LinearLayout
-    val searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView
+    val searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView?
     private val bluetoothNoticePill: MaterialButton
     private val postureBadge: TextView
     val postureHeadline: TextView
@@ -192,16 +193,17 @@ class KokohoViews(
         rootLinear.setPadding(0, 0, 0, 0)
 
         // 1. Unified Top Header Bar
+        val isDebugBuild = org.tucsoncommunity.kokoho.BuildConfig.DEBUG
         headerLogo = ImageView(activity).apply {
-            setImageResource(R.drawable.ic_kokoho_logo)
-            contentDescription = "Kokoho"
+            setImageResource(if (isDebugBuild) R.drawable.ic_tile_scan else R.drawable.ic_kokoho_logo)
+            contentDescription = activity.getString(R.string.app_name)
             layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).apply {
                 marginEnd = dp(10)
             }
         }
 
         headerTitle = TextView(activity).apply {
-            text = "KOKOHO"
+            text = if (isDebugBuild) "KOKOHO DEBUG" else "KOKOHO"
             textSize = 16f
             typeface = Typeface.create("sans-serif-black", Typeface.BOLD)
             letterSpacing = 0.06f
@@ -312,14 +314,21 @@ class KokohoViews(
             addView(menuButton)
         }
 
-        // 2. 3-Category Segmented Tab Bar (Monitor | Map | Utility)
+        // 2. Segmented Tab Bar (Monitor | Map, plus Search when extended directory capability is packaged)
+        val hasSearchTab = KokohoDirectory.hasExtendedDirectoryCapability(activity)
+        visibleTabs = if (hasSearchTab) {
+            listOf(Tab.MONITOR, Tab.MAP, Tab.SEARCH)
+        } else {
+            listOf(Tab.MONITOR, Tab.MAP)
+        }
+
         tabRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(2), dp(12), dp(8))
         }
 
-        for (tab in Tab.entries) {
+        for (tab in visibleTabs) {
             val tv = TextView(activity).apply {
                 text = tab.title
                 textSize = 13f
@@ -510,10 +519,14 @@ class KokohoViews(
             addView(bottomFooterWrapper)
         }
 
-        searchView = org.tucsoncommunity.kokoho.ui.KokohoSearchView(activity)
+        searchView = if (hasSearchTab) {
+            org.tucsoncommunity.kokoho.ui.KokohoSearchView(activity)
+        } else {
+            null
+        }
 
         binding.contentArea.addView(monitorContainer)
-        binding.contentArea.addView(searchView.root)
+        searchView?.let { binding.contentArea.addView(it.root) }
 
         syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
@@ -635,14 +648,15 @@ class KokohoViews(
     }
 
     fun selectTab(tab: Tab) {
+        if (tab == Tab.SEARCH && searchView == null) return
         val wasSearch = currentTab == Tab.SEARCH
         currentTab = tab
         (binding.filterChips.parent as? View)?.visibility = View.GONE
 
         when (tab) {
             Tab.MONITOR -> {
-                if (wasSearch) searchView.onTabUnselected()
-                searchView.root.visibility = View.GONE
+                if (wasSearch) searchView?.onTabUnselected()
+                searchView?.root?.visibility = View.GONE
                 onSwitchPanes(emptySet())
                 binding.mapPane.visibility = View.GONE
                 binding.radarPane.visibility = View.GONE
@@ -651,19 +665,20 @@ class KokohoViews(
                 latestSnapshot?.let { updatePosture(System.currentTimeMillis(), it) }
             }
             Tab.MAP -> {
-                if (wasSearch) searchView.onTabUnselected()
-                searchView.root.visibility = View.GONE
+                if (wasSearch) searchView?.onTabUnselected()
+                searchView?.root?.visibility = View.GONE
                 monitorContainer.visibility = View.GONE
                 onSwitchPanes(setOf("map"))
             }
             Tab.SEARCH -> {
+                val sv = searchView ?: return
                 monitorContainer.visibility = View.GONE
                 onSwitchPanes(emptySet())
                 binding.mapPane.visibility = View.GONE
                 binding.radarPane.visibility = View.GONE
                 binding.listFrame.visibility = View.GONE
-                searchView.root.visibility = View.VISIBLE
-                searchView.onTabSelected()
+                sv.root.visibility = View.VISIBLE
+                sv.onTabSelected()
             }
         }
         applySurfaceThemeColors()

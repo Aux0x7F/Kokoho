@@ -193,7 +193,7 @@ object NotificationHelper {
         val (titleLine, subLine) = currentPostureSummary(context)
         val stop = stopServiceIntent(context)
         val builder = NotificationCompat.Builder(context, CHANNEL_SERVICE)
-            .setContentTitle(if (discreet) "Kokoho" else titleLine)
+            .setContentTitle(if (discreet) context.getString(R.string.app_name) else titleLine)
             .setSmallIcon(R.drawable.ic_tile_scan)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

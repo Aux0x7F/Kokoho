@@ -226,8 +226,8 @@ object UpdateInstaller {
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "App updates", NotificationManager.IMPORTANCE_HIGH))
         val tap = PendingIntent.getActivity(app, 0, card.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         nm.notify(NOTIFICATION_ID, NotificationCompat.Builder(app, CHANNEL)
-            .setSmallIcon(R.drawable.ic_kokoho_logo)
-            .setContentTitle("Kokoho update is ready")
+            .setSmallIcon(R.drawable.ic_tile_scan)
+            .setContentTitle("${app.getString(org.tucsoncommunity.kokoho.R.string.app_name)} update is ready")
             .setContentText("Tap to install it")
             .setContentIntent(tap).setAutoCancel(true).setPriority(NotificationCompat.PRIORITY_HIGH).build())
     }

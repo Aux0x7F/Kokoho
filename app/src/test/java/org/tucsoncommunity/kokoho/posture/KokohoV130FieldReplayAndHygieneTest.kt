@@ -773,6 +773,7 @@ class KokohoV130FieldReplayAndHygieneTest {
     }
 
     @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     fun v134SearchTabHamburgerWidthAndStationClusterMerge() {
         val actCtrl = Robolectric.buildActivity(AppCompatActivity::class.java).setup()
         val act = actCtrl.get()
@@ -935,7 +936,27 @@ class KokohoV130FieldReplayAndHygieneTest {
             locGeoAtZoom16.contains("\"id\":\"${targetStation.id}\"")
         )
 
-        // 3. Third Main Tab: Search (Keyboard lifecycle, Autocomplete Filter Pills, Raw Search w/o Filter Match, & Tap-to-Detail)
+        // 3. Debug Label ("Kokoho Debug") & Inverted Notification / Launcher Icon Verification
+        if (BuildConfig.DEBUG) {
+            assertEquals("Debug install must be labeled 'Kokoho Debug'", "Kokoho Debug", ctx.getString(org.tucsoncommunity.kokoho.R.string.app_name))
+            val notifDrawable = androidx.core.content.ContextCompat.getDrawable(ctx, org.tucsoncommunity.kokoho.R.drawable.ic_tile_scan)
+            assertNotNull("Debug notification icon ic_tile_scan must load", notifDrawable)
+            val iconBmp = android.graphics.Bitmap.createBitmap(96, 96, android.graphics.Bitmap.Config.ARGB_8888)
+            val iconCanvas = android.graphics.Canvas(iconBmp)
+            notifDrawable!!.setBounds(0, 0, 96, 96)
+            notifDrawable.draw(iconCanvas)
+            assertTrue(
+                "Inverted debug notification badge rim at (12, 48) must be solid opaque",
+                android.graphics.Color.alpha(iconBmp.getPixel(12, 48)) > 200
+            )
+            assertEquals(
+                "Inverted debug notification Kokoho stroke at (48, 16) must be cut out (transparent negative space)",
+                0,
+                android.graphics.Color.alpha(iconBmp.getPixel(48, 16))
+            )
+        }
+
+        // 4. Tab Gating: Public has strictly [Monitor, Map] (NO Search tab); Extended Directory builds expose [Monitor, Map, Search]
         val binding = org.tucsoncommunity.kokoho.databinding.ActivityMainBinding.inflate(act.layoutInflater)
         act.setContentView(binding.root)
         val views = KokohoViews(
@@ -944,68 +965,81 @@ class KokohoV130FieldReplayAndHygieneTest {
             onSwitchPanes = {},
             onFilterChanged = {}
         )
-        assertEquals(
-            "Main activity must expose Monitor, Map, and Search tabs",
-            listOf("Monitor", "Map", "Search"),
-            KokohoViews.Tab.entries.map { it.title }
-        )
+        if (!KokohoDirectory.hasExtendedDirectoryCapability(ctx)) {
+            assertEquals(
+                "Public build must expose ONLY Monitor and Map tabs (no Search tab on public)",
+                listOf("Monitor", "Map"),
+                views.visibleTabs.map { it.title }
+            )
+            assertNull("Public build must not instantiate Search tab button", views.tabButton(KokohoViews.Tab.SEARCH))
+            assertNull("Public build must not instantiate Search view", views.searchView)
+            views.selectTab(KokohoViews.Tab.SEARCH)
+            assertEquals("Selecting Search on public must remain a no-op on Monitor", KokohoViews.Tab.MONITOR, views.currentTab)
+        } else {
+            assertEquals(
+                "Extended directory build must expose Monitor, Map, and Search tabs",
+                listOf("Monitor", "Map", "Search"),
+                views.visibleTabs.map { it.title }
+            )
+            val sv = views.searchView!!
 
-        // Switch to Search tab -> Search root visible & keyboard input focused immediately
-        views.selectTab(KokohoViews.Tab.SEARCH)
-        assertEquals(android.view.View.VISIBLE, views.searchView.root.visibility)
-        assertTrue("Search input must receive focus immediately on entering Search tab", views.searchView.searchInput.hasFocus())
+            // Switch to Search tab -> Search root visible & keyboard input focused immediately
+            views.selectTab(KokohoViews.Tab.SEARCH)
+            assertEquals(android.view.View.VISIBLE, sv.root.visibility)
+            assertTrue("Search input must receive focus immediately on entering Search tab", sv.searchInput.hasFocus())
 
-        // Autocomplete pill commit via Tab key ("Loc" -> "Location" pill)
-        views.searchView.searchInput.setText("Loc")
-        views.searchView.refreshNowSynchronously()
-        views.searchView.searchInput.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB))
-        views.searchView.refreshNowSynchronously()
-        assertEquals(listOf("Location"), views.searchView.getActivePills())
-        assertEquals("", views.searchView.searchInput.text.toString())
-        val locOnlyRows = views.searchView.getCurrentResults()
-        assertTrue("Location filter pill must return non-empty Location rows", locOnlyRows.isNotEmpty())
-        assertTrue(
-            "Location filter pill must restrict results strictly to SchemaKind.LOCATION",
-            locOnlyRows.all { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.LOCATION }
-        )
+            // Autocomplete pill commit via Tab key ("Loc" -> "Location" pill)
+            sv.searchInput.setText("Loc")
+            sv.refreshNowSynchronously()
+            sv.searchInput.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB))
+            sv.refreshNowSynchronously()
+            assertEquals(listOf("Location"), sv.getActivePills())
+            assertEquals("", sv.searchInput.text.toString())
+            val locOnlyRows = sv.getCurrentResults()
+            assertTrue("Location filter pill must return non-empty Location rows", locOnlyRows.isNotEmpty())
+            assertTrue(
+                "Location filter pill must restrict results strictly to SchemaKind.LOCATION",
+                locOnlyRows.all { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.LOCATION }
+            )
 
-        // Dismiss pill via chip click
-        val pillsLayout = (views.searchView.root.getChildAt(0) as android.view.ViewGroup).getChildAt(0) as android.widget.HorizontalScrollView
-        val pillsRow = pillsLayout.getChildAt(0) as android.view.ViewGroup
-        while (pillsRow.childCount > 0) {
-            pillsRow.getChildAt(0).performClick()
+            // Dismiss pill via chip click
+            val pillsLayout = (sv.root.getChildAt(0) as android.view.ViewGroup).getChildAt(0) as android.widget.HorizontalScrollView
+            val pillsRow = pillsLayout.getChildAt(0) as android.view.ViewGroup
+            while (pillsRow.childCount > 0) {
+                pillsRow.getChildAt(0).performClick()
+            }
+            assertTrue("Clicking pill chips must dismiss all active pills", sv.getActivePills().isEmpty())
+
+            // Raw search while NO filter pill matches (partial MAC "91:aa:11" from Confirmed ICE unit)
+            sv.searchInput.setText("91:aa:11")
+            sv.refreshNowSynchronously()
+            val rawNoPillResults = sv.getCurrentResults()
+            assertTrue(
+                "Raw search '91:aa:11' with no filter match must find both the Confirmed ICE Detection and its constituent Device",
+                rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DETECTION && it.targetDetailKey.contains("merge-ice-0001") } &&
+                    rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DEVICE && it.targetDetailKey.contains("00:30:44:91:AA:11", ignoreCase = true) }
+            )
+
+            // Tapping a result row launches DeviceDetailActivity with exact target key
+            val rv = sv.recyclerView
+            rv.measure(
+                android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+                android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
+            )
+            rv.layout(0, 0, 1080, 1800)
+            assertTrue("RecyclerView must lay out visible result cards", rv.childCount > 0)
+            rv.getChildAt(0).performClick()
+            val detailIntent = org.robolectric.Shadows.shadowOf(act).nextStartedActivity
+            assertNotNull("Tapping anywhere on a search result card must open DeviceDetailActivity", detailIntent)
+            assertEquals(DeviceDetailActivity::class.java.name, detailIntent.component?.className)
+
+            // Switch away to Monitor tab -> Search hidden & focus/keyboard dismissed
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            views.selectTab(KokohoViews.Tab.MONITOR)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertEquals(android.view.View.GONE, sv.root.visibility)
+            assertFalse("Switching away from Search tab must clear focus and dismiss keyboard", sv.searchInput.hasFocus())
         }
-        assertTrue("Clicking pill chips must dismiss all active pills", views.searchView.getActivePills().isEmpty())
-
-        // Raw search while NO filter pill matches (partial MAC "91:aa:11" from Confirmed ICE unit)
-        views.searchView.searchInput.setText("91:aa:11")
-        views.searchView.refreshNowSynchronously()
-        val rawNoPillResults = views.searchView.getCurrentResults()
-        assertTrue(
-            "Raw search '91:aa:11' with no filter match must find both the Confirmed ICE Detection and its constituent Device",
-            rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DETECTION && it.targetDetailKey.contains("merge-ice-0001") } &&
-                rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DEVICE && it.targetDetailKey.contains("00:30:44:91:AA:11", ignoreCase = true) }
-        )
-
-        // Tapping a result row launches DeviceDetailActivity with exact target key
-        val rv = views.searchView.recyclerView
-        rv.measure(
-            android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
-            android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
-        )
-        rv.layout(0, 0, 1080, 1800)
-        assertTrue("RecyclerView must lay out visible result cards", rv.childCount > 0)
-        rv.getChildAt(0).performClick()
-        val detailIntent = org.robolectric.Shadows.shadowOf(act).nextStartedActivity
-        assertNotNull("Tapping anywhere on a search result card must open DeviceDetailActivity", detailIntent)
-        assertEquals(DeviceDetailActivity::class.java.name, detailIntent.component?.className)
-
-        // Switch away to Monitor tab -> Search hidden & focus/keyboard dismissed
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-        views.selectTab(KokohoViews.Tab.MONITOR)
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-        assertEquals(android.view.View.GONE, views.searchView.root.visibility)
-        assertFalse("Switching away from Search tab must clear focus and dismiss keyboard", views.searchView.searchInput.hasFocus())
 
         actCtrl.pause().stop().destroy()
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
