@@ -792,7 +792,7 @@ class KokohoV130FieldReplayAndHygieneTest {
 
         val nowMs = 1_794_900_000_000L
 
-        // 1. Fixed 90% Screen Width Hamburger Menu (both collapsed and expanded)
+        // 1. Fixed 90% Screen Width Hamburger Menu + "Bug Report" Entry & Generic Bug Modal
         val expectedMenuWidth = (act.resources.displayMetrics.widthPixels * 0.90f).toInt()
         val menuDialog = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.showRootSandwichMenu(act) {}
         assertTrue("Hamburger menu dialog must be showing", menuDialog.isShowing)
@@ -801,7 +801,25 @@ class KokohoV130FieldReplayAndHygieneTest {
             expectedMenuWidth,
             menuDialog.window!!.attributes.width
         )
+        val menuTexts = collectAllText(menuDialog.window!!.decorView)
+        assertTrue("Hamburger menu must include 'Bug Report' entry", menuTexts.contains("Bug Report"))
         menuDialog.dismiss()
+
+        val bugDialog = org.tucsoncommunity.kokoho.ui.KokohoReportWizard.openGenericBugReportModal(act)
+        assertTrue("Generic Bug Report modal must show", bugDialog.isShowing)
+        assertEquals("Bug Report modal must be 90% screen width", expectedMenuWidth, bugDialog.window!!.attributes.width)
+        assertTrue(collectAllText(bugDialog.window!!.decorView).contains("Submit Bug Report"))
+        bugDialog.dismiss()
+
+        KokohoHubClient.clearPendingBugReportsForTest(ctx)
+        val sampleBug = KokohoHubClient.buildBugDiagnostics(ctx, includeLogs = true).copy(
+            category = "RTL-SDR",
+            summary = "Sample offline bug queue check"
+        )
+        KokohoHubClient.enqueueBugReport(ctx, sampleBug)
+        assertEquals(1, KokohoHubClient.pendingBugReports(ctx).size)
+        assertEquals("RTL-SDR", KokohoHubClient.pendingBugReports(ctx).single().category)
+        KokohoHubClient.clearPendingBugReportsForTest(ctx)
 
         // 2. Station + Detection Centroid Merging (Station icon + Station first in comma list + no duplicate station pin)
         val targetStation = KokohoDirectory.visibleLocations(ctx).first { it.title == "ICE FO" }
@@ -965,6 +983,22 @@ class KokohoV130FieldReplayAndHygieneTest {
             onSwitchPanes = {},
             onFilterChanged = {}
         )
+        // Verify Share button has NO pause icon when off, and keeps glowing pulsing red dot when Sharing ("Stop")
+        KokohoSignatures.setSharingActive(ctx, false)
+        views.syncSharePillState()
+        assertEquals("Share", views.shareToggleButton.text.toString())
+        assertNull("Share button must have NO pause icon when not sharing", views.shareToggleButton.icon)
+
+        KokohoSignatures.setContributionAllowedInSettings(ctx, true)
+        KokohoSignatures.setSharingActive(ctx, true)
+        views.syncSharePillState()
+        assertEquals("Stop", views.shareToggleButton.text.toString())
+        assertNotNull("Stop button must display glowing red dot icon while sharing", views.shareToggleButton.icon)
+        assertTrue("Sharing indicator must be pulsing red while sharing", views.isSharingPulsingRed)
+
+        KokohoSignatures.setSharingActive(ctx, false)
+        views.syncSharePillState()
+        assertNull("Returning to Share must clear icon again", views.shareToggleButton.icon)
         if (!KokohoDirectory.hasExtendedDirectoryCapability(ctx)) {
             assertEquals(
                 "Public build must expose ONLY Monitor and Map tabs (no Search tab on public)",

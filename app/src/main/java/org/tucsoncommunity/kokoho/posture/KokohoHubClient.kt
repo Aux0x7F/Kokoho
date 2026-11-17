@@ -67,6 +67,19 @@ object KokohoHubClient {
         val status: String = "PENDING"
     )
 
+    data class BugReportSubmission(
+        @SerializedName("report_id") val reportId: String = java.util.UUID.randomUUID().toString(),
+        @SerializedName("created_at_ms") val createdAtMs: Long = System.currentTimeMillis(),
+        val category: String = "App / UI",
+        val summary: String = "",
+        @SerializedName("target_key") val targetKey: String? = null,
+        @SerializedName("app_version") val appVersion: String = "",
+        @SerializedName("release_channel") val releaseChannel: String = "",
+        @SerializedName("device_info") val deviceInfo: String = "",
+        val diagnostics: String = "",
+        val status: String = "OPEN"
+    )
+
     private data class RemoteEntityDetailsDto(
         @SerializedName("target_key") val targetKey: String = "",
         val entity: RemoteTrendEntity? = null,
@@ -302,6 +315,7 @@ object KokohoHubClient {
         }
         if (streamJob?.isActive == true) return
         schedulePeriodicCheckin(app)
+        flushPendingBugReports(app)
         streamJob = scope.launch {
             checkinNow(app)
             var lastTrendsRefreshAt = System.currentTimeMillis()
@@ -713,6 +727,148 @@ object KokohoHubClient {
                 }
             }
         }
+    }
+
+    private const val KEY_PENDING_BUGS = "kokoho_pending_bugs_json"
+    private val bugQueueLock = Any()
+
+    fun pendingBugReports(context: Context): List<BugReportSubmission> = synchronized(bugQueueLock) {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_PENDING_BUGS, null) ?: return emptyList()
+        return runCatching {
+            val type = object : com.google.gson.reflect.TypeToken<List<BugReportSubmission>>() {}.type
+            gson.fromJson<List<BugReportSubmission>>(raw, type).orEmpty()
+        }.getOrDefault(emptyList())
+    }
+
+    private fun savePendingBugReports(context: Context, list: List<BugReportSubmission>) = synchronized(bugQueueLock) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PENDING_BUGS, gson.toJson(list.takeLast(50)))
+            .apply()
+    }
+
+    fun enqueueBugReport(context: Context, submission: BugReportSubmission) {
+        synchronized(bugQueueLock) {
+            val current = pendingBugReports(context).filterNot { it.reportId == submission.reportId }
+            savePendingBugReports(context, current + submission)
+        }
+    }
+
+    fun clearPendingBugReportsForTest(context: Context) {
+        synchronized(bugQueueLock) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_PENDING_BUGS).apply()
+        }
+    }
+
+    /**
+     * Builds a diagnostic summary (app version, device model/SDK, active sensors, & recent crash log tail)
+     * without attaching personal GPS coordinates.
+     */
+    fun buildBugDiagnostics(context: Context, includeLogs: Boolean): BugReportSubmission {
+        val appVer = "${org.tucsoncommunity.kokoho.BuildConfig.VERSION_NAME} (${org.tucsoncommunity.kokoho.BuildConfig.VERSION_CODE})${if (org.tucsoncommunity.kokoho.BuildConfig.DEBUG) " debug" else ""}"
+        val devInfo = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})"
+        val diag = if (!includeLogs) {
+            ""
+        } else {
+            buildString {
+                append("scanning=").append(org.tucsoncommunity.kokoho.service.ScanForegroundService.isRunning)
+                append(", sharing=").append(KokohoSignatures.isSharingActive(context))
+                append(", bt=").append(org.tucsoncommunity.kokoho.util.Permissions.isBluetoothEnabled(context))
+                append(", hub=").append(statusLabel)
+                val crashFile = org.tucsoncommunity.kokoho.util.CrashLog.file(context)
+                if (crashFile.exists() && crashFile.length() > 0L) {
+                    val tail = runCatching { crashFile.readText().takeLast(3500) }.getOrNull()
+                    if (!tail.isNullOrBlank()) {
+                        append("\n--- recent crash_log.txt ---\n").append(tail)
+                    }
+                }
+            }
+        }
+        return BugReportSubmission(
+            appVersion = appVer,
+            releaseChannel = org.tucsoncommunity.kokoho.BuildConfig.RELEASE_CHANNEL,
+            deviceInfo = devInfo,
+            diagnostics = diag
+        )
+    }
+
+    private fun postSingleBugReportBlocking(base: String, item: BugReportSubmission): Boolean {
+        return runCatching {
+            val json = gson.toJson(item)
+            val conn = (URL("$base/v1/bugs").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 10_000
+                readTimeout = 10_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+            try {
+                conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                conn.responseCode in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrDefault(false)
+    }
+
+    fun flushPendingBugReports(context: Context) {
+        val app = context.applicationContext ?: context
+        scope.launch {
+            val queued = pendingBugReports(app)
+            if (queued.isEmpty()) return@launch
+            val base = hubUrl(app)
+            val failed = ArrayList<BugReportSubmission>()
+            for (item in queued) {
+                if (!postSingleBugReportBlocking(base, item)) {
+                    failed += item
+                }
+            }
+            synchronized(bugQueueLock) {
+                val latest = pendingBugReports(app)
+                val sentIds = (queued.map { it.reportId }.toSet() - failed.map { it.reportId }.toSet())
+                savePendingBugReports(app, latest.filterNot { it.reportId in sentIds })
+            }
+        }
+    }
+
+    /**
+     * Durably queues a generic or contextual Bug Report locally and immediately attempts `POST /v1/bugs`
+     * to `kokoho-hub` for batch developer review (independent of passive background Share toggle).
+     */
+    fun submitBugReport(
+        context: Context,
+        category: String,
+        summary: String,
+        targetKey: String? = null,
+        includeDiagnostics: Boolean = true,
+        onComplete: ((uploadedNow: Boolean) -> Unit)? = null
+    ): BugReportSubmission {
+        val app = context.applicationContext ?: context
+        val template = buildBugDiagnostics(app, includeDiagnostics)
+        val submission = template.copy(
+            category = category.trim().ifEmpty { "App / UI" },
+            summary = summary.trim(),
+            targetKey = targetKey?.takeIf { it.isNotBlank() }
+        )
+        enqueueBugReport(app, submission)
+        scope.launch {
+            val base = hubUrl(app)
+            val ok = postSingleBugReportBlocking(base, submission)
+            if (ok) {
+                synchronized(bugQueueLock) {
+                    val remaining = pendingBugReports(app).filterNot { it.reportId == submission.reportId }
+                    savePendingBugReports(app, remaining)
+                }
+            }
+            flushPendingBugReports(app)
+            if (onComplete != null) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(ok)
+                }
+            }
+        }
+        return submission
     }
 
     /**

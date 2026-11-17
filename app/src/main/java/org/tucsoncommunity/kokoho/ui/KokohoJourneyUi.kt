@@ -702,6 +702,15 @@ object KokohoJourneyUi {
         }
         body.addView(settingsHeader)
 
+        // ---- Entry 4: BUG REPORT ----
+        val bugReportHeader = buildMenuSectionButton(VectorIconKind.BUG_REPORT, "Bug Report", null).apply {
+            setOnClickListener {
+                dialog.dismiss()
+                KokohoReportWizard.openGenericBugReportModal(activity)
+            }
+        }
+        body.addView(bugReportHeader)
+
         dialog.setContentView(outer, ViewGroup.LayoutParams(menuWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.show()
         dialog.window?.setLayout(menuWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -824,7 +833,8 @@ object KokohoJourneyUi {
         BELL_ALARM,
         EYE_VISIBILITY,
         TOOLBOX,
-        GEAR_SETTINGS
+        GEAR_SETTINGS,
+        BUG_REPORT
     }
 
     class VectorIconDrawable(
@@ -926,6 +936,18 @@ object KokohoJourneyUi {
                 VectorIconKind.GEAR_SETTINGS -> {
                     canvas.drawCircle(cx, cy, w * 0.15f, paint)
                     canvas.drawCircle(cx, cy, w * 0.30f, paint)
+                }
+                VectorIconKind.BUG_REPORT -> {
+                    // Oval carapace + head arc + center split + 3 leg pairs
+                    canvas.drawOval(RectF(cx - w * 0.21f, t + h * 0.34f, cx + w * 0.21f, t + h * 0.80f), paint)
+                    canvas.drawArc(RectF(cx - w * 0.13f, t + h * 0.20f, cx + w * 0.13f, t + h * 0.42f), 180f, 180f, false, paint)
+                    canvas.drawLine(cx, t + h * 0.36f, cx, t + h * 0.78f, paint)
+                    canvas.drawLine(cx - w * 0.36f, t + h * 0.38f, cx - w * 0.20f, t + h * 0.46f, paint)
+                    canvas.drawLine(cx + w * 0.36f, t + h * 0.38f, cx + w * 0.20f, t + h * 0.46f, paint)
+                    canvas.drawLine(cx - w * 0.38f, t + h * 0.56f, cx - w * 0.21f, t + h * 0.56f, paint)
+                    canvas.drawLine(cx + w * 0.38f, t + h * 0.56f, cx + w * 0.21f, t + h * 0.56f, paint)
+                    canvas.drawLine(cx - w * 0.36f, t + h * 0.74f, cx - w * 0.20f, t + h * 0.66f, paint)
+                    canvas.drawLine(cx + w * 0.36f, t + h * 0.74f, cx + w * 0.20f, t + h * 0.66f, paint)
                 }
             }
         }

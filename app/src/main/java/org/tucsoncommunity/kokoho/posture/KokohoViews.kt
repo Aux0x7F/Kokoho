@@ -232,11 +232,11 @@ class KokohoViews(
             cornerRadius = dp(999)
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(11), 0, dp(13), 0)
-            icon = sharingIndicatorDrawable
+            setPadding(dp(15), 0, dp(15), 0)
+            icon = null
             iconTint = null
             iconSize = dp(15)
-            iconPadding = dp(6)
+            iconPadding = 0
             iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -563,8 +563,9 @@ class KokohoViews(
         when {
             !allowedInSettings -> {
                 stopSharePulse()
-                sharingIndicatorDrawable.mode = SharingIndicatorMode.DISABLED_BARS
-                sharingIndicatorDrawable.invalidateSelf()
+                shareToggleButton.icon = null
+                shareToggleButton.iconPadding = 0
+                shareToggleButton.setPadding(dp(15), 0, dp(15), 0)
                 shareToggleButton.text = "Share"
                 shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x33455A64)
                 shareToggleButton.strokeColor = ColorStateList.valueOf(0x55FFFFFF)
@@ -579,6 +580,10 @@ class KokohoViews(
             }
             sharingNow -> {
                 sharingIndicatorDrawable.mode = SharingIndicatorMode.PULSING_RED_DOT
+                shareToggleButton.icon = sharingIndicatorDrawable
+                shareToggleButton.iconSize = dp(15)
+                shareToggleButton.iconPadding = dp(6)
+                shareToggleButton.setPadding(dp(11), 0, dp(14), 0)
                 startSharePulse()
                 sharingIndicatorDrawable.invalidateSelf()
                 shareToggleButton.text = "Stop"
@@ -595,8 +600,9 @@ class KokohoViews(
             }
             else -> {
                 stopSharePulse()
-                sharingIndicatorDrawable.mode = SharingIndicatorMode.PAUSED_BARS
-                sharingIndicatorDrawable.invalidateSelf()
+                shareToggleButton.icon = null
+                shareToggleButton.iconPadding = 0
+                shareToggleButton.setPadding(dp(15), 0, dp(15), 0)
                 shareToggleButton.text = "Share"
                 shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x7712161F)
                 shareToggleButton.strokeColor = ColorStateList.valueOf(0x99FFFFFF.toInt())

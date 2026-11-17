@@ -222,58 +222,71 @@ object KokohoReportWizard {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { topMargin = dp(activity, 14) }
             }
-            outer.addView(submitBtn)
-            dialog.setContentView(outer)
-            dialog.show()
-            return
-        }
-
-        if (mode == Mode.BUG_REPORT) {
-            val infoTv = TextView(activity).apply {
-                text = "Describe what happened or behaved unexpectedly (local telemetry context is attached automatically):"
-                textSize = 13.5f
-                setTextColor(KokohoJourneyUi.INK_SECONDARY)
+                outer.addView(submitBtn)
+                val modalW = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+                outer.minimumWidth = modalW
+                dialog.setContentView(outer, ViewGroup.LayoutParams(modalW, ViewGroup.LayoutParams.WRAP_CONTENT))
+                dialog.show()
+                dialog.window?.setLayout(modalW, ViewGroup.LayoutParams.WRAP_CONTENT)
+                return
             }
-            val bugInput = styledInput("Bug report details…", multiLine = true)
-            form.addView(infoTv)
-            form.addView(bugInput)
 
-            val submitBtn = KokohoJourneyUi.primaryActionButton(activity, "Submit Bug Report") {
-                val detail = bugInput.text?.toString()?.trim().orEmpty()
-                if (detail.isEmpty()) {
-                    Toast.makeText(activity, "Please enter bug report details", Toast.LENGTH_SHORT).show()
-                    return@primaryActionButton
+            if (mode == Mode.BUG_REPORT) {
+                val infoTv = TextView(activity).apply {
+                    text = "Describe what happened or behaved unexpectedly (local telemetry context is attached automatically):"
+                    textSize = 13.5f
+                    setTextColor(KokohoJourneyUi.INK_SECONDARY)
                 }
-                val rec = WitnessReportRecord(
-                    targetKey = targetUuid,
-                    entityUuid = targetUuid,
-                    agencyCode = selectedAgency.id,
-                    notes = detail,
-                    reportKind = "BUG",
-                    subjectKind = "BUG",
-                    lat = droppedLat,
-                    lon = droppedLon
-                )
-                KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
-                org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordUserInteraction(
-                    context = activity,
-                    action = "REPORT_BUG",
-                    targetKey = targetUuid,
-                    detail = detail
-                )
-                dialog.dismiss()
-                onSubmitted("kokoho:$targetUuid")
-            }.apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(activity, 14) }
+                val bugInput = styledInput("Bug report details…", multiLine = true)
+                form.addView(infoTv)
+                form.addView(bugInput)
+
+                val submitBtn = KokohoJourneyUi.primaryActionButton(activity, "Submit Bug Report") {
+                    val detail = bugInput.text?.toString()?.trim().orEmpty()
+                    if (detail.isEmpty()) {
+                        Toast.makeText(activity, "Please enter bug report details", Toast.LENGTH_SHORT).show()
+                        return@primaryActionButton
+                    }
+                    val rec = WitnessReportRecord(
+                        targetKey = targetUuid,
+                        entityUuid = targetUuid,
+                        agencyCode = selectedAgency.id,
+                        notes = detail,
+                        reportKind = "BUG",
+                        subjectKind = "BUG",
+                        lat = droppedLat,
+                        lon = droppedLon
+                    )
+                    KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
+                    org.tucsoncommunity.kokoho.posture.KokohoHubClient.submitBugReport(
+                        context = activity,
+                        category = "Map / Detection",
+                        summary = detail,
+                        targetKey = targetUuid,
+                        includeDiagnostics = true
+                    )
+                    org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordUserInteraction(
+                        context = activity,
+                        action = "REPORT_BUG",
+                        targetKey = targetUuid,
+                        detail = detail
+                    )
+                    dialog.dismiss()
+                    onSubmitted("kokoho:$targetUuid")
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { topMargin = dp(activity, 14) }
+                }
+                outer.addView(submitBtn)
+                val modalW = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+                outer.minimumWidth = modalW
+                dialog.setContentView(outer, ViewGroup.LayoutParams(modalW, ViewGroup.LayoutParams.WRAP_CONTENT))
+                dialog.show()
+                dialog.window?.setLayout(modalW, ViewGroup.LayoutParams.WRAP_CONTENT)
+                return
             }
-            outer.addView(submitBtn)
-            dialog.setContentView(outer)
-            dialog.show()
-            return
-        }
 
         // ---- LAW_ENFORCEMENT / CONFIRM_REFINE Adaptive Wizard ----
         form.addView(sectionCaption("1. Select Agency"))
@@ -679,7 +692,184 @@ object KokohoReportWizard {
         footerRow.addView(saveBtn)
         outer.addView(footerRow)
 
-        dialog.setContentView(outer)
+        val modalW = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+        outer.minimumWidth = modalW
+        dialog.setContentView(outer, ViewGroup.LayoutParams(modalW, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.show()
+        dialog.window?.setLayout(modalW, ViewGroup.LayoutParams.WRAP_CONTENT)
+    }
+
+    private val BUG_CATEGORIES = listOf(
+        "App / UI",
+        "Map",
+        "Detection",
+        "RTL-SDR",
+        "Crash / Freeze",
+        "Other"
+    )
+
+    /**
+     * Opens a standalone generic Bug Report modal from the root Hamburger Menu (`☰`),
+     * queuing reports durably and uploading to `/v1/bugs` on `kokoho-hub` for batch review.
+     */
+    fun openGenericBugReportModal(activity: AppCompatActivity): android.app.Dialog {
+        val modalWidthPx = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+        val dialog = KokohoJourneyUi.createCustomModal(activity)
+        val outer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            minimumWidth = modalWidthPx
+            background = KokohoJourneyUi.cardDrawable(activity, KokohoJourneyUi.SURFACE_DARK, KokohoJourneyUi.BORDER_STRONG, 18)
+            setPadding(dp(activity, 18), dp(activity, 16), dp(activity, 18), dp(activity, 16))
+        }
+
+        val headerRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(activity, 8))
+        }
+        val titleTv = TextView(activity).apply {
+            text = "Submit Bug Report"
+            textSize = 17.5f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(KokohoJourneyUi.INK_PRIMARY)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val closeBtn = ImageButton(activity).apply {
+            contentDescription = "Cancel"
+            background = KokohoJourneyUi.pillDrawable(activity, KokohoJourneyUi.SURFACE_ELEVATED, KokohoJourneyUi.BORDER_SUBTLE)
+            setImageDrawable(KokohoJourneyUi.VectorIconDrawable(activity, KokohoJourneyUi.VectorIconKind.CLOSE_X))
+            layoutParams = LinearLayout.LayoutParams(dp(activity, 36), dp(activity, 36))
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(titleTv)
+        headerRow.addView(closeBtn)
+        outer.addView(headerRow)
+
+        val subtitleTv = TextView(activity).apply {
+            text = "Pick an area and describe what happened so we can review and fix it:"
+            textSize = 13.5f
+            setTextColor(KokohoJourneyUi.INK_SECONDARY)
+            setPadding(0, 0, 0, dp(activity, 8))
+        }
+        outer.addView(subtitleTv)
+
+        var selectedCategory = BUG_CATEGORIES.first()
+        val catButtons = LinkedHashMap<String, TextView>()
+        val catRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val catScroll = HorizontalScrollView(activity).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(activity, 8) }
+            addView(catRow)
+        }
+
+        fun syncCategoryPills() {
+            for ((cat, tv) in catButtons) {
+                val active = cat == selectedCategory
+                tv.background = KokohoJourneyUi.pillDrawable(
+                    activity,
+                    if (active) KokohoJourneyUi.HIGHLIGHT_AMBER else KokohoJourneyUi.SURFACE_CARD,
+                    if (active) KokohoJourneyUi.INK_PRIMARY else KokohoJourneyUi.BORDER_SUBTLE,
+                    radiusDp = 999
+                )
+                tv.setTextColor(if (active) KokohoJourneyUi.SURFACE_DARK else KokohoJourneyUi.INK_PRIMARY)
+            }
+        }
+
+        for (cat in BUG_CATEGORIES) {
+            val pill = TextView(activity).apply {
+                text = cat
+                textSize = 12.5f
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(dp(activity, 12), dp(activity, 6), dp(activity, 12), dp(activity, 6))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = dp(activity, 6) }
+                setOnClickListener {
+                    selectedCategory = cat
+                    syncCategoryPills()
+                }
+            }
+            catButtons[cat] = pill
+            catRow.addView(pill)
+        }
+        syncCategoryPills()
+        outer.addView(catScroll)
+
+        val detailsInput = EditText(activity).apply {
+            hint = "What happened? (e.g. screen you were on, what you tapped, or what looked wrong)…"
+            textSize = 14.5f
+            setTextColor(KokohoJourneyUi.INK_PRIMARY)
+            setHintTextColor(KokohoJourneyUi.INK_MUTED)
+            minLines = 4
+            gravity = Gravity.TOP or Gravity.START
+            setPadding(dp(activity, 14), dp(activity, 11), dp(activity, 14), dp(activity, 11))
+            background = KokohoJourneyUi.cardDrawable(activity, KokohoJourneyUi.SURFACE_CARD, KokohoJourneyUi.BORDER_SUBTLE, 10)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        outer.addView(detailsInput)
+
+        val diagCheck = CheckBox(activity).apply {
+            text = "Include app version, sensor status & crash log (no GPS location)"
+            textSize = 13f
+            setTextColor(KokohoJourneyUi.INK_SECONDARY)
+            buttonTintList = ColorStateList.valueOf(KokohoJourneyUi.HIGHLIGHT_AMBER)
+            isChecked = true
+            setPadding(dp(activity, 4), dp(activity, 8), 0, dp(activity, 4))
+        }
+        outer.addView(diagCheck)
+
+        val footerRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            setPadding(0, dp(activity, 10), 0, 0)
+        }
+        val cancelBtn = KokohoJourneyUi.secondaryActionButton(activity, "Cancel") {
+            dialog.dismiss()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(activity, 8) }
+        }
+        val submitBtn = KokohoJourneyUi.primaryActionButton(activity, "Submit Bug Report") {
+            val summary = detailsInput.text?.toString()?.trim().orEmpty()
+            if (summary.isEmpty()) {
+                Toast.makeText(activity, "Please enter bug report details", Toast.LENGTH_SHORT).show()
+                return@primaryActionButton
+            }
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.submitBugReport(
+                context = activity,
+                category = selectedCategory,
+                summary = summary,
+                targetKey = null,
+                includeDiagnostics = diagCheck.isChecked
+            ) { uploadedNow ->
+                val msg = if (uploadedNow) {
+                    "Bug report submitted — thank you!"
+                } else {
+                    "Bug report saved — will send automatically when connected"
+                }
+                Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
+            }
+            dialog.dismiss()
+        }
+        footerRow.addView(cancelBtn)
+        footerRow.addView(submitBtn)
+        outer.addView(footerRow)
+
+        dialog.setContentView(outer, ViewGroup.LayoutParams(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT))
+        dialog.show()
+        dialog.window?.setLayout(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
+        return dialog
     }
 }
