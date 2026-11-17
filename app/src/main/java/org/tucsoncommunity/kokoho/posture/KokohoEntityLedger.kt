@@ -119,6 +119,7 @@ object KokohoEntityLedger {
 
     private fun hydrateMemoryMirror(database: SQLiteDatabase) {
         runCatching {
+            val stalePoisonUuids = ArrayList<String>()
             database.rawQuery(
                 "SELECT uuid, agency_code, label, posture, class_conf, spatial_conf, est_dist_m, base_radius_m, summary, updated_at_ms, lat, lon, is_approx, is_pinpointed, is_aircraft, is_helicopter, is_circling, is_drone, alt_ft, hardware_id, sighting_count, capabilities_json, evidence_json " +
                     "FROM local_entities",
@@ -126,6 +127,15 @@ object KokohoEntityLedger {
             ).use { c ->
                 while (c.moveToNext()) {
                     val uuid = c.getString(0) ?: continue
+                    val summaryRaw = c.getString(8) ?: ""
+                    val hwRaw = if (c.isNull(19)) "" else (c.getString(19) ?: "")
+                    // Evict legacy false-positive rows (KARR dealership car alarms QT/DR on 40:84:32, consumer IDW wearables, transit Veh ###-5g)
+                    if (hwRaw.startsWith("40:84:32:", ignoreCase = true) ||
+                        Regex("(?i)(?:\\b(?:QT|DR)\\s+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("$summaryRaw $hwRaw")
+                    ) {
+                        stalePoisonUuids += uuid
+                        continue
+                    }
                     val agency = KokohoAgency.fromCode(c.getString(1)) ?: KokohoAgency.DHS_INTEROP
                     val posture = runCatching { PostureColor.valueOf(c.getString(3)) }.getOrDefault(PostureColor.YELLOW)
                     val classConf = c.getInt(4)
@@ -165,6 +175,9 @@ object KokohoEntityLedger {
                     memoryMirror[uuid] = threat
                     persistedStampByUuid[uuid] = stampOf(threat)
                 }
+            }
+            for (badUuid in stalePoisonUuids) {
+                runCatching { database.execSQL("DELETE FROM local_entities WHERE uuid = ?", arrayOf(badUuid)) }
             }
         }.onFailure { lastDebugError = "hydrate: $it" }
     }

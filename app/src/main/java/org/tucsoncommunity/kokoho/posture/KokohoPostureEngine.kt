@@ -2303,7 +2303,7 @@ object KokohoPostureEngine {
                     p.type,
                     p.category,
                     "${hit?.label.orEmpty()} ${p.owner.orEmpty()} ${p.registration.orEmpty()}",
-                    agency = if (isUnattributedCircling && !p.type.isNullOrBlank()) null else agency,
+                    agency = if (isUnattributedCircling) null else agency,
                     hex = p.hex
                 )
                 val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()

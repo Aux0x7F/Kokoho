@@ -31,7 +31,8 @@ object PoliceAircraft {
         val trackDeg: Double?,
         val military: Boolean,
         val onGround: Boolean = false,
-        val category: String? = null
+        val category: String? = null,
+        val nonIcaoTisb: Boolean = false
     )
 
     data class Entry(val registration: String, val owner: String, val model: String)
@@ -109,9 +110,15 @@ object PoliceAircraft {
         val combined = listOfNotNull(p.type, p.callsign, p.owner, p.registration).joinToString(" ")
         if (GLIDER_OR_TRAINER_REGEX.containsMatchIn(combined)) return true
         val isExplicitLeOrDhs = LE_OWNER.containsMatchIn(combined)
+        if (!isExplicitLeOrDhs && p.nonIcaoTisb) return true
         val ref = org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupAircraft(p.hex)
         if (!isExplicitLeOrDhs && ref != null && (ref.disposition == "TRN" || ref.disposition == "MED" || ref.disposition == "MIL" || ref.airframeKind == 'G')) {
             return true
+        }
+        // Exclude anonymous FAA TIS-B primary-radar pseudo-addresses (`200000..27FFFF` without registration/owner/catalog entry)
+        if (!isExplicitLeOrDhs && ref == null && combined.isBlank()) {
+            val hexInt = p.hex.trim().removePrefix("~").toIntOrNull(16)
+            if (hexInt != null && hexInt in 0x200000..0x27FFFF) return true
         }
         // Exclude pure US military / National Guard airframes (e.g. AE* ICAO hex, Blackhawk/Lakota) unless explicitly LE/DHS.
         if (!isExplicitLeOrDhs && (p.hex.startsWith("ae", ignoreCase = true) || MILITARY_NON_LE_AIRFRAME_REGEX.containsMatchIn(combined))) {
@@ -163,7 +170,9 @@ object PoliceAircraft {
             val o = e.asJsonObject
             val lat = o.num("lat") ?: return@mapNotNull null
             val lon = o.num("lon") ?: return@mapNotNull null
-            val hex = o.str("hex")?.lowercase()?.removePrefix("~") ?: return@mapNotNull null
+            val rawHex = o.str("hex")?.lowercase() ?: return@mapNotNull null
+            val nonIcao = rawHex.startsWith("~") || o.str("type")?.startsWith("tisb", ignoreCase = true) == true
+            val hex = rawHex.removePrefix("~")
             val baroStr = o.str("alt_baro")
             val onGround = baroStr.equals("ground", ignoreCase = true)
             val altFt = if (onGround) 0 else (o.num("alt_baro")?.toInt() ?: o.num("alt_geom")?.toInt())
@@ -180,7 +189,8 @@ object PoliceAircraft {
                 trackDeg = o.num("track"),
                 military = ((o.num("dbFlags")?.toInt() ?: 0) and 1) != 0,
                 onGround = onGround,
-                category = o.str("category")
+                category = o.str("category"),
+                nonIcaoTisb = nonIcao
             )
         }
     }

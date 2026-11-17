@@ -250,18 +250,36 @@ object KokohoDirectory {
         return filtered
     }
 
+    fun canonicalLocationId(raw: String): String {
+        var clean = raw.trim()
+        while (clean.startsWith("loc:", ignoreCase = true)) {
+            clean = clean.substring(4).trim()
+        }
+        return "loc:$clean"
+    }
+
+    fun canonicalPersonId(raw: String): String {
+        var clean = raw.trim()
+        while (clean.startsWith("person:", ignoreCase = true)) {
+            clean = clean.substring(7).trim()
+        }
+        return clean
+    }
+
     fun locationById(context: Context, id: String): FacilityLocation? {
         ensureLoaded(context)
-        val clean = id.removePrefix("loc:").let { if (id.startsWith("loc:")) id else "loc:$it" }
-        return locationsMap[id] ?: locationsMap[clean]
+        val canon = canonicalLocationId(id)
+        val bare = canon.removePrefix("loc:")
+        return locationsMap[canon] ?: locationsMap[id.trim()] ?: locationsMap[bare]
     }
 
     fun stationedPersonnelCount(context: Context, locationId: String): Int {
         ensureLoaded(context)
-        val localCount = userPersons.values.count { it.locationId == locationId }
+        val canonLoc = canonicalLocationId(locationId)
+        val localCount = userPersons.values.count { canonicalLocationId(it.locationId) == canonLoc }
         val db = sqliteDb ?: return localCount
         val dbCount = runCatching {
-            db.rawQuery("SELECT COUNT(*) FROM directory_persons WHERE location_id = ?", arrayOf(locationId)).use { c ->
+            db.rawQuery("SELECT COUNT(*) FROM directory_persons WHERE location_id = ?", arrayOf(canonLoc)).use { c ->
                 if (c.moveToFirst()) c.getInt(0) else 0
             }
         }.getOrDefault(0)
@@ -275,13 +293,14 @@ object KokohoDirectory {
         liveQuery: String = ""
     ): List<PersonRecord> {
         ensureLoaded(context)
+        val canonLoc = canonicalLocationId(locationId)
         val rows = ArrayList<PersonRecord>()
         sqliteDb?.let { db ->
             runCatching {
                 db.rawQuery(
                     "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
                         "FROM directory_persons WHERE location_id = ? ORDER BY full_name COLLATE NOCASE ASC",
-                    arrayOf(locationId)
+                    arrayOf(canonLoc)
                 ).use { c ->
                     while (c.moveToNext()) {
                         rows += cursorToPerson(c)
@@ -290,7 +309,7 @@ object KokohoDirectory {
             }
         }
         for (up in userPersons.values) {
-            if (up.locationId == locationId && rows.none { it.personId == up.personId }) {
+            if (canonicalLocationId(up.locationId) == canonLoc && rows.none { it.personId == up.personId }) {
                 rows += up
             }
         }
@@ -388,7 +407,7 @@ object KokohoDirectory {
 
     fun personById(context: Context, personId: String): PersonRecord? {
         ensureLoaded(context)
-        val clean = personId.removePrefix("person:")
+        val clean = canonicalPersonId(personId)
         userPersons[clean]?.let { return it }
         val db = sqliteDb ?: return null
         return runCatching {
@@ -404,7 +423,7 @@ object KokohoDirectory {
 
     fun managedBy(context: Context, personId: String): PersonRecord? {
         ensureLoaded(context)
-        val clean = personId.removePrefix("person:")
+        val clean = canonicalPersonId(personId)
         val userRec = userPersons[clean]
         if (userRec != null && userRec.managedByNameOrId.isNotBlank()) {
             personById(context, userRec.managedByNameOrId)?.let { return it }
@@ -425,7 +444,7 @@ object KokohoDirectory {
 
     fun manages(context: Context, personId: String): List<PersonRecord> {
         ensureLoaded(context)
-        val clean = personId.removePrefix("person:")
+        val clean = canonicalPersonId(personId)
         val out = ArrayList<PersonRecord>()
         sqliteDb?.let { db ->
             runCatching {

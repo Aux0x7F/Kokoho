@@ -1268,15 +1268,18 @@ object KokohoSignatures {
     )
 
     private val MUNICIPAL_TRAFFIC_OR_TRANSIT_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran|SunLink|MimoSeries.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*)\\s*$"
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*)\\s*$"
     )
 
     private val FIXED_BRANCH_ROUTER_MODEL_SSID_REGEX = Regex(
         "(?i)^\\s*(E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|AISMobile.*|MimoSeries.*)\\s*$"
     )
 
+    /** KARR Auto Security (Directed Electronics) aftermarket dealership lot-management/car-alarm BLE modules (`QT <8hex>` / `DR <8hex>`). */
+    private val KARR_DEALER_BLE_ALARM_REGEX = Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
+
     private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran|SunLink|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*)\\s*$"
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*)\\s*$"
     )
 
     private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TUCSON_?FIRE|NWFD|GRFD|GVFD).*)$")
@@ -1331,8 +1334,7 @@ object KokohoSignatures {
             LAW_ENFORCEMENT_SSID_REGEX.containsMatchIn(clean) ||
             SHERIFF_SSID_REGEX.containsMatchIn(clean) ||
             FIRE_SSID_REGEX.matches(clean) ||
-            FLEET_UNIT_SSID_REGEX.matches(clean) ||
-            TACTICAL_BLE_BEACON_REGEX.matches(clean)
+            FLEET_UNIT_SSID_REGEX.matches(clean)
     }
 
     /**
@@ -1502,7 +1504,7 @@ object KokohoSignatures {
         val normMac = normalizeMac(mac)
         if (IGNORED_INFRA_MAC_PREFIXES.any { it != "24:B2:B9:" && normMac.startsWith(it) }) return true
         val ssid = ssidOrName?.trim().orEmpty()
-        if (ssid.isNotEmpty() && IGNORED_INFRA_OR_RETAIL_SSID_REGEX.matches(ssid)) return true
+        if (ssid.isNotEmpty() && (KARR_DEALER_BLE_ALARM_REGEX.matches(ssid) || IGNORED_INFRA_OR_RETAIL_SSID_REGEX.matches(ssid))) return true
         return false
     }
 
@@ -1573,8 +1575,6 @@ object KokohoSignatures {
         Regex("(?i)\\b(TUCSON_?PD|TPD_?[A-Z0-9]*|AZDPS|DPS_?PATROL|TROOPER|STATE_?PATROL|ANTI_?GANG|SWAT|NARCOTICS|OVPD|ORO_?VALLEY_?PD|MARANA_?PD|SAHUARITA_?PD|UAPD)\\b")
     private val SHERIFF_SSID_REGEX =
         Regex("(?i)\\b(PCSO|PCSD|PIMA_?SHERIFF|SHERIFF_?TAC|SHERIFF)\\b")
-    private val TACTICAL_BLE_BEACON_REGEX =
-        Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
 
     /** Matches a Wi-Fi / BLE MAC address or SSID/vendor against curated fleet router / tactical / drone signatures. */
     fun matchOuiOrSsid(
@@ -1597,11 +1597,6 @@ object KokohoSignatures {
             }
             if (SHERIFF_SSID_REGEX.containsMatchIn(cleanSsid)) {
                 return KokohoAgency.SHERIFF to KokohoAgency.SHERIFF.friendlyLabel
-            }
-            if (TACTICAL_BLE_BEACON_REGEX.matches(cleanSsid) &&
-                vendor?.contains("Microchip", ignoreCase = true) == true
-            ) {
-                return KokohoAgency.DHS_HSI to KokohoAgency.DHS_HSI.friendlyLabel
             }
         }
         matchOui(mac, ssid)?.let { return it.agencyEnum to it.friendlyLabel }
@@ -1688,7 +1683,13 @@ object KokohoSignatures {
                 if (!mRaw.isNullOrBlank()) {
                     val mType = object : TypeToken<List<LearnedMacIntel>>() {}.type
                     val list: List<LearnedMacIntel> = Gson().fromJson(mRaw, mType) ?: emptyList()
-                    for (m in list) learnedMacCache[m.mac.uppercase()] = m
+                    for (m in list) {
+                        val upMac = m.mac.uppercase()
+                        if (upMac.startsWith("40:84:32:") || KARR_DEALER_BLE_ALARM_REGEX.containsMatchIn(m.label) || KARR_DEALER_BLE_ALARM_REGEX.matches(m.ssidHint)) {
+                            continue
+                        }
+                        learnedMacCache[upMac] = m
+                    }
                 }
                 val bRaw = prefs.getString(KEY_LEARNED_BLOCKS_JSON, null)
                 if (!bRaw.isNullOrBlank()) {
@@ -1710,7 +1711,7 @@ object KokohoSignatures {
     }
 
     private val NON_BLOCK_LEARNING_OUIs = setOf(
-        "9C:05:D6", "D8:B3:70", "00:58:28", "04:F0:21", "00:40:29", "00:80:48", "24:B2:B9"
+        "9C:05:D6", "D8:B3:70", "00:58:28", "04:F0:21", "00:40:29", "00:80:48", "24:B2:B9", "40:84:32"
     )
 
     fun mergeRemoteMacIntel(
@@ -1888,6 +1889,13 @@ object KokohoSignatures {
     private val BLE_MOTOROLA_SERVICE_UUID16 = setOf(0xFD8E, 0xFE04)
     private val BLE_ZEBRA_SERVICE_UUID16 = setOf(0xFD66, 0xFE79)
 
+    private val CONSUMER_BLE_WEARABLE_OR_AUDIO_REGEX = Regex(
+        "(?i)^\\s*(?:IDW\\d+[A-Z]?|ID20\\d+[A-Z]?|VERYFIT.*|FITBIT.*|GARMIN.*|AMAZFIT.*|MI\\s*BAND.*|XIAOMI.*|REDMI.*|GALAXY\\s*WATCH.*|APPLE\\s*WATCH.*|AIRPODS.*|HBAND.*|DA\\s*FIT.*|ORAIMO.*|SOUNDCORE.*|JBL\\b.*|BOSE\\b.*|WHOOP.*|OURA.*|TILE\\b.*|CHIPOLO.*)\\s*$"
+    )
+    private val PLAUSIBLE_TACTICAL_BLE_NAME_REGEX = Regex(
+        "(?i)(?:AXON|TASER|BWC|X8[0-9A-Z]|SIGNAL|BODY|VIEVU|WATCHGUARD|MOTOROLA|APX|MOTO|ZEBRA|ZQ\\d|QLN|PJ-?[78]|RJ-?4|DIRECT-)"
+    )
+
     enum class BleTacticalKind(val capabilityLabel: String, val facetPrefix: String, val defaultSummary: String) {
         AXON_BODYCAM("Bodycam", "hw:kit:bwc", "Axon Bodycam"),
         MOTOROLA_RADIO("Portable Radio", "hw:kit:radio", "Motorola APX Radio"),
@@ -1896,14 +1904,29 @@ object KokohoSignatures {
 
     fun classifyBleTacticalPayload(advert: org.tucsoncommunity.kokoho.detect.Advert?): BleTacticalKind? {
         if (advert == null || !advert.isBle) return null
-        if (BLE_COMPANY_TASER_AXON in advert.manufacturerData.keys) return BleTacticalKind.AXON_BODYCAM
-        if (BLE_COMPANY_MOTOROLA_SOLUTIONS in advert.manufacturerData.keys) return BleTacticalKind.MOTOROLA_RADIO
-        if (BLE_COMPANY_ZEBRA in advert.manufacturerData.keys) return BleTacticalKind.ZEBRA_PRINTER
+        val cleanName = advert.name?.trim().orEmpty()
+        if (cleanName.isNotEmpty() && (CONSUMER_BLE_WEARABLE_OR_AUDIO_REGEX.matches(cleanName) || KARR_DEALER_BLE_ALARM_REGEX.matches(cleanName))) {
+            return null
+        }
         val shorts = (advert.serviceUuids + advert.serviceData.keys)
             .mapNotNull { org.tucsoncommunity.kokoho.detect.Advert.shortOf(it) }
-        if (shorts.any { it in BLE_AXON_SERVICE_UUID16 }) return BleTacticalKind.AXON_BODYCAM
-        if (shorts.any { it in BLE_MOTOROLA_SERVICE_UUID16 }) return BleTacticalKind.MOTOROLA_RADIO
-        if (shorts.any { it in BLE_ZEBRA_SERVICE_UUID16 }) return BleTacticalKind.ZEBRA_PRINTER
+        val hasAxonUuid = shorts.any { it in BLE_AXON_SERVICE_UUID16 }
+        val hasMotoUuid = shorts.any { it in BLE_MOTOROLA_SERVICE_UUID16 }
+        val hasZebraUuid = shorts.any { it in BLE_ZEBRA_SERVICE_UUID16 }
+
+        // Guard against cheap consumer wearables (e.g. IDO "IDW26") using BLE random addresses that stuff
+        // unregistered model/version bytes into 0xFF Manufacturer Data without matching tactical naming or SIG Service UUIDs.
+        val allowMfgOnly = !advert.randomBle || cleanName.isEmpty() || PLAUSIBLE_TACTICAL_BLE_NAME_REGEX.containsMatchIn(cleanName)
+
+        if (hasAxonUuid || (allowMfgOnly && BLE_COMPANY_TASER_AXON in advert.manufacturerData.keys)) {
+            return BleTacticalKind.AXON_BODYCAM
+        }
+        if (hasMotoUuid || (allowMfgOnly && BLE_COMPANY_MOTOROLA_SOLUTIONS in advert.manufacturerData.keys)) {
+            return BleTacticalKind.MOTOROLA_RADIO
+        }
+        if (hasZebraUuid || (allowMfgOnly && BLE_COMPANY_ZEBRA in advert.manufacturerData.keys)) {
+            return BleTacticalKind.ZEBRA_PRINTER
+        }
         return null
     }
 
@@ -1989,6 +2012,10 @@ object KokohoSignatures {
         advert: org.tucsoncommunity.kokoho.detect.Advert? = null
     ): Boolean {
         if (isAxonNetworksConsumerRouter(mac, nameOrSsid, vendor)) return false
+        val cleanName = nameOrSsid?.trim().orEmpty()
+        if (cleanName.isNotEmpty() && (CONSUMER_BLE_WEARABLE_OR_AUDIO_REGEX.matches(cleanName) || KARR_DEALER_BLE_ALARM_REGEX.matches(cleanName))) {
+            return false
+        }
         if (matchesBleTacticalPayload(advert)) return true
         val norm = normalizeMac(mac)
         if (AGENCY_AGNOSTIC_ACCESSORY_OUIs.any { norm.startsWith(it) } ||

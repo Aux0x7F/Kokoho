@@ -77,14 +77,16 @@ class DeviceDetailActivity : AppCompatActivity() {
             RADIO_KEY.find(key)?.groupValues?.get(1)?.toDoubleOrNull()?.let { Math.round(it * 1_000_000) }
 
         fun openLocation(activity: Context, locationId: String) {
+            val key = KokohoDirectory.canonicalLocationId(locationId)
             activity.startActivity(
-                Intent(activity, DeviceDetailActivity::class.java).putExtra(EXTRA_MAC, "loc:$locationId")
+                Intent(activity, DeviceDetailActivity::class.java).putExtra(EXTRA_MAC, key)
             )
         }
 
         fun openPerson(activity: Context, personId: String) {
+            val key = "person:" + KokohoDirectory.canonicalPersonId(personId)
             activity.startActivity(
-                Intent(activity, DeviceDetailActivity::class.java).putExtra(EXTRA_MAC, "person:$personId")
+                Intent(activity, DeviceDetailActivity::class.java).putExtra(EXTRA_MAC, key)
             )
         }
     }
@@ -117,6 +119,7 @@ class DeviceDetailActivity : AppCompatActivity() {
     private var mapTargetColorArgb: Int = KokohoAgency.DHS_CBP.mapColorArgb
     private var mapTargetAgencyId: String = KokohoAgency.DHS_CBP.id
     private var mapTargetPinpointed: Boolean = false
+    private var mapTargetIsFacility: Boolean = false
     private var mapTargetLabel: String = ""
 
     private var pendingPhotoCallback: ((String) -> Unit)? = null
@@ -277,11 +280,11 @@ class DeviceDetailActivity : AppCompatActivity() {
     }
 
     private fun parseInitialNode(rawKey: String): DetailNode = when {
-        rawKey.startsWith("loc:") -> DetailNode.Location(rawKey)
-        rawKey.startsWith("person:") -> DetailNode.Person(rawKey.removePrefix("person:"))
-        rawKey.startsWith("device:") -> DetailNode.ConstituentDevice(rawKey.removePrefix("device:"))
-        rawKey.startsWith("kokoho:") -> DetailNode.Entity(KokohoSignatures.normalizeEntityId(rawKey))
-        KokohoDirectory.locationById(this, rawKey) != null -> DetailNode.Location(rawKey)
+        rawKey.startsWith("loc:", ignoreCase = true) -> DetailNode.Location(KokohoDirectory.canonicalLocationId(rawKey))
+        rawKey.startsWith("person:", ignoreCase = true) -> DetailNode.Person(KokohoDirectory.canonicalPersonId(rawKey))
+        rawKey.startsWith("device:", ignoreCase = true) -> DetailNode.ConstituentDevice(rawKey.substring(7).trim())
+        rawKey.startsWith("kokoho:", ignoreCase = true) -> DetailNode.Entity(KokohoSignatures.normalizeEntityId(rawKey))
+        KokohoDirectory.locationById(this, rawKey) != null -> DetailNode.Location(KokohoDirectory.canonicalLocationId(rawKey))
         else -> {
             // Direct MAC or radio key: check if an entity exists, otherwise open ConstituentDevice
             val threat = KokohoPostureEngine.findThreatByUuid(this, rawKey)
@@ -366,6 +369,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             mapTargetColorArgb = agency.mapColorArgb
             mapTargetAgencyId = agency.id
             mapTargetPinpointed = threat?.isPinpointed ?: false
+            mapTargetIsFacility = false
             mapTargetLabel = highestTitle
             redrawMiniMap()
         } else {
@@ -651,6 +655,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     private fun renderLocationNode(locationId: String) {
         headerHandle.titleView.text = "Location Details"
         val loc = KokohoDirectory.locationById(this, locationId) ?: run {
+            avatarImageView.visibility = View.GONE
+            mapContainer.visibility = View.GONE
             classificationText.text = "Unknown Location"
             return
         }
@@ -665,6 +671,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         mapTargetColorArgb = loc.agency.mapColorArgb
         mapTargetAgencyId = loc.agency.id
         mapTargetPinpointed = true
+        mapTargetIsFacility = true
         mapTargetLabel = loc.title
         redrawMiniMap()
 
@@ -1276,23 +1283,28 @@ class DeviceDetailActivity : AppCompatActivity() {
         val map = rfMap ?: return
         val engine = mapEngine ?: return
         engine.jumpTo(mapTargetLat, mapTargetLon, zoomForRadius(mapTargetRadiusM))
-        val pin = MapPin(
-            mac = "detail-preview",
-            lat = mapTargetLat,
-            lon = mapTargetLon,
-            label = mapTargetLabel,
-            flagged = true,
-            color = mapTargetColorArgb,
-            details = mapTargetLabel,
-            radiusM = if (mapTargetPinpointed) null else mapTargetRadiusM.toDouble(),
-            whereNote = "",
-            showDot = true,
-            opacity = 1.0,
-            iconKind = MapIcons.BadgeIconKind.CAR,
-            agencyId = mapTargetAgencyId
-        )
         map.safe("detailMap") {
-            map.drawPins(listOf(pin))
+            if (mapTargetIsFacility) {
+                map.drawPins(emptyList())
+                map.drawLocations()
+            } else {
+                val pin = MapPin(
+                    mac = "detail-preview",
+                    lat = mapTargetLat,
+                    lon = mapTargetLon,
+                    label = mapTargetLabel,
+                    flagged = true,
+                    color = mapTargetColorArgb,
+                    details = mapTargetLabel,
+                    radiusM = if (mapTargetPinpointed) null else mapTargetRadiusM.toDouble(),
+                    whereNote = "",
+                    showDot = true,
+                    opacity = 1.0,
+                    iconKind = MapIcons.BadgeIconKind.CAR,
+                    agencyId = mapTargetAgencyId
+                )
+                map.drawPins(listOf(pin))
+            }
         }
     }
 

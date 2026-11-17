@@ -202,6 +202,89 @@ class KokohoV130FieldReplayAndHygieneTest {
         // must remain 2 distinct entities rather than speculatively merging!
         assertEquals(2, bleSnap.activeThreats.size)
 
+        // 5. Speedway / I-10 Field-Drive False-Positive Suppression & Legitimate Hit Preservation (2026-11-16 16:33–17:22):
+        DeviceRegistry.clear()
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+
+        val speedwayGeo = DeviceRegistry.GeoSample(t0, 32.23610, -110.95850)
+        // 5a. KARR dealership car alarms ("QT <8hex>" / "DR <8hex>" on Microchip 40:84:32) MUST NOT trigger HSI!
+        DeviceRegistry.report(
+            Advert(mac = "40:84:32:63:02:28", source = Advert.Source.BLE, rssi = -82, name = "QT 32630228", timestamp = t0),
+            emptyList(), idBle, "Microchip Technology Inc.", null, speedwayGeo, t0, here = speedwayGeo
+        )
+        DeviceRegistry.report(
+            Advert(mac = "40:84:32:5A:64:31", source = Advert.Source.BLE, rssi = -78, name = "QT 325A6431", timestamp = t0),
+            emptyList(), idBle, "Microchip Technology Inc.", null, speedwayGeo, t0, here = speedwayGeo
+        )
+        // 5b. Consumer VeryFit "IDW26" smartwatch on BLE static random MAC colliding on 0xFF manufacturer ID 0x034D MUST NOT trigger Bodycam!
+        DeviceRegistry.report(
+            Advert(
+                mac = "F4:05:B6:7F:85:73",
+                source = Advert.Source.BLE,
+                rssi = -84,
+                name = "IDW26",
+                manufacturerData = mapOf(0x034D to byteArrayOf(0x01, 0x02)),
+                timestamp = t0
+            ),
+            emptyList(), idBle, null, null, speedwayGeo, t0, here = speedwayGeo
+        )
+        // 5c. Sun Tran / transit bus Cradlepoint ("Veh 467-5g" on 00:30:44) MUST NOT trigger CBP!
+        DeviceRegistry.report(
+            Advert(
+                mac = "00:30:44:9C:A9:D0",
+                source = Advert.Source.WIFI,
+                rssi = -85,
+                name = "Veh 467-5g",
+                wifi = Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                timestamp = t0
+            ),
+            emptyList(), idWifi, "CradlePoint, Inc", null, speedwayGeo, t0, here = speedwayGeo
+        )
+        val fpCheckSnap = KokohoPostureEngine.evaluate(ctx, t0)
+        assertTrue(
+            "KARR car alarms (QT/DR), IDW26 consumer smartwatch, and Veh 467-5g transit bus must produce 0 threats, got ${fpCheckSnap.activeThreats}",
+            fpCheckSnap.activeThreats.isEmpty()
+        )
+
+        // 5d. Anonymous FAA TIS-B '~26a73a' radar trackfile entries MUST be excluded from tactical posture!
+        val tisbParsed = org.tucsoncommunity.kokoho.online.PoliceAircraft.parseFeed(
+            """{"ac":[{"hex":"~26a73a","lat":32.16316,"lon":-110.95093,"alt_baro":4200,"gs":95.0,"track":115.0}]}"""
+        )
+        assertTrue(
+            "Non-ICAO '~' TIS-B radar trackfile pseudo-addresses must be excluded",
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.isGliderOrExcludedTrainer(tisbParsed.single())
+        )
+
+        // 5e. Legitimate Speedway / I-10 hits (PCSD-Vehicle 00:30:44:74:C3:C0 & N304PD A32F77) MUST remain active!
+        DeviceRegistry.report(
+            Advert(
+                mac = "00:30:44:74:C3:C0",
+                source = Advert.Source.WIFI,
+                rssi = -77,
+                name = "PCSD-Vehicle",
+                wifi = Advert.WifiInfo(2437, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                timestamp = t0
+            ),
+            emptyList(), idWifi, "CradlePoint, Inc", null, speedwayGeo, t0, here = speedwayGeo
+        )
+        val legitSnap = KokohoPostureEngine.evaluate(ctx, t0)
+        assertEquals(1, legitSnap.activeThreats.size)
+        assertEquals(KokohoAgency.SHERIFF, legitSnap.activeThreats.first().agency)
+        assertEquals(
+            KokohoAgency.POLICE,
+            KokohoSignatures.classifyAircraftAgency(
+                owner = "CITY OF TUCSON POLICE DEPARTMENT",
+                registration = "N304PD",
+                callsign = "N304PD",
+                hitLabel = "Police helicopter",
+                type = "B06",
+                hex = "A32F77",
+                speedKt = 88.0,
+                isCircling = false
+            )
+        )
+
         ScanForegroundService.setLastFixForTest(null)
         KokohoEntityLedger.clearAll(ctx)
         KokohoPostureEngine.clearLocalState()
@@ -313,6 +396,38 @@ class KokohoV130FieldReplayAndHygieneTest {
             assertEquals("Public build must return 0 packaged directory persons", 0, KokohoDirectory.searchPersons(ctx, "Agent").size)
         }
 
+        // Real Production-Path Location Click Assertion (exercising DeviceDetailActivity.openLocation -> Shadow started Intent -> rendered DOM text!)
+        val launcherAct = Robolectric.buildActivity(AppCompatActivity::class.java).setup().get()
+        val sampleTargets = listOf(
+            allLocs.first { it.title == "AMO" },
+            allLocs.first { it.title == "CBP HQ" },
+            allLocs.first { it.locationGroup == "POLICE" },
+            allLocs.first { it.locationGroup == "FIRE" }
+        )
+        for (targetLoc in sampleTargets) {
+            DeviceDetailActivity.openLocation(launcherAct, targetLoc.id)
+            val startedIntent = org.robolectric.Shadows.shadowOf(launcherAct).nextStartedActivity
+            assertNotNull("openLocation must launch DeviceDetailActivity intent for ${targetLoc.id}", startedIntent)
+            val detailCtrl = Robolectric.buildActivity(DeviceDetailActivity::class.java, startedIntent).setup()
+            val detailAct = detailCtrl.get()
+            assertEquals(
+                "Location puck click for ${targetLoc.id} must display exact title (never 'Unknown Location')",
+                targetLoc.title,
+                detailAct.classificationText.text.toString()
+            )
+            val renderedTexts = collectAllText(detailAct.window.decorView)
+            assertTrue("Facility Details header must render in DOM for ${targetLoc.title}", renderedTexts.contains("FACILITY DETAILS"))
+            if (targetLoc.address.isNotBlank()) {
+                assertTrue("Facility address '${targetLoc.address}' must render in DOM", renderedTexts.contains(targetLoc.address))
+            }
+            detailCtrl.pause().stop().destroy()
+        }
+        // Also verify defensive double-prefix normalization ("loc:loc:...") never shows Unknown Location
+        val dblIntent = Intent(ctx, DeviceDetailActivity::class.java).putExtra(DeviceDetailActivity.EXTRA_MAC, "loc:${sampleTargets.first().id}")
+        val dblCtrl = Robolectric.buildActivity(DeviceDetailActivity::class.java, dblIntent).setup()
+        assertEquals(sampleTargets.first().title, dblCtrl.get().classificationText.text.toString())
+        dblCtrl.pause().stop().destroy()
+
         // NanRemoteId circuit-breaker backoff regression test (prevents HalDevMgr ifaceType=4 Binder storm)
         assertEquals(30_000L, org.tucsoncommunity.kokoho.service.NanRemoteId.computeBackoffMs(1, 30_000L))
         assertEquals(60_000L, org.tucsoncommunity.kokoho.service.NanRemoteId.computeBackoffMs(2, 60_000L))
@@ -365,5 +480,19 @@ class KokohoV130FieldReplayAndHygieneTest {
                 assertFalse("FORBIDDEN unignored '$forbidden' found in git status!", statusOut.contains(forbidden, ignoreCase = true))
             }
         }
+    }
+
+    private fun collectAllText(view: android.view.View): String {
+        val sb = StringBuilder()
+        fun walk(v: android.view.View) {
+            if (v is android.widget.TextView && v.visibility == android.view.View.VISIBLE) {
+                sb.append(v.text).append('\n')
+            }
+            if (v is android.view.ViewGroup && v.visibility == android.view.View.VISIBLE) {
+                for (i in 0 until v.childCount) walk(v.getChildAt(i))
+            }
+        }
+        walk(view)
+        return sb.toString()
     }
 }
