@@ -510,15 +510,28 @@ class KokohoV130FieldReplayAndHygieneTest {
         }
         val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
         rfMap.loadStyle(dark = true) {}
-        val heatLayer = addedLayers["rf-kokoho-heat"]
-        assertNotNull("rf-kokoho-heat layer must be registered", heatLayer)
-        assertEquals("rf-kokoho-heat must be smooth MapLibre heatmap (not hexagonal fill)", "heatmap", heatLayer!!.getString("type"))
-        assertEquals(0.50, heatLayer.getJSONObject("paint").getDouble("heatmap-opacity"), 0.001)
+        for (ag in KokohoAgency.entries) {
+            val heatLayer = addedLayers["rf-kokoho-heat-${ag.id}"]
+            assertNotNull("Per-agency heatmap layer rf-kokoho-heat-${ag.id} must be registered", heatLayer)
+            assertEquals("rf-kokoho-heat-${ag.id} must be smooth MapLibre heatmap (not hexagonal fill)", "heatmap", heatLayer!!.getString("type"))
+            assertEquals(0.50, heatLayer.getJSONObject("paint").getDouble("heatmap-opacity"), 0.001)
+            val r = (ag.mapColorArgb ushr 16) and 0xFF
+            val g = (ag.mapColorArgb ushr 8) and 0xFF
+            val b = ag.mapColorArgb and 0xFF
+            assertTrue(
+                "Agency ${ag.id} heatmap-color must represent agency RGB ($r,$g,$b)",
+                heatLayer.getJSONObject("paint").getJSONArray("heatmap-color").toString().contains("rgba($r,$g,$b,")
+            )
+        }
 
         val heatPins = rfMap.drawLive(emptyList(), snapHeat)
         assertTrue("Heat mode must suppress individual entity pins", heatPins.isEmpty())
         val heatGeoJson = org.json.JSONObject(sourceData["rf-kokoho-heat"]!!)
-        assertEquals("Heat mode must populate all 3 historical points into rf-kokoho-heat", 3, heatGeoJson.getJSONArray("features").length())
+        val heatFeaturesArr = heatGeoJson.getJSONArray("features")
+        assertEquals("Heat mode must populate all 3 historical points into rf-kokoho-heat", 3, heatFeaturesArr.length())
+        for (i in 0 until heatFeaturesArr.length()) {
+            assertEquals("POLICE", heatFeaturesArr.getJSONObject(i).getJSONObject("properties").getString("agency"))
+        }
         assertEquals(0, org.json.JSONObject(sourceData["rf-devices"]!!).getJSONArray("features").length())
         assertEquals(0, org.json.JSONObject(sourceData["rf-precision"]!!).getJSONArray("features").length())
 

@@ -256,29 +256,46 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             return o("id" to id, "type" to type, "source" to source, "minzoom" to minzoom, "filter" to filter, "layout" to layout, "paint" to lightedPaint)
         }
         val routeLine = o("line-cap" to "round", "line-join" to "round")
-        listOf(
+        val agencyHeatLayers = org.tucsoncommunity.kokoho.posture.KokohoAgency.entries
+            .sortedByDescending { it.priorityRank }
+            .map { ag ->
+                val c = ag.mapColorArgb
+                val r = (c ushr 16) and 0xFF
+                val g = (c ushr 8) and 0xFF
+                val b = c and 0xFF
+                val rHi = kotlin.math.min(255, r + 38)
+                val gHi = kotlin.math.min(255, g + 38)
+                val bHi = kotlin.math.min(255, b + 38)
+                layer(
+                    id = "$HEAT-${ag.id}",
+                    type = "heatmap",
+                    source = HEAT,
+                    filter = a("==", get("agency"), ag.id),
+                    paint = o(
+                        "heatmap-weight" to a("coalesce", get("weight"), 1.0),
+                        "heatmap-intensity" to 1.15,
+                        "heatmap-radius" to a("interpolate", a("linear"), a("zoom"), 8, 16.0, 11, 28.0, 14, 42.0, 16, 54.0),
+                        "heatmap-opacity" to 0.50,
+                        "heatmap-color" to a(
+                            "interpolate", a("linear"), a("heatmap-density"),
+                            0.0, "rgba($r,$g,$b,0)",
+                            0.16, "rgba($r,$g,$b,0.38)",
+                            0.45, "rgba($r,$g,$b,0.78)",
+                            0.78, "rgba($r,$g,$b,0.96)",
+                            1.0, "rgba($rHi,$gHi,$bHi,1.0)"
+                        )
+                    )
+                )
+            }
+        (listOf(
             // A route to follow: the other routes offered under it, in grey, then the chosen one with a white edge.
             layer("$NAV_ROUTES-alt", "line", NAV_ROUTES, filter = a("==", get("sel"), false), layout = routeLine,
                 paint = o("line-color" to NAV_ALT_COLOR, "line-width" to 6.0, "line-opacity" to 0.85)),
             layer("$NAV_ROUTES-edge", "line", NAV_ROUTES, filter = a("==", get("sel"), true), layout = routeLine,
                 paint = o("line-color" to "#FFFFFF", "line-width" to 11.0)),
             layer("$NAV_ROUTES-line", "line", NAV_ROUTES, filter = a("==", get("sel"), true), layout = routeLine,
-                paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0)),
-            // 50% opacity all-time smooth radial heatmap (non-hexagonal) for `Heat` mode.
-            layer(HEAT, "heatmap", paint = o(
-                "heatmap-weight" to a("coalesce", get("weight"), 1.0),
-                "heatmap-intensity" to 1.15,
-                "heatmap-radius" to a("interpolate", a("linear"), a("zoom"), 8, 16.0, 11, 28.0, 14, 42.0, 16, 54.0),
-                "heatmap-opacity" to 0.50,
-                "heatmap-color" to a(
-                    "interpolate", a("linear"), a("heatmap-density"),
-                    0.0, "rgba(0,0,0,0)",
-                    0.18, "rgba(59,130,246,0.85)",
-                    0.42, "rgba(168,85,247,0.95)",
-                    0.68, "rgba(249,115,22,1.0)",
-                    1.0, "rgba(239,68,68,1.0)"
-                )
-            )),
+                paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0))
+        ) + agencyHeatLayers + listOf(
             // Flagged signal radius / centroid bubbles (50% transparent fill so the basemap reads cleanly through).
             layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to a("*", 0.50, get("opacity")))),
             layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("*", 0.92, get("opacity")))),
@@ -364,7 +381,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // User-dropped map point & active map selection halo ring.
             layer(DROPPED_POINT, "symbol", layout = o("icon-image" to "rf-dropped-pin", "icon-size" to 1.0, *overlap)),
             layer(SELECTED_PIN, "symbol", layout = o("icon-image" to "rf-selection-ring", "icon-size" to 1.0, *overlap))
-        ).forEach { map.addLayer(it) }
+        )).forEach { map.addLayer(it) }
     }
 
     /** Device labels: text and halo colours on the light or night map. */
@@ -537,7 +554,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 val lon = t.lon ?: return@mapNotNull null
                 val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
                 val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
-                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight)
+                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight, "agency" to t.agency.id)
             }
             set(HEAT, heatFeatures)
             drawPins(emptyList())
