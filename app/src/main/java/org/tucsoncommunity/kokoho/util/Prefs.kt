@@ -69,7 +69,8 @@ object Prefs {
 
     /** The ways a category doesn't alert you (Settings › What to detect): banner, sound, voice, vibration, radar beep. */
     fun categoryAlertsOff(context: Context, category: Category): Set<org.tucsoncommunity.kokoho.data.AlertKind> =
-        org.tucsoncommunity.kokoho.data.AlertKind.parse(sp(context).getString("cat_alerts_off_" + category.name, null)).let {
+        (sp(context).getString("cat_alerts_off_" + category.name, null)?.let { org.tucsoncommunity.kokoho.data.AlertKind.parse(it) }
+            ?: if (category == Category.MOBILE_PRINTER) org.tucsoncommunity.kokoho.data.AlertKind.entries.toSet() else emptySet()).let {
             // Saved before these had no Beep chip: Beep off meant "stop the beeping", which is their alert sound.
             if (!hasRadarTicks(category) && org.tucsoncommunity.kokoho.data.AlertKind.BEEP in it)
                 it - org.tucsoncommunity.kokoho.data.AlertKind.BEEP + org.tucsoncommunity.kokoho.data.AlertKind.SOUND else it
@@ -78,7 +79,7 @@ object Prefs {
     fun setCategoryAlertsOff(context: Context, category: Category, off: Set<org.tucsoncommunity.kokoho.data.AlertKind>) = sp(context).edit {
         val key = "cat_alerts_off_" + category.name
         val kept = if (hasRadarTicks(category)) off else off - org.tucsoncommunity.kokoho.data.AlertKind.BEEP
-        org.tucsoncommunity.kokoho.data.AlertKind.format(kept)?.let { putString(key, it) } ?: remove(key)
+        putString(key, org.tucsoncommunity.kokoho.data.AlertKind.format(kept) ?: "")
     }
 
     /** Radar beeps tick for devices heard nearby; these alerts aren't one (online reports, GPS, cell network). */
@@ -540,8 +541,11 @@ object Prefs {
     fun setOuiSpyBoard(context: Context, address: String?) = sp(context).edit {
         if (address == null) remove("ouispy_board") else putString("ouispy_board", address)
     }
+    /** MT7921AU adapters ("vid:pid") whose "no Bluetooth" notice was dismissed: not shown again. */
+    fun usbBtNoticeHidden(context: Context): Set<String> = sp(context).getStringSet("usb_bt_notice_hidden", emptySet()).orEmpty()
+    fun hideUsbBtNotice(context: Context, id: String) = sp(context).edit { putStringSet("usb_bt_notice_hidden", usbBtNoticeHidden(context) + id) }
     /** The channels USB WiFi adapters hop (Settings › External hardware). The phone's own WiFi always lists every band. */
-    enum class WifiBand { ALL, LOW, HIGH }
+    enum class WifiBand { ALL, MOSTLY_LOW, LOW, HIGH }
     fun wifiBand(context: Context): WifiBand =
         runCatching { WifiBand.valueOf(sp(context).getString("wifi_band", null)!!) }.getOrDefault(WifiBand.ALL)
     fun setWifiBand(context: Context, band: WifiBand) = sp(context).edit { putString("wifi_band", band.name) }
@@ -767,9 +771,29 @@ object Prefs {
     /** Save the radio signal of clear calls ([org.tucsoncommunity.kokoho.sdr.P25Record]), for the voice decoder. Off by default. */
     fun p25Record(context: Context): Boolean = bool(context, "p25_record", false)
     fun setP25Record(context: Context, v: Boolean) = setBool(context, "p25_record", v)
+    /** Keep the sound of P25 calls played ([org.tucsoncommunity.kokoho.sdr.P25Record.saveSpeech]). On by default. */
+    fun p25SaveCalls(context: Context): Boolean = bool(context, "p25_save_calls", true)
+    fun setP25SaveCalls(context: Context, v: Boolean) = setBool(context, "p25_save_calls", v)
+    /** Saved calls turned to text by Android's on-device speech recognizer ([org.tucsoncommunity.kokoho.sdr.P25Transcribe]). */
+    fun p25Transcribe(context: Context): Boolean = bool(context, "p25_transcribe", false)
+    fun setP25Transcribe(context: Context, v: Boolean) = setBool(context, "p25_transcribe", v)
+    /** Radio sweep › Play voice transmissions (analog FM, DMR, NXDN, conventional P25). Off by default. */
+    fun sweepListen(context: Context): Boolean = bool(context, "sweep_listen", false)
+    fun setSweepListen(context: Context, v: Boolean) = setBool(context, "sweep_listen", v)
+    /** Radio sweep › Record voice transmissions silently. Off by default. */
+    fun sweepRecord(context: Context): Boolean = bool(context, "sweep_record", false)
+    fun setSweepRecord(context: Context, v: Boolean) = setBool(context, "sweep_record", v)
     /** Which clear P25 calls to play live: 0 none (default), 1 watched talkgroups, 2 all ([org.tucsoncommunity.kokoho.sdr.SdrRadio.Listen]). */
     fun p25Listen(context: Context): Int = int(context, "p25_listen", 0).coerceIn(0, 2)
     fun setP25Listen(context: Context, v: Int) = setInt(context, "p25_listen", v.coerceIn(0, 2))
+    /** P25 talkgroups › long-press: talkgroups whose calls play first and cut others ([org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Priority]). */
+    fun p25Priority(context: Context): Set<Int> = intSet(context, "p25_priority")
+    fun setP25Priority(context: Context, v: Set<Int>) = sp(context).edit { putStringSet("p25_priority", v.map { it.toString() }.toSet()) }
+    /** P25 talkgroups › long-press › Never play ([org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Lockout]). */
+    fun p25Lockout(context: Context): Set<Int> = intSet(context, "p25_lockout")
+    fun setP25Lockout(context: Context, v: Set<Int>) = sp(context).edit { putStringSet("p25_lockout", v.map { it.toString() }.toSet()) }
+    private fun intSet(context: Context, key: String): Set<Int> =
+        sp(context).getStringSet(key, emptySet()).orEmpty().mapNotNull { it.toIntOrNull() }.toSet()
     /** P25 talkgroups › Mute: listening paused. */
     fun p25Mute(context: Context): Boolean = bool(context, "p25_mute", false)
     fun setP25Mute(context: Context, v: Boolean) = setBool(context, "p25_mute", v)
@@ -778,12 +802,55 @@ object Prefs {
         int(context, "sdr_turn_s_" + mode.name, int(context, "sdr_turn_s", 60)).coerceIn(30, 300)
     fun setSdrTurnS(context: Context, mode: org.tucsoncommunity.kokoho.sdr.SdrRadio.Mode, v: Int) =
         setInt(context, "sdr_turn_s_" + mode.name, v.coerceIn(30, 300))
+    /** Settings › RTL-SDR radio › Stay on activity: a scan that hears something keeps the SDR. Off by default. */
+    fun sdrStay(context: Context): Boolean = bool(context, "sdr_stay", false)
+    fun setSdrStay(context: Context, v: Boolean) = setBool(context, "sdr_stay", v)
     /** The ways P25 talkgroup alerts don't alert you (Settings › RTL-SDR radio › Talkgroup alerts); none by default. */
     fun p25AlertsOff(context: Context): Set<org.tucsoncommunity.kokoho.data.AlertKind> =
         org.tucsoncommunity.kokoho.data.AlertKind.parse(sp(context).getString("p25_alerts_off", null))
     fun setP25AlertsOff(context: Context, off: Set<org.tucsoncommunity.kokoho.data.AlertKind>) = sp(context).edit {
         org.tucsoncommunity.kokoho.data.AlertKind.format(off)?.let { putString("p25_alerts_off", it) } ?: remove("p25_alerts_off")
     }
+
+    private fun sdrPrivate(context: Context) = context.getSharedPreferences("sdr_private", Context.MODE_PRIVATE)
+
+    /** SDR log names every frequency, aircraft and page it hears (never page text). Off: counts and levels only. */
+    fun sdrLogAll(context: Context): Boolean = bool(context, "sdr_log_all", false)
+    fun setSdrLogAll(context: Context, v: Boolean) = setBool(context, "sdr_log_all", v)
+
+    /** Power up the SDR's antenna cable (bias-tee), for an active antenna or amplifier. */
+    fun sdrBiasTee(context: Context): Boolean = bool(context, "sdr_bias_tee", false)
+    fun setSdrBiasTee(context: Context, v: Boolean) = setBool(context, "sdr_bias_tee", v)
+    /** Learn the SDR's frequency error from P25 control channels. */
+    fun sdrPpmAuto(context: Context): Boolean = bool(context, "sdr_ppm_auto", true)
+    fun setSdrPpmAuto(context: Context, v: Boolean) = setBool(context, "sdr_ppm_auto", v)
+    /** The frequency correction last typed or learned, in ppm. */
+    fun sdrPpmShown(context: Context): Float = sp(context).getFloat("sdr_ppm", 0f)
+    /** [device]: the SDR it was learned on, or "" when typed (then it holds for any SDR). */
+    fun setSdrPpm(context: Context, ppm: Float, device: String) = sp(context).edit { putFloat("sdr_ppm", ppm); putString("sdr_ppm_for", device) }
+    /** The correction for [device]: typed, or learned on this one; with learning on, another SDR starts from 0. */
+    fun sdrPpm(context: Context, device: String): Double {
+        val v = sdrPpmShown(context).toDouble()
+        if (!sdrPpmAuto(context)) return v
+        val on = str(context, "sdr_ppm_for")
+        return if (on.isEmpty() || on == device) v else 0.0
+    }
+
+    /** P25 › Bands to search for a control channel: [org.tucsoncommunity.kokoho.sdr.P25Hunt.Band] keys; 700 and 800 MHz by default. */
+    fun p25Bands(context: Context): Set<String> =
+        sp(context).getStringSet("p25_bands", null)?.takeIf { it.isNotEmpty() } ?: org.tucsoncommunity.kokoho.sdr.P25Hunt.DEFAULT_KEYS
+    fun setP25Bands(context: Context, v: Set<String>) = sp(context).edit { putStringSet("p25_bands", v) }
+    /** Control channels found before, newest first (on the phone only): tried before a band scan. */
+    fun p25Known(context: Context): List<org.tucsoncommunity.kokoho.sdr.P25Hunt.Lock> = sdrPrivate(context).getString("p25_known", "").orEmpty().lines().mapNotNull { l ->
+        val f = l.split(',')
+        val hz = f.getOrNull(0)?.toLongOrNull() ?: return@mapNotNull null
+        org.tucsoncommunity.kokoho.sdr.P25Hunt.Lock(hz, f.getOrNull(1)?.toIntOrNull(16) ?: 0, f.getOrNull(2) == "lsm")
+    }
+    fun addP25Known(context: Context, lock: org.tucsoncommunity.kokoho.sdr.P25Hunt.Lock) {
+        val kept = listOf(lock) + p25Known(context).filter { kotlin.math.abs(it.hz - lock.hz) > 6_250L }
+        sdrPrivate(context).edit { putString("p25_known", kept.take(P25_KNOWN).joinToString("\n") { "${it.hz},%X,${if (it.lsm) "lsm" else "c4fm"}".format(it.nac) }) }
+    }
+    private const val P25_KNOWN = 4
 
     /** Name hits from RadioReference (needs the user's own Premium login and developer key; off by default). */
     fun radioReferenceOn(context: Context): Boolean = bool(context, "radio_reference_on", false)
@@ -803,6 +870,9 @@ object Prefs {
     /** The USB adapter's own light (only adapters whose light the app can drive: RTL8811AU / 8821AU): on by default. */
     fun usbAdapterLight(context: Context): Boolean = bool(context, "usb_adapter_light", true)
     fun setUsbAdapterLight(context: Context, value: Boolean) = setBool(context, "usb_adapter_light", value)
+    /** Settings › Log everything the USB WiFi adapter hears. Off by default. */
+    fun usbWifiLogAll(context: Context): Boolean = bool(context, "usb_wifi_log_all", false)
+    fun setUsbWifiLogAll(context: Context, v: Boolean) = setBool(context, "usb_wifi_log_all", v)
     /** Scan Bluetooth with a USB adapter's Bluetooth part (dongle or combo adapter). */
     fun usbBluetooth(context: Context): Boolean = bool(context, "usb_bluetooth", true)
     fun setUsbBluetooth(context: Context, value: Boolean) = setBool(context, "usb_bluetooth", value)

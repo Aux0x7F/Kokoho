@@ -13,8 +13,11 @@ import java.util.concurrent.TimeoutException
  * altogether (unplugged, or its USB link died), so the driver stops instead of hammering it.
  */
 internal object UsbCtl {
-    /** Failed transfers in a row (each already tried 3 times). */
-    @Volatile var run = 0
+    /** Failed transfers in a row (each already tried 3 times), per driver thread: adapters run side by side. */
+    private val runs = ThreadLocal.withInitial { IntArray(1) }
+    var run: Int
+        get() = runs.get()[0]
+        set(v) { runs.get()[0] = v }
     val gone get() = run >= GONE_AFTER
     fun reset() { run = 0 }
     private const val GONE_AFTER = 25
@@ -37,13 +40,15 @@ internal fun UsbDeviceConnection.ctl3(type: Int, request: Int, value: Int, index
  * Bulk-IN receive loop for monitor drivers: keeps [count] transfers of
  * [size] bytes in flight (async [UsbRequest]), or falls back to synchronous transfers
  * where the platform can't queue them. [onData] gets each completed transfer; [onTick]
- * runs at least every ~100 ms (channel hops, reports) until [stopped] says so.
+ * runs at least every ~100 ms (channel hops, reports) until [stopped] says so. [onDeaf] gets the silence in ms
+ * after [DEAF_MS] with no data at all, then again after each further [DEAF_MS] (the driver brings its radio back).
  * Returns the bytes received.
  */
 internal object BulkRx {
 
     fun run(tag: String, conn: UsbDeviceConnection, ep: UsbEndpoint, count: Int, size: Int,
-            stopped: () -> Boolean, onData: (ByteArray, Int) -> Unit, syncTimeoutMs: Int = 200, onTick: (Long) -> Unit): Long {
+            stopped: () -> Boolean, onData: (ByteArray, Int) -> Unit, syncTimeoutMs: Int = 200,
+            onDeaf: ((Long) -> Unit)? = null, onTick: (Long) -> Unit): Long {
         val buffers = Array(count) { ByteBuffer.allocateDirect(size) }
         val reqs = ArrayList<UsbRequest>(count)
         var async = true
@@ -57,11 +62,12 @@ internal object BulkRx {
         if (!async) {
             UsbWifi.log("$tag: async RX unavailable (${reqs.size}/$count) - synchronous RX")
             reqs.forEach { runCatching { it.cancel() }; runCatching { it.close() } }
-            return runSync(tag, conn, ep, size, stopped, onData, onTick, syncTimeoutMs)
+            return runSync(tag, conn, ep, size, stopped, onData, onTick, syncTimeoutMs, onDeaf)
         }
         UsbWifi.log("$tag: async RX live - $count buffers in flight")
         val scratch = ByteArray(size)
         val guard = EmptyGuard(tag)
+        val deaf = DeafCheck(onDeaf)
         var total = 0L
         /** Buffers whose request could not be replaced yet: each one lost would cut the receive rate for good. */
         val dead = HashSet<Int>()
@@ -79,10 +85,10 @@ internal object BulkRx {
         try {
             while (!stopped()) {
                 dead.removeAll { replace(it) }
-                val req = try { conn.requestWait(100L) } catch (_: TimeoutException) { null }
+                val req = waitRequest(conn, 100L)
                 if (req != null) {
                     val idx = req.clientData as? Int ?: -1
-                    if (idx in reqs.indices) {
+                    if (idx in reqs.indices && reqs[idx] === req) {
                         val b = buffers[idx]
                         val n = b.position()
                         if (n in 1..size) { b.rewind(); b.get(scratch, 0, n) }
@@ -91,31 +97,79 @@ internal object BulkRx {
                             runCatching { req.close() }
                             if (!replace(idx)) dead += idx
                         }
-                        if (n in 1..size) { total += n; guard.data(); runCatching { onData(scratch, n) } } else guard.empty()
+                        if (n in 1..size) { total += n; guard.data(); deaf.data(); runCatching { onData(scratch, n) } } else guard.empty()
                     }
                 }
-                onTick(System.currentTimeMillis())
+                val now = System.currentTimeMillis()
+                onTick(now); deaf.tick(now)
             }
         } finally {
-            reqs.forEach { runCatching { it.cancel() }; runCatching { it.close() } }
+            reap(tag, conn, reqs)
         }
         return total
     }
 
+    /**
+     * Cancels [reqs] and collects each one back from the kernel before closing it. A cancelled transfer still comes
+     * back through [UsbDeviceConnection.requestWait]: closed first, the next loop on the same connection (a driver
+     * restarting its radio) gets a freed request back and the app dies in native code (SIGSEGV in usb_request_wait).
+     */
+    /**
+     * [UsbDeviceConnection.requestWait] that always takes its time. On an adapter that dropped off USB, Android's
+     * returns null at once and throws no TimeoutException (its poll says "hung up", and only a passed deadline throws):
+     * a loop counting timeouts then never ends. Seen when the car's power went: [reap] spun for 4 s once and ~29 min
+     * another time, until something else on the thread happened to change errno, and the adapter couldn't start again.
+     */
+    private fun waitRequest(conn: UsbDeviceConnection, ms: Long): UsbRequest? {
+        val t0 = System.nanoTime()
+        val r = try { conn.requestWait(ms) } catch (_: TimeoutException) { return null }
+        // Null in under half the wait: nothing to wait on. Sleep the rest, so no caller spins on a dead adapter.
+        if (r == null && System.nanoTime() - t0 < ms * 500_000L) try { Thread.sleep(ms / 2) } catch (_: InterruptedException) {}
+        return r
+    }
+
+    private fun reap(tag: String, conn: UsbDeviceConnection, reqs: List<UsbRequest>) {
+        reqs.forEach { runCatching { it.cancel() } }
+        val left = HashSet<UsbRequest>(reqs)
+        var waits = 0
+        while (left.isNotEmpty() && waits < 20) {
+            val r = try { waitRequest(conn, 50L) } catch (_: Exception) { break }
+            if (r != null) left.remove(r) else waits++
+        }
+        if (left.isNotEmpty()) UsbWifi.log("$tag: ${left.size} of ${reqs.size} USB transfers didn't come back after cancelling")
+        reqs.forEach { runCatching { it.close() } }
+    }
+
     private fun runSync(tag: String, conn: UsbDeviceConnection, ep: UsbEndpoint, size: Int, stopped: () -> Boolean,
-                        onData: (ByteArray, Int) -> Unit, onTick: (Long) -> Unit, timeoutMs: Int): Long {
+                        onData: (ByteArray, Int) -> Unit, onTick: (Long) -> Unit, timeoutMs: Int, onDeaf: ((Long) -> Unit)?): Long {
         val buf = ByteArray(size)
         val guard = EmptyGuard(tag)
+        val deaf = DeafCheck(onDeaf)
         var total = 0L
         while (!stopped()) {
             val began = System.currentTimeMillis()
             val n = conn.bulkTransfer(ep, buf, size, timeoutMs)
-            if (n > 0) { total += n; guard.data(); runCatching { onData(buf, n) } }
+            if (n > 0) { total += n; guard.data(); deaf.data(); runCatching { onData(buf, n) } }
             else if (System.currentTimeMillis() - began < timeoutMs / 2) guard.empty() // a quiet channel takes the whole timeout
-            onTick(System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            onTick(now); deaf.tick(now)
         }
         return total
     }
+
+    /** No data at all for [DEAF_MS]: tells [onDeaf] how long, then counts again. Used from the RX thread only. */
+    private class DeafCheck(private val onDeaf: ((Long) -> Unit)?) {
+        private var lastData = System.currentTimeMillis()
+        fun data() { lastData = System.currentTimeMillis() }
+        fun tick(now: Long) {
+            if (onDeaf == null || now - lastData <= DEAF_MS) return
+            runCatching { onDeaf?.invoke(now - lastData) }
+            lastData = System.currentTimeMillis() // after the driver's recovery, which can take a second
+        }
+    }
+
+    /** Silence after which a driver's radio counts as deaf: even a quiet channel hop round hears something in 15 s. */
+    const val DEAF_MS = 15_000L
 
     /**
      * Guards an async receive loop against a burst of empty completions (after Wardrive Go): with

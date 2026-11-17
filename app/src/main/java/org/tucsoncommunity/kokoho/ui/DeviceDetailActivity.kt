@@ -341,7 +341,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             ?: KokohoAgency.DHS_CBP
         val highestTitle = if (threat != null) {
             KokohoSignatures.formatHighestOrderTitle(threat, witness)
-        } else if (witness != null) {
+        } else if (witness != null && KokohoSignatures.hasConfirmingReport(witness)) {
             val sub = witness.agentName.ifBlank { witness.vehicleNumber.ifBlank { witness.accessoryKind.ifBlank { agency.friendlyLabel } } }
             "Confirmed ${agency.friendlyLabel}: $sub"
         } else {
@@ -410,7 +410,8 @@ class DeviceDetailActivity : AppCompatActivity() {
         addKeyValueRow(metaCard, "Agency", agency.fullName)
         addKeyValueRow(metaCard, "Accuracy", accText)
         addKeyValueRow(metaCard, "Last Detected", ageText)
-        addKeyValueRow(metaCard, "Confidence", "$confPct% (${KokohoSignatures.epistemicPrefix(confPct, witness)})")
+        val confirmedEvidence = threat?.let { KokohoSignatures.isExactEvidenceConfirmed(it, witness) } == true
+        addKeyValueRow(metaCard, "Confidence", "$confPct% (${KokohoSignatures.epistemicPrefix(confPct, witness, evidenceConfirmedBefore = confirmedEvidence)})")
         if (!threat?.capabilities.isNullOrEmpty()) {
             addKeyValueRow(metaCard, "Capabilities", threat!!.capabilities.joinToString(" · "))
         }

@@ -13,7 +13,8 @@ object RadioSettings {
     /** Built-in bands, by Settings key. */
     val BUILT_IN = listOf(
         "700" to RadioWatch.BANDS[0], "800" to RadioWatch.BANDS[1],
-        "vhf" to RadioWatch.BANDS[2], "uhf" to RadioWatch.BANDS[3]
+        "vhf" to RadioWatch.BANDS[2], "fed_uhf" to RadioWatch.BANDS[3],
+        "uhf" to RadioWatch.BANDS[4]
     )
 
     /** The RTL-SDR tunes about 24 - 1766 MHz; more than this much custom spectrum makes a sweep crawl. */
@@ -26,12 +27,12 @@ object RadioSettings {
         val off = Prefs.radioBandsOff(context)
         return RadioWatch.Config(
             bands = BUILT_IN.filter { it.first !in off }.map { it.second } + customBands(Prefs.radioCustomBands(context)) +
-                (if (Prefs.radioCellOn(context)) RadioWatch.LTE_UPLINK_BANDS else emptyList()) +
-                (if (Prefs.radioTetraOn(context)) listOf(RadioWatch.TETRA_BAND) else emptyList()),
+                (if (Prefs.radioCellOn(context)) RadioWatch.LTE_UPLINK_BANDS else emptyList()),
             excluded = ranges(Prefs.radioExcluded(context)).map { it.first },
             targets = targets(Prefs.radioTargets(context)),
             minSnrDb = Prefs.radioMinSnr(context),
-            dmr = Prefs.radioDmrOn(context)
+            dmr = Prefs.radioDmrOn(context),
+            tetraCity = false
         )
     }
 

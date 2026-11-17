@@ -28,6 +28,8 @@ object P25Record {
     /** Mixes [offsetHz] down to 0 and integrates-and-dumps to [RATE], collecting 16-bit I/Q pairs, or handing each to [onSample]. */
     class Baseband(val offsetHz: Long, sampleRate: Int = P25Demod.SAMPLE_RATE, private val onSample: ((Double, Double) -> Unit)? = null) {
         private val decim = sampleRate / RATE
+        /** The output rate: [RATE], or close to it when [sampleRate] isn't a multiple (the sweep's 2.048 MS/s gives 48 762). */
+        val rate = sampleRate / decim
         private val stepR: Double; private val stepI: Double
         init { val w = -2 * PI * offsetHz / sampleRate; stepR = cos(w); stepI = sin(w) }
         private var pr = 1.0; private var pi = 0.0
@@ -61,7 +63,7 @@ object P25Record {
         }
 
         /** The recording as a WAV file. */
-        fun wav(): ByteArray = out.toByteArray().let { header(it.size) + it }
+        fun wav(): ByteArray = out.toByteArray().let { header(it.size, 2, rate) + it }
     }
 
     /** A 44-byte PCM WAV header, 16 bits: by default 2 channels at [RATE]. */
@@ -75,16 +77,84 @@ object P25Record {
     }
 
     /** Saves a call's recording ("p25_20261102_142233_tg1234.wav") and drops the oldest past [KEEP]. */
-    fun save(context: Context, call: P25History.Call, wav: ByteArray): File {
-        val dir = File(context.filesDir, DIR).apply { mkdirs() }
-        val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date(call.time))
-        val who = call.tg?.let { "tg$it" } ?: call.target?.let { "to$it" } ?: "call"
-        val f = File(dir, "p25_${stamp}_$who.wav").apply { writeBytes(wav) }
-        files(context).drop(KEEP).forEach { it.delete() }
+    fun save(context: Context, call: P25History.Call, wav: ByteArray): File = keep(context, DIR, KEEP, "p25_${stamp(call.time)}_${who(call)}.wav", wav)
+
+    /** The kept recordings, newest first. */
+    fun files(context: Context): List<File> = list(context, DIR)
+
+    /**
+     * Played calls' sound (Settings › RTL-SDR radio › Save played calls), to listen to in Tools › Voice history: P25 calls
+     * ("20261112_114720_tg54221.wav") and transmissions the radio sweep played ("20261112_114720_462562500hz.wav").
+     */
+    private const val CALLS_DIR = "p25calls"
+    const val CALLS_KEEP = 200
+
+    /** A played P25 call's speech ([P25Follow]'s 8 kHz pieces) saved as a mono WAV; the oldest past [CALLS_KEEP] go. */
+    fun saveSpeech(context: Context, call: P25History.Call, pcm: List<ShortArray>, talker: Int? = null): File =
+        keep(context, CALLS_DIR, CALLS_KEEP, "${stamp(call.time)}_${who(call)}${talker?.let { "_r$it" } ?: ""}.wav", speechWav(pcm))
+
+    /**
+     * A transmission the radio sweep played (a walkie-talkie...), heard at [hz]: its sound at [rate]. [unit]: who sent it,
+     * "u1A2B" an MDC-1200 unit ID, "r123456" a P25 radio.
+     */
+    fun saveTransmission(context: Context, time: Long, hz: Long, pcm: List<ShortArray>, rate: Int, unit: String? = null): File =
+        keep(context, CALLS_DIR, CALLS_KEEP, "${stamp(time)}_${hz}hz${unit?.let { "_$it" } ?: ""}.wav", speechWav(pcm, rate))
+
+    /**
+     * Settings › Log everything the RTL-SDR hears: a followed transmission or P25 call's raw I/Q at [hz], the channel
+     * mixed to 0 Hz at about [RATE] (16-bit stereo WAV, I left, Q right), for decoding again elsewhere (SDR++, SDRTrunk, dsd-fme).
+     */
+    fun saveRaw(context: Context, time: Long, hz: Long, wav: ByteArray): File =
+        keep(context, RAW_DIR, RAW_KEEP, "iq_${stamp(time)}_${hz}hz.wav", wav)
+
+    /** The saved raw captures, newest first. */
+    fun rawFiles(context: Context): List<File> = list(context, RAW_DIR)
+    private const val RAW_DIR = "sdrraw"
+    /** About 6 MB each at most: [RAW_MAX_S] s of 4-byte samples at ~48 kHz. */
+    const val RAW_KEEP = 20
+    const val RAW_MAX_S = 30
+
+    /** The saved played calls, newest first. */
+    fun speechFiles(context: Context): List<File> = list(context, CALLS_DIR)
+
+    internal fun speechWav(pcm: List<ShortArray>, rate: Int = ImbeDecoder.RATE): ByteArray {
+        val b = java.nio.ByteBuffer.allocate(2 * pcm.sumOf { it.size }).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        for (piece in pcm) for (s in piece) b.putShort(s)
+        return header(b.capacity(), 1, rate) + b.array()
+    }
+
+    /** A saved call, from its file name: when, its talkgroup, the radio a private call went to, or where a transmission was heard; how long. */
+    class Saved(val file: File, val time: Long, val tg: Int?, val target: Long?, val hz: Long?, val seconds: Double, val unit: String? = null) {
+        /** "unit 1A2B" (MDC-1200) or "radio 123456" (P25), or null when not heard. */
+        val who: String? get() = unit?.let { if (it.startsWith("u")) "unit " + it.drop(1) else "radio " + it.drop(1) }
+    }
+
+    internal fun saved(f: File): Saved? {
+        val m = Regex("""(\d{8}_\d{6})_(?:(tg|to)(\d+)|(\d+)hz)(?:_(u[0-9A-F]{4}|r\d{1,8}))?\.wav""").matchEntire(f.name) ?: return null
+        val time = runCatching { java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).parse(m.groupValues[1])!!.time }.getOrNull() ?: return null
+        // The WAV header's sample rate: 8 kHz P25 speech, the sweep's analog audio faster.
+        val rate = runCatching { java.io.RandomAccessFile(f, "r").use { r -> r.seek(24); Integer.reverseBytes(r.readInt()) } }.getOrNull()
+            ?.takeIf { it > 0 } ?: ImbeDecoder.RATE
+        val seconds = (f.length() - 44).coerceAtLeast(0) / (2.0 * rate)
+        val n = m.groupValues[3].ifEmpty { m.groupValues[4] }.toLongOrNull() ?: return null
+        val unit = m.groupValues[5].ifEmpty { null }
+        return when (m.groupValues[2]) {
+            "tg" -> Saved(f, time, n.toInt(), null, null, seconds, unit)
+            "to" -> Saved(f, time, null, n, null, seconds, unit)
+            else -> Saved(f, time, null, null, n, seconds, unit)
+        }
+    }
+
+    private fun stamp(time: Long) = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date(time))
+    private fun who(call: P25History.Call) = call.tg?.let { "tg$it" } ?: call.target?.let { "to$it" } ?: "call"
+
+    private fun keep(context: Context, dirName: String, max: Int, name: String, wav: ByteArray): File {
+        val dir = File(context.filesDir, dirName).apply { mkdirs() }
+        val f = File(dir, name).apply { writeBytes(wav) }
+        list(context, dirName).drop(max).forEach { it.delete(); P25Transcribe.sidecar(it).delete() }
         return f
     }
 
-    /** The kept recordings, newest first. */
-    fun files(context: Context): List<File> =
-        File(context.filesDir, DIR).listFiles { f -> f.name.endsWith(".wav") }.orEmpty().sortedByDescending { it.name }
+    private fun list(context: Context, dirName: String): List<File> =
+        File(context.filesDir, dirName).listFiles { f -> f.name.endsWith(".wav") }.orEmpty().sortedByDescending { it.name }
 }

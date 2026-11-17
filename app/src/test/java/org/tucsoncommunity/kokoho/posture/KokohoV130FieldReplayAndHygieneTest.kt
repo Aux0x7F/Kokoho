@@ -324,7 +324,7 @@ class KokohoV130FieldReplayAndHygieneTest {
         assertEquals(0.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.HOURS_24, 25L * 3600_000L), 0.01f)
 
         // 3. Alarm (Monitor) vs Eye (Map Visibility) independent filter split:
-        val nowMs = 1_794_850_000_000L
+        val nowMs = System.currentTimeMillis()
         val geo = DeviceRegistry.GeoSample(nowMs, 32.2226, -110.9747)
         val idWifi = DeviceIntel.Identity("WiFi access point", emptyList())
         DeviceRegistry.report(
@@ -918,6 +918,26 @@ class KokohoV130FieldReplayAndHygieneTest {
         }
         val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
         rfMap.loadStyle(dark = true) {}
+        val unconfirmedSnap = KokohoPostureEngine.evaluate(ctx, nowMs)
+        val unconfirmedMerged = rfMap.drawLive(emptyList(), unconfirmedSnap).single()
+        assertTrue(
+            "Unreported 95% sightings must cap at 'Likely' (never 'Confirmed' before a report), got '${unconfirmedMerged.label}'",
+            unconfirmedMerged.label.contains("Likely ICE") &&
+                unconfirmedMerged.label.contains("Likely CBP") &&
+                !unconfirmedMerged.label.contains("Confirmed ")
+        )
+        // Submit a confirming LE report for merge-ice-0001 only -> merge-ice-0001 becomes Confirmed ICE while unreported merge-cbp-0002 stays Likely CBP!
+        KokohoSignatures.saveWitnessReport(
+            ctx,
+            WitnessReportRecord(
+                targetKey = "merge-ice-0001-4000-8000-000000000001",
+                entityUuid = "merge-ice-0001-4000-8000-000000000001",
+                agencyCode = "DHS_ICE",
+                reportKind = "LE",
+                notes = "Confirmed unmarked Tahoe outside office"
+            ),
+            syncRemote = false
+        )
         val evalSnap = KokohoPostureEngine.evaluate(ctx, nowMs)
         val mergedPins = rfMap.drawLive(emptyList(), evalSnap)
         assertEquals("Colocated detections + station at zoom 12.0 must merge into 1 centroid pin", 1, mergedPins.size)
@@ -931,10 +951,10 @@ class KokohoV130FieldReplayAndHygieneTest {
         )
         assertTrue("Merged centroid must display center icon dot", mergedPin.showDot)
         assertTrue(
-            "Merged centroid label '${mergedPin.label}' must start with station title '${leadMergedStation.title}' followed by comma-listed Confirmed ICE, Confirmed CBP",
+            "Merged centroid label '${mergedPin.label}' must start with station title '${leadMergedStation.title}' followed by Confirmed ICE (reported) and Likely CBP (unreported)",
             mergedPin.label.startsWith("${leadMergedStation.title}, ") &&
                 mergedPin.label.contains("Confirmed ICE") &&
-                mergedPin.label.contains("Confirmed CBP")
+                mergedPin.label.contains("Likely CBP")
         )
         val locGeoAtZoom12 = sourceData["rf-kokoho-locations"].orEmpty()
         assertTrue("rf-kokoho-locations GeoJSON must be populated with unmerged stations", locGeoAtZoom12.isNotEmpty())
@@ -1082,6 +1102,218 @@ class KokohoV130FieldReplayAndHygieneTest {
         KokohoPostureEngine.clearLocalState()
         KokohoHubClient.clearCachedObjects()
         DeviceRegistry.clear()
+    }
+
+    @Test
+    fun v137UpstreamGpsAndDecoderIntegration() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.HOURS_3)
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        DeviceRegistry.clear()
+        RadioLog.clear()
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Log.clear(0L)
+
+        val nowMs = System.currentTimeMillis()
+        // User's phone is Downtown Tucson (32.2217, -110.9747)
+        val userLoc = android.location.Location("gps").apply {
+            latitude = 32.2217
+            longitude = -110.9747
+            accuracy = 6f
+            time = nowMs
+        }
+        ScanForegroundService.setLastFixForTest(userLoc)
+
+        // 1. Real P25 LRRP Radio GPS Packet -> KokohoPostureEngine exact radio GPS pinpoint!
+        //    Radio 774210 transmits its hardware GPS at East Broadway & Swan (32.2218, -110.8925, ±14m) on Federal VHF 168.3500 MHz:
+        val lrrpPos = org.tucsoncommunity.kokoho.sdr.P25Tsbk.Position(
+            radio = 774210,
+            outbound = false,
+            lat = 32.22180,
+            lon = -110.89250,
+            radiusM = 14.0,
+            altitudeM = 760.0
+        )
+        KokohoPostureEngine.ingestP25RadioGps(ctx, lrrpPos, hz = 168_350_000L, nac = 0x167, nowMs = nowMs)
+        val snap1 = KokohoPostureEngine.evaluate(ctx, nowMs)
+        val lrrpThreat = snap1.mapThreats.firstOrNull { it.hardwareIdentifier?.contains("774210") == true }
+        assertNotNull("P25 LRRP GPS fix must produce a located threat on Kokoho's Map", lrrpThreat)
+        assertEquals(32.22180, lrrpThreat!!.lat!!, 1e-5)
+        assertEquals(-110.89250, lrrpThreat.lon!!, 1e-5)
+        assertTrue("LRRP GPS threat with ±14m radius must be pinpointed", lrrpThreat.isPinpointed)
+        assertTrue("LRRP GPS radius must stay <= 15m after rolling projection (was ${lrrpThreat.uncertaintyRadiusM})", lrrpThreat.uncertaintyRadiusM in 14..15)
+        assertTrue("LRRP GPS threat must carry LRRP GPS capability", lrrpThreat.capabilities.contains("LRRP GPS"))
+        assertTrue(
+            "LRRP GPS threat must persist into KokohoEntityLedger",
+            KokohoEntityLedger.getWithinRollingWindow(ctx, nowMs, 3_600_000L).any { it.uuid == lrrpThreat.uuid }
+        )
+
+        // 2. Location-bound FixedRouter: stationary shop router stays quiet within 1 km of its learned spot,
+        //    and UN-SUPPRESSES / ALERTS if that same MAC moves 3.5 km across town!
+        val routerMac = "00:30:44:88:AA:10"
+        org.tucsoncommunity.kokoho.detect.FixedRouter.load(
+            listOf(routerMac),
+            listOf(
+                org.tucsoncommunity.kokoho.data.Spot(
+                    mac = routerMac,
+                    lat = 32.2217,
+                    lon = -110.9747,
+                    minLat = 32.2215,
+                    minLon = -110.9749,
+                    maxLat = 32.2219,
+                    maxLon = -110.9745
+                )
+            )
+        )
+        assertTrue("Familiar router heard at its home spot (0 m) must be familiar", org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliarAt(routerMac, 32.2217, -110.9747))
+        assertTrue("Familiar router heard 400 m from home spot must stay familiar", org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliarAt(routerMac, 32.2245, -110.9747))
+        assertFalse("Familiar router heard 3.8 km away must NOT be suppressed as stationary!", org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliarAt(routerMac, 32.2217, -110.9340))
+        assertTrue("Cradlepoint branch default SSID E300-4a1 must be recognized as branch router", org.tucsoncommunity.kokoho.detect.FixedRouter.isBranchDefaultOrOpenRouter("E300-4a1", "[WPA2-PSK-CCMP][ESS]"))
+        assertFalse("Patrol vehicle router R920-6b5 must NEVER be suppressed as a branch router", org.tucsoncommunity.kokoho.detect.FixedRouter.isBranchDefaultOrOpenRouter("R920-6b5", "[WPA2-PSK-CCMP][ESS]"))
+
+        // 3. 80% Path-Loss Fitted Locator.estimate tightens DeviceRegistry -> KokohoPostureEngine coordinates!
+        try {
+            DeviceRegistry.startSession(nowMs)
+            val targetLat = 32.2300
+            val targetLon = -110.9500
+            val idWifi = org.tucsoncommunity.kokoho.detect.DeviceIntel.Identity("WiFi router", emptyList())
+            val routerHit = listOf(org.tucsoncommunity.kokoho.detect.Hit(org.tucsoncommunity.kokoho.detect.Category.PUBLIC_SAFETY, "Vehicle router", 75, "test", "test"))
+            // Simulate driving an L-shaped street corner past a parked PCSO vehicle at (targetLat, targetLon):
+            // Leg 1: East from (-90m, -25m) to (+25m, -25m), Leg 2: North from (+25m, -25m) to (+25m, +85m)
+            val mLat = 110_540.0
+            val mLon = 111_320.0 * kotlin.math.cos(Math.toRadians(targetLat))
+            val cornerWaypoints = (0..11).map { i -> (-90.0 + i * 10.0) to -25.0 } +
+                (1..11).map { i -> 25.0 to (-25.0 + i * 10.0) }
+            cornerWaypoints.forEachIndexed { idx, (eastM, northM) ->
+                val tObs = nowMs + idx * 1_000L
+                val obsLat = targetLat + northM / mLat
+                val obsLon = targetLon + eastM / mLon
+                val dM = KokohoPostureEngine.haversineMeters(targetLat, targetLon, obsLat, obsLon).coerceAtLeast(5.0)
+                val simRssi = (-38.0 - 25.0 * kotlin.math.log10(dM)).toInt()
+                val geo = DeviceRegistry.GeoSample(tObs, obsLat, obsLon)
+                DeviceRegistry.report(
+                    org.tucsoncommunity.kokoho.detect.Advert(
+                        mac = "00:30:44:74:CC:20",
+                        source = org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI,
+                        rssi = simRssi,
+                        name = "IBR1700-c20",
+                        wifi = org.tucsoncommunity.kokoho.detect.Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                        timestamp = tObs
+                    ),
+                    routerHit,
+                    idWifi,
+                    "CradlePoint, Inc",
+                    null,
+                    geo,
+                    tObs,
+                    here = geo
+                )
+            }
+            // Final report >= LOCATE_EVERY_MS (5 s) after last fit so relocate() runs on all 23 corner spots
+            val finalT = nowMs + 30_000L
+            val finalGeo = DeviceRegistry.GeoSample(finalT, targetLat + 95.0 / mLat, targetLon + 25.0 / mLon)
+            val finalDm = KokohoPostureEngine.haversineMeters(targetLat, targetLon, finalGeo.lat, finalGeo.lon).coerceAtLeast(5.0)
+            DeviceRegistry.report(
+                org.tucsoncommunity.kokoho.detect.Advert(
+                    mac = "00:30:44:74:CC:20",
+                    source = org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI,
+                    rssi = (-38.0 - 25.0 * kotlin.math.log10(finalDm)).toInt(),
+                    name = "IBR1700-c20",
+                    wifi = org.tucsoncommunity.kokoho.detect.Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                    timestamp = finalT
+                ),
+                routerHit,
+                idWifi,
+                "CradlePoint, Inc",
+                null,
+                finalGeo,
+                finalT,
+                here = finalGeo
+            )
+            DeviceRegistry.awaitFits()
+            val locatedEst = DeviceRegistry.get("00:30:44:74:CC:20")?.located
+            assertNotNull("Locator.estimate must produce an 80% path-loss fit after L-corner pass", locatedEst)
+            val snapAfterLoop = KokohoPostureEngine.evaluate(ctx, finalT + 1_000L)
+            val fittedVehicle = snapAfterLoop.mapThreats.firstOrNull { it.hardwareIdentifier?.startsWith("00:30:44:74:CC") == true }
+            assertNotNull("Driven-around PCSO router must appear in mapThreats", fittedVehicle)
+            val errM = KokohoPostureEngine.haversineMeters(targetLat, targetLon, fittedVehicle!!.lat!!, fittedVehicle.lon!!)
+            assertTrue("Fitted vehicle position must land within 35 m of true target (was ${errM}m)", errM <= 35.0)
+            assertTrue("Fitted vehicle must be marked isApproximatedPosition", fittedVehicle.isApproximatedPosition)
+
+            // 4. Epistemic 'Confirmed' gate:
+            //    - High-confidence unreported detections (LRRP GPS 96%, PCSO router 92%) cap at 'Likely' (never 'Confirmed'!).
+            //    - Submitting a report confirming that sighting upgrades it to 'Confirmed'.
+            //    - Future sightings of that EXACT hardware MAC (`00:30:44:74:CC:20`) across town automatically earn 'Confirmed',
+            //      while a brand-new unconfirmed MAC (`00:30:44:74:DD:99`) remains 'Likely'.
+            assertTrue("Unreported high-confidence LRRP GPS threat must start as 'Likely' (got '${lrrpThreat.label}')", lrrpThreat.label.startsWith("Likely "))
+            assertTrue("Unreported high-confidence PCSO router must start as 'Likely' (got '${fittedVehicle.label}')", fittedVehicle.label.startsWith("Likely "))
+
+            KokohoSignatures.saveWitnessReport(
+                ctx,
+                WitnessReportRecord(
+                    targetKey = fittedVehicle.uuid,
+                    entityUuid = fittedVehicle.uuid,
+                    agencyCode = "SHERIFF",
+                    reportKind = "LE",
+                    vehicleNumber = "4412",
+                    notes = "Confirmed PCSO Tahoe"
+                ),
+                syncRemote = false
+            )
+            val confirmedNow = KokohoPostureEngine.evaluate(ctx, finalT + 2_000L)
+                .mapThreats.first { it.uuid == fittedVehicle.uuid }
+            assertTrue("Reported sighting must become 'Confirmed' (got '${confirmedNow.label}')", confirmedNow.label.startsWith("Confirmed "))
+
+            // Simulate a brand-new session/sighting across town with RAM + entity ledger cleared (only SharedPreferences confirmed evidence kept!):
+            KokohoEntityLedger.clearAll(ctx)
+            KokohoPostureEngine.clearRamOnlyForTest()
+            DeviceRegistry.startSession(finalT + 60_000L)
+            val acrossTown = DeviceRegistry.GeoSample(finalT + 60_000L, 32.1850, -110.9900)
+            // Re-hear the previously-confirmed exact sibling radio `00:30:44:74:CC:23` AND a brand-new unconfirmed `00:30:44:74:DD:99`:
+            for ((macAddr, ssidName) in listOf("00:30:44:74:CC:23" to "IBR1700-c20-5G", "00:30:44:74:DD:99" to "IBR1700-d99")) {
+                DeviceRegistry.report(
+                    org.tucsoncommunity.kokoho.detect.Advert(
+                        mac = macAddr,
+                        source = org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI,
+                        rssi = -62,
+                        name = ssidName,
+                        wifi = org.tucsoncommunity.kokoho.detect.Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                        timestamp = finalT + 60_000L
+                    ),
+                    routerHit,
+                    idWifi,
+                    "CradlePoint, Inc",
+                    null,
+                    acrossTown,
+                    finalT + 60_000L,
+                    here = acrossTown
+                )
+            }
+            val laterSnap = KokohoPostureEngine.evaluate(ctx, finalT + 61_000L)
+            val reseenConfirmed = laterSnap.mapThreats.first { it.hardwareIdentifier?.startsWith("00:30:44:74:CC") == true }
+            val brandNewUnconfirmed = laterSnap.mapThreats.first { it.hardwareIdentifier?.startsWith("00:30:44:74:DD") == true }
+            assertTrue(
+                "Previously confirmed exact hardware must remain 'Confirmed' on later sightings (got '${reseenConfirmed.label}')",
+                reseenConfirmed.label.startsWith("Confirmed ")
+            )
+            assertTrue(
+                "Unconfirmed new hardware must remain 'Likely' (never 'Confirmed', got '${brandNewUnconfirmed.label}')",
+                brandNewUnconfirmed.label.startsWith("Likely ")
+            )
+        } finally {
+            KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+            KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.DHS_AGENCIES.toSet())
+            KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+            org.tucsoncommunity.kokoho.detect.FixedRouter.load(emptyList())
+            org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Log.clear(0L)
+            KokohoEntityLedger.clearAll(ctx)
+            KokohoPostureEngine.clearLocalState()
+            DeviceRegistry.clear()
+            ScanForegroundService.setLastFixForTest(null)
+        }
     }
 
     private fun collectAllText(view: android.view.View): String {

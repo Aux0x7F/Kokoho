@@ -1,97 +1,75 @@
 package org.tucsoncommunity.kokoho.sdr
 
 /**
- * Reed-Solomon codes over GF(64), as P25 Phase 1 uses them (TIA-102.BAAA): RS(24,12,13) on link control in LDU1
- * and RS(24,16,9) on the encryption sync in LDU2. 24 6-bit words per block, [parity] = 2t of them parity (12 or 8),
- * correcting up to t = 6 or 4 bad words; generator roots alpha^1..alpha^(2t) in GF(64) from x^6 + x + 1.
- * Berlekamp-Massey, Chien search and Forney's formula (OP25 / ezpwd). Pure: unit-tested.
+ * P25's Reed-Solomon codes over GF(64) (TIA-102.BAAA 4.9): six-bit symbols, the field from x^6 + x + 1, generator
+ * roots α^1 .. α^(n-k), shortened from n = 63. RS(24,12,13) guards an LDU1's link control, RS(24,16,9) an LDU2's
+ * encryption sync. Same code as SDRTrunk's ReedSolomon_63_P25 (Dennis Sheirer, GPL-3.0); decoded here with
+ * Berlekamp-Massey, a Chien search and Forney's formula. Pure: unit-tested.
  */
 object P25ReedSolomon {
 
-    /** Primitive polynomial x^6 + x + 1 (TIA-102.BAAA). */
-    private const val POLY = 0x43
-
-    /** alpha^i for i in 0..126, and log_alpha(x) for x in 1..63. */
-    private val EXP = IntArray(128).also { e ->
+    private val EXP = IntArray(126)
+    private val LOG = IntArray(64)
+    init {
         var x = 1
-        for (i in 0 until 63) { e[i] = x; e[i + 63] = x; x = x shl 1; if (x and 0x40 != 0) x = x xor POLY }
+        for (i in 0 until 63) { EXP[i] = x; EXP[i + 63] = x; LOG[x] = i; x = x shl 1; if (x and 64 != 0) x = x xor 0x43 }
     }
-    private val LOG = IntArray(64).also { l -> for (i in 0 until 63) l[EXP[i]] = i }
 
     private fun mul(a: Int, b: Int) = if (a == 0 || b == 0) 0 else EXP[LOG[a] + LOG[b]]
-    private fun div(a: Int, b: Int) = if (a == 0) 0 else EXP[LOG[a] - LOG[b] + 63]
-    private fun pow(i: Int) = EXP[(i % 63 + 63) % 63]
+    private fun div(a: Int, b: Int) = if (a == 0) 0 else EXP[LOG[a] + 63 - LOG[b]]
+    private fun pow(i: Int) = EXP[((i % 63) + 63) % 63]
 
     /**
-     * Corrects the 24 6-bit [words] (first 24-[parity] data, last [parity] parity; c_23..c_0) in place; the number of
-     * words fixed, or null when more than [parity]/2 words are wrong.
+     * Corrects [words] in place: the code's symbols in the order sent (data first, parity last), [parity] of them parity.
+     * The errors corrected (0 when it was intact), or -1 when there are more than [parity] / 2 and nothing changed.
      */
-    fun decode(words: IntArray, parity: Int): Int? {
-        // Syndromes S_j = R(alpha^(j+1)), j = 0..2t-1, with words[0] the x^23 coefficient.
-        val syn = IntArray(parity) { j ->
-            val a = EXP[j + 1]; var s = 0
-            for (w in words) s = mul(s, a) xor w
-            s
+    fun decode(words: IntArray, parity: Int): Int {
+        val n = words.size
+        // Symbol sent at t is the coefficient of x^(n-1-t).
+        fun coef(power: Int) = words[n - 1 - power]
+        val s = IntArray(parity) { j -> var v = 0; for (p in 0 until n) v = v xor mul(coef(p), pow((j + 1) * p)); v }
+        if (s.all { it == 0 }) return 0
+        // Berlekamp-Massey: the error locator.
+        var c = IntArray(parity + 1).also { it[0] = 1 }
+        var b = c.copyOf(); var l = 0; var m = 1; var bd = 1
+        for (k in 0 until parity) {
+            var d = s[k]
+            for (i in 1..l) d = d xor mul(c[i], s[k - i])
+            if (d == 0) { m++; continue }
+            val t = c.copyOf(); val f = div(d, bd)
+            for (i in 0..parity - m) c[i + m] = c[i + m] xor mul(f, b[i])
+            if (2 * l <= k) { l = k + 1 - l; b = t; bd = d; m = 1 } else m++
         }
-        if (syn.all { it == 0 }) return 0
-
-        // Berlekamp-Massey for the error locator sigma(x) = 1 + sigma_1 x + ... + sigma_L x^L.
-        var sigma = IntArray(parity + 1).also { it[0] = 1 }
-        var b = IntArray(parity + 1).also { it[0] = 1 }
-        var l = 0; var m = 1; var bb = 1
-        for (n in 0 until parity) {
-            var d = syn[n]
-            for (i in 1..l) d = d xor mul(sigma[i], syn[n - i])
-            if (d == 0) { m++ } else {
-                val t = sigma.clone()
-                val scale = div(d, bb)
-                for (i in 0..parity - m) if (b[i] != 0) sigma[i + m] = sigma[i + m] xor mul(scale, b[i])
-                if (2 * l <= n) { l = n + 1 - l; b = t; bb = d; m = 1 } else m++
-            }
+        if (l > parity / 2) return -1
+        // Chien search: error at power p where the locator has a root at α^-p; only the n powers sent count.
+        val at = (0 until n).filter { p -> var v = 0; for (i in 0..l) v = v xor mul(c[i], pow(-p * i)); v == 0 }
+        if (at.size != l) return -1
+        // Forney (first root α^1): e = Ω(X⁻¹) / Λ'(X⁻¹), Ω = S·Λ mod x^parity.
+        val omega = IntArray(parity) { i -> var v = 0; for (j in 0..minOf(i, l)) v = v xor mul(c[j], s[i - j]); v }
+        val fixes = at.map { p ->
+            val xi = -p
+            var num = 0; for (i in omega.indices) num = num xor mul(omega[i], pow(xi * i))
+            var den = 0; for (i in 1..l step 2) den = den xor mul(c[i], pow(xi * (i - 1)))
+            if (den == 0) return -1
+            p to div(num, den)
         }
-        if (l > parity / 2) return null
-
-        // Chien search: alpha^(-pos) is a root of sigma when pos (0 = words[23], 23 = words[0]) has an error.
-        val pos = IntArray(l); var found = 0
-        for (p in 0 until 24) {
-            val xInv = pow(-p); var sum = 1; var xPow = 1
-            for (i in 1..l) { xPow = mul(xPow, xInv); sum = sum xor mul(sigma[i], xPow) }
-            if (sum == 0) { if (found == l) return null; pos[found++] = p }
-        }
-        if (found != l) return null
-
-        // Error evaluator omega(x) = S(x) sigma(x) mod x^(2t), and sigma'(x) (odd terms in characteristic 2).
-        val omega = IntArray(parity) { i ->
-            var s = 0; for (j in 0..minOf(i, l)) s = s xor mul(syn[i - j], sigma[j]); s
-        }
-        for (p in pos) {
-            val xInv = pow(-p)
-            var num = 0; var xPow = 1
-            for (i in 0 until parity) { num = num xor mul(omega[i], xPow); xPow = mul(xPow, xInv) }
-            var den = 0; var xInv2 = 1
-            var i = 1
-            while (i <= l) { den = den xor mul(sigma[i], xInv2); xInv2 = mul(xInv2, mul(xInv, xInv)); i += 2 }
-            if (den == 0) return null
-            words[23 - p] = words[23 - p] xor div(num, den)
-        }
+        for ((p, e) in fixes) words[n - 1 - p] = words[n - 1 - p] xor e
         return l
     }
 
-    /** Appends [parity] RS parity words to the first 24-[parity] data words in [words] (for tests). */
-    fun encode(words: IntArray, parity: Int) {
-        // Generator g(x) = (x + alpha^1)(x + alpha^2)...(x + alpha^(2t)), monic of degree 2t; g[0] = constant term.
-        val g = IntArray(parity + 1); g[0] = 1
-        for (i in 1..parity) {
-            val root = EXP[i]
-            for (j in i downTo 1) g[j] = g[j - 1] xor mul(g[j], root)
-            g[0] = mul(g[0], root)
+    /** The [parity] parity symbols for [data] (systematic), in the order sent. For the tests. */
+    internal fun encode(data: IntArray, parity: Int): IntArray {
+        var g = intArrayOf(1) // highest power first
+        for (j in 1..parity) {
+            val r = pow(j)
+            g = IntArray(g.size + 1) { i -> (if (i < g.size) g[i] else 0) xor (if (i > 0) mul(g[i - 1], r) else 0) }
         }
         val rem = IntArray(parity)
-        for (i in 0 until 24 - parity) {
-            val fb = words[i] xor rem[parity - 1]
-            for (j in parity - 1 downTo 1) rem[j] = rem[j - 1] xor mul(fb, g[j])
-            rem[0] = mul(fb, g[0])
+        for (v in data) {
+            val f = v xor rem[0]
+            for (i in 0 until parity - 1) rem[i] = rem[i + 1] xor mul(f, g[i + 1])
+            rem[parity - 1] = mul(f, g[parity])
         }
-        for (i in 0 until parity) words[24 - parity + i] = rem[parity - 1 - i]
+        return rem
     }
 }

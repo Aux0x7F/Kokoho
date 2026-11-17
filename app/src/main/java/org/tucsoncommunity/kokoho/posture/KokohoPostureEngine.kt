@@ -261,10 +261,18 @@ object KokohoPostureEngine {
         val updatedAtMs: Long
     )
 
+    private data class LrrpRadioFix(
+        val pos: org.tucsoncommunity.kokoho.sdr.P25Tsbk.Position,
+        val hz: Long?,
+        val nac: Int?,
+        val atMs: Long
+    )
+
     private val spatialHistory = ConcurrentHashMap<String, MutableList<SpatialSample>>()
     private val triangulationCache = ConcurrentHashMap<String, CachedTriangulation>()
     private val coMovingState = ConcurrentHashMap<String, CoMovingTrackState>()
     private val localThreatCache = ConcurrentHashMap<String, EvaluatedThreat>()
+    private val lrrpRadioFixes = ConcurrentHashMap<Int, LrrpRadioFix>()
     private val lastSharedAtByUuid = ConcurrentHashMap<String, Long>()
     private val lastRawReportByFacet = ConcurrentHashMap<String, LastRawReportState>()
     @Volatile
@@ -321,7 +329,9 @@ object KokohoPostureEngine {
         triangulationCache.clear()
         coMovingState.clear()
         localThreatCache.clear()
+        lrrpRadioFixes.clear()
         KokohoEntityLedger.clearAll()
+        KokohoSignatures.clearWitnessAndConfirmedCacheInMemory()
         lastSharedAtByUuid.clear()
         lastRawReportByFacet.clear()
         lastPostureColor = PostureColor.GREEN
@@ -329,13 +339,51 @@ object KokohoPostureEngine {
         latestSnapshot = null
     }
 
+    /** Non-recursive lookup of an entity's evidence facets and hardwareIdentifier when a report is saved on it. */
+    fun peekThreatFacets(context: Context?, keyOrUuid: String): Pair<List<String>, String?> {
+        val norm = KokohoSignatures.normalizeEntityId(keyOrUuid)
+        val local = localThreatCache[norm] ?: (if (context != null) KokohoEntityLedger.findByUuid(context, norm) else null)
+        if (local != null) {
+            return local.evidenceSources.map { it.facetKey } to local.hardwareIdentifier
+        }
+        val remote = KokohoHubClient.activeObjects(System.currentTimeMillis(), KokohoSignatures.MapTimeWindow.HEAT.windowMs)
+            .firstOrNull { it.uuid.equals(norm, ignoreCase = true) }
+        if (remote != null) {
+            val facets = remote.classification.evidenceSources.map { it.facetKey }
+            return facets to facets.firstOrNull()
+        }
+        return emptyList<String>() to null
+    }
+
     fun clearRamOnlyForTest() {
         spatialHistory.clear()
         triangulationCache.clear()
         coMovingState.clear()
         localThreatCache.clear()
+        lrrpRadioFixes.clear()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+    }
+
+    /**
+     * Ingests an actual hardware GPS coordinate transmitted by a P25 radio over Motorola LRRP (`P25Pdu`).
+     * Validated by CRC-9, OP25 packet CRC-32, and IPv4 header checksum before reaching here.
+     */
+    fun ingestP25RadioGps(
+        context: Context?,
+        pos: org.tucsoncommunity.kokoho.sdr.P25Tsbk.Position,
+        hz: Long? = null,
+        nac: Int? = null,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        if (pos.radio <= 0) return
+        if (pos.lat !in -90.0..90.0 || pos.lon !in -180.0..180.0) return
+        if (abs(pos.lat) < 0.001 && abs(pos.lon) < 0.001) return
+        lrrpRadioFixes[pos.radio] = LrrpRadioFix(pos, hz, nac, nowMs)
+        lastEvaluateNowMs = 0L
+        if (context != null) {
+            runCatching { evaluate(context, nowMs) }
+        }
     }
 
     /** Returns the cached snapshot if evaluated within [maxAgeMs], otherwise evaluates fresh. */
@@ -1164,7 +1212,9 @@ object KokohoPostureEngine {
             val lon: Double?,
             val obsLat: Double?,
             val obsLon: Double?,
-            val isGenericRouter: Boolean = false
+            val isGenericRouter: Boolean = false,
+            val broadcastPos: DeviceRegistry.GeoSample? = null,
+            val locatedFit: org.tucsoncommunity.kokoho.detect.Locator.Estimate? = null
         )
 
         fun snapshotObsCoords(snap: DeviceRegistry.Snapshot): Pair<Double?, Double?> {
@@ -1253,7 +1303,7 @@ object KokohoPostureEngine {
                 }
                 conf = max(conf, (learnedMac.reputationScore * 100).roundToInt().coerceIn(70, 96))
             }
-            val isStaticBaseline = KokohoSignatures.isStaticBaselineRouter(context, normMac) && !isWatchedGroup
+            val isStaticBaseline = KokohoSignatures.isStaticBaselineRouter(context, normMac, snapObsLat, snapObsLon) && !isWatchedGroup
             val upSince = snap.upSince ?: snap.advert?.wifi?.upSince
             val isIgnitionFreshMobile = upSince != null &&
                 snap.lastSeen > upSince &&
@@ -1303,7 +1353,9 @@ object KokohoPostureEngine {
                 lon = snap.place?.lon ?: snapObsLon,
                 obsLat = snapObsLat,
                 obsLon = snapObsLon,
-                isGenericRouter = isGenericRouter
+                isGenericRouter = isGenericRouter,
+                broadcastPos = snap.broadcast,
+                locatedFit = snap.located
             )
         }
 
@@ -1331,7 +1383,9 @@ object KokohoPostureEngine {
                     lon = strongest.lon ?: primary.lon,
                     obsLat = latestInGroup.obsLat ?: strongest.obsLat ?: strongest.lat,
                     obsLon = latestInGroup.obsLon ?: strongest.obsLon ?: strongest.lon,
-                    isGenericRouter = group.all { it.isGenericRouter }
+                    isGenericRouter = group.all { it.isGenericRouter },
+                    broadcastPos = group.mapNotNull { it.broadcastPos }.maxByOrNull { it.time },
+                    locatedFit = group.mapNotNull { it.locatedFit }.minByOrNull { it.radiusM }
                 )
             }
 
@@ -1444,7 +1498,7 @@ object KokohoPostureEngine {
             val rawEstDistM = estimateRssiDistanceMeters(oui.rssi)
             val obsLat = oui.obsLat ?: oui.lat
             val obsLon = oui.obsLon ?: oui.lon
-            val tri = recordAndTriangulate(
+            val rawTri = recordAndTriangulate(
                 uuid = uuid,
                 gpsLat = obsLat,
                 gpsLon = obsLon,
@@ -1456,6 +1510,39 @@ object KokohoPostureEngine {
                 userLon = userLoc?.longitude,
                 evalNowMs = nowMs
             )
+            val tri = when {
+                oui.broadcastPos != null -> {
+                    val bDist = if (userLoc != null) {
+                        haversineMeters(userLoc.latitude, userLoc.longitude, oui.broadcastPos.lat, oui.broadcastPos.lon).roundToInt().coerceAtLeast(10)
+                    } else rawTri.estimatedDistanceM
+                    rawTri.copy(
+                        centerLat = oui.broadcastPos.lat,
+                        centerLon = oui.broadcastPos.lon,
+                        estimatedDistanceM = bDist,
+                        uncertaintyRadiusM = 15,
+                        spatialConfidence = 96,
+                        isApproximatedPosition = true,
+                        isPinpointed = true
+                    )
+                }
+                oui.locatedFit != null && (!rawTri.isApproximatedPosition || oui.locatedFit.radiusM <= rawTri.uncertaintyRadiusM) -> {
+                    val fitRadM = oui.locatedFit.radiusM.roundToInt().coerceAtLeast(12)
+                    val fitDist = if (userLoc != null) {
+                        max(haversineMeters(userLoc.latitude, userLoc.longitude, oui.locatedFit.lat, oui.locatedFit.lon).roundToInt(), fitRadM)
+                    } else rawTri.estimatedDistanceM
+                    val fitConf = max(rawTri.spatialConfidence, (90 - oui.locatedFit.radiusM * 0.35).roundToInt().coerceIn(68, 92))
+                    rawTri.copy(
+                        centerLat = oui.locatedFit.lat,
+                        centerLon = oui.locatedFit.lon,
+                        estimatedDistanceM = fitDist,
+                        uncertaintyRadiusM = fitRadM,
+                        spatialConfidence = fitConf,
+                        isApproximatedPosition = true,
+                        isPinpointed = fitRadM <= PINPOINT_POINT_RADIUS_M
+                    )
+                }
+                else -> rawTri
+            }
 
             val isLiveSighting = nowMs - oui.lastSeen <= 15_000L
             val posture = when {
@@ -1506,7 +1593,7 @@ object KokohoPostureEngine {
             }
 
             // Stream genuine RAW local sensor position & RSSI (strictly anchored to the sighting's own GPS, never moving userLoc!):
-            val staticUnconfirmed = KokohoSignatures.isStaticBaselineRouter(context, oui.mac) && oui.confidence <= 40
+            val staticUnconfirmed = KokohoSignatures.isStaticBaselineRouter(context, oui.mac, obsLat, obsLon) && oui.confidence <= 40
             val isFlaggedOui = !staticUnconfirmed && (
                 oui.confidence >= 70 ||
                     corroboratedByLe ||
@@ -1793,7 +1880,7 @@ object KokohoPostureEngine {
                 val kitEstDistM = estimateRssiDistanceMeters(kitSnap.rssi)
                 val obsLat = entry.obsLat ?: kitSnap.place?.lat
                 val obsLon = entry.obsLon ?: kitSnap.place?.lon
-                val tri = recordAndTriangulate(
+                val rawKitTri = recordAndTriangulate(
                     uuid = kitUuid,
                     gpsLat = obsLat,
                     gpsLon = obsLon,
@@ -1805,6 +1892,39 @@ object KokohoPostureEngine {
                     userLon = userLoc?.longitude,
                     evalNowMs = nowMs
                 )
+                val tri = when {
+                    kitSnap.broadcast != null -> {
+                        val bDist = if (userLoc != null) {
+                            haversineMeters(userLoc.latitude, userLoc.longitude, kitSnap.broadcast.lat, kitSnap.broadcast.lon).roundToInt().coerceAtLeast(10)
+                        } else rawKitTri.estimatedDistanceM
+                        rawKitTri.copy(
+                            centerLat = kitSnap.broadcast.lat,
+                            centerLon = kitSnap.broadcast.lon,
+                            estimatedDistanceM = bDist,
+                            uncertaintyRadiusM = 15,
+                            spatialConfidence = 96,
+                            isApproximatedPosition = true,
+                            isPinpointed = true
+                        )
+                    }
+                    kitSnap.located != null && (!rawKitTri.isApproximatedPosition || kitSnap.located.radiusM <= rawKitTri.uncertaintyRadiusM) -> {
+                        val fitRadM = kitSnap.located.radiusM.roundToInt().coerceAtLeast(12)
+                        val fitDist = if (userLoc != null) {
+                            max(haversineMeters(userLoc.latitude, userLoc.longitude, kitSnap.located.lat, kitSnap.located.lon).roundToInt(), fitRadM)
+                        } else rawKitTri.estimatedDistanceM
+                        val fitConf = max(rawKitTri.spatialConfidence, (90 - kitSnap.located.radiusM * 0.35).roundToInt().coerceIn(68, 92))
+                        rawKitTri.copy(
+                            centerLat = kitSnap.located.lat,
+                            centerLon = kitSnap.located.lon,
+                            estimatedDistanceM = fitDist,
+                            uncertaintyRadiusM = fitRadM,
+                            spatialConfidence = fitConf,
+                            isApproximatedPosition = true,
+                            isPinpointed = fitRadM <= PINPOINT_POINT_RADIUS_M
+                        )
+                    }
+                    else -> rawKitTri
+                }
                 val isLiveKit = nowMs - kitSnap.lastSeen <= 15_000L
                 val posture = when {
                     tri.estimatedDistanceM <= 45 || (isLiveKit && tri.estimatedDistanceM <= 90 && kitSnap.rssi >= -62) -> PostureColor.RED
@@ -1981,10 +2101,11 @@ object KokohoPostureEngine {
             }
 
             val facetKey = "rf:chan:${rf.freqHz}:${sig.nac ?: "ANY"}"
+            val digitalSuffix = rf.digital?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
             val rfBadge = EvidenceBadge(
                 kind = "RF_${sig.mode}",
                 facetKey = facetKey,
-                detail = "${sig.alpha} (${"%.4f".format(Locale.US, rf.freqHz / 1e6)} MHz · ${rf.peakSnrDb} dB SNR)",
+                detail = "${sig.alpha} (${"%.4f".format(Locale.US, rf.freqHz / 1e6)} MHz · ${rf.peakSnrDb} dB SNR$digitalSuffix)",
                 weight = if (agency == KokohoAgency.DHS_INTEROP) 0.45 else 0.70,
                 lastSeenMs = rf.lastSeen
             )
@@ -2262,6 +2383,132 @@ object KokohoPostureEngine {
                     obsTimestampMs = tgRow.inputAt
                 )
             }
+        }
+
+        // 4B. Actual hardware GPS coordinates broadcast by P25 radios via Motorola LRRP PDU (`P25Pdu`)
+        for (logFix in SdrRadio.p25Log.fixes()) {
+            val pos = logFix.position
+            if (pos.radio > 0 && pos.lat in -90.0..90.0 && pos.lon in -180.0..180.0 && !(abs(pos.lat) < 0.001 && abs(pos.lon) < 0.001)) {
+                val existingFix = lrrpRadioFixes[pos.radio]
+                if (existingFix == null || logFix.at >= existingFix.atMs) {
+                    lrrpRadioFixes[pos.radio] = LrrpRadioFix(pos, logFix.hz ?: existingFix?.hz, logFix.nac ?: existingFix?.nac, logFix.at)
+                }
+            }
+        }
+        lrrpRadioFixes.entries.removeIf { nowMs - it.value.atMs > mapVisibilityMs }
+        for ((radioId, fix) in lrrpRadioFixes) {
+            if (nowMs - fix.atMs > mapVisibilityMs) continue
+            val pos = fix.pos
+            val tg = SdrRadio.p25Log.talkgroupOf(radioId)
+            if (tg != null && KokohoReferenceTables.lookupTalkgroup(tg)?.agencyCode == "IGNORE") continue
+            val tgSig = tg?.let { KokohoSignatures.matchTalkgroup(it) }
+            val freqSig = fix.hz?.let { KokohoSignatures.matchFrequency(it, includeRepeaters = true) }
+            val resolvedPair: Pair<KokohoAgency, String> = when {
+                tgSig != null -> tgSig.agencyEnum to "${tgSig.label} · LRRP GPS (RID $radioId)"
+                freqSig != null -> freqSig.agencyEnum to "${freqSig.alpha} (${freqSig.description}) · LRRP GPS (RID $radioId)"
+                fix.hz != null && fix.hz in 162_000_000L..174_000_000L -> {
+                    val fedAgency = listOf(KokohoAgency.DHS_CBP, KokohoAgency.DHS_ICE, KokohoAgency.DHS_HSI, KokohoAgency.DHS_FPS, KokohoAgency.DHS_INTEROP)
+                        .firstOrNull { it in enabled } ?: KokohoAgency.DHS_CBP
+                    fedAgency to "Federal VHF P25 LRRP GPS (RID $radioId · ${"%.4f".format(Locale.US, fix.hz / 1e6)} MHz)"
+                }
+                fix.hz != null && fix.hz in 406_100_000L..420_000_000L -> {
+                    val fedAgency = listOf(KokohoAgency.DHS_FPS, KokohoAgency.DHS_ICE, KokohoAgency.DHS_CBP, KokohoAgency.DHS_INTEROP)
+                        .firstOrNull { it in enabled } ?: KokohoAgency.DHS_FPS
+                    fedAgency to "Federal UHF P25 LRRP GPS (RID $radioId · ${"%.4f".format(Locale.US, fix.hz / 1e6)} MHz)"
+                }
+                fix.hz != null && fix.hz in 769_000_000L..861_000_000L -> {
+                    val leAgency = if (KokohoAgency.POLICE in enabled) KokohoAgency.POLICE else KokohoAgency.SHERIFF
+                    leAgency to "P25 LRRP Radio GPS (RID $radioId · ${"%.4f".format(Locale.US, fix.hz / 1e6)} MHz)"
+                }
+                else -> {
+                    val fallbackAgency = listOf(KokohoAgency.POLICE, KokohoAgency.SHERIFF, KokohoAgency.DHS_CBP, KokohoAgency.DHS_ICE)
+                        .firstOrNull { it in enabled } ?: continue
+                    fallbackAgency to "P25 LRRP Radio GPS (RID $radioId)"
+                }
+            }
+            val agency = resolvedPair.first
+            if (agency !in enabled) continue
+            val summaryLabel = resolvedPair.second
+            val radiusM = (pos.radiusM?.roundToInt() ?: 18).coerceIn(10, 150)
+            val isPinpointed = radiusM <= 35
+            val distM = if (userLoc != null) {
+                haversineMeters(userLoc.latitude, userLoc.longitude, pos.lat, pos.lon).roundToInt().coerceAtLeast(10)
+            } else {
+                250
+            }
+            val bearingFromUser = if (userLoc != null) {
+                bearingDeg(userLoc.latitude, userLoc.longitude, pos.lat, pos.lon).roundToInt()
+            } else {
+                null
+            }
+            val isLiveFix = nowMs - fix.atMs <= 30_000L
+            val posture = when {
+                isLiveFix && distM <= 300 -> PostureColor.RED
+                distM <= 180 || (isLiveFix && distM <= 850) -> PostureColor.ORANGE
+                else -> PostureColor.YELLOW
+            }
+            val classConf = if (tgSig != null || freqSig != null) 96 else 86
+            val spatConf = if (isPinpointed) 97 else 88
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+            val altFt = pos.altitudeM?.let { (it * 3.28084).roundToInt() }
+            val facetKey = "rf:rid:$radioId"
+            val uuid = deterministicUuidV5(facetKey)
+            val hzNote = fix.hz?.let { " · ${"%.4f".format(Locale.US, it / 1e6)} MHz" }.orEmpty()
+            val tgNote = tg?.let { " · TG $it" }.orEmpty()
+            val badgeDetail = "${agency.friendlyLabel} RID $radioId$tgNote$hzNote · GPS ${"%.5f".format(Locale.US, pos.lat)}, ${"%.5f".format(Locale.US, pos.lon)} (±${radiusM}m)"
+            val lrrpThreat = EvaluatedThreat(
+                uuid = uuid,
+                trackUuid = uuid,
+                agency = agency,
+                label = agency.friendlyLabel,
+                posture = posture,
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = distM,
+                uncertaintyRadiusM = radiusM,
+                bearingDeg = bearingFromUser,
+                closingVelocityMps = null,
+                recurrenceSummary = summaryLabel,
+                evidenceSources = listOf(
+                    EvidenceBadge(
+                        kind = "P25_LRRP_GPS",
+                        facetKey = facetKey,
+                        detail = badgeDetail,
+                        weight = 0.96,
+                        lastSeenMs = fix.atMs
+                    )
+                ),
+                updatedAtMs = fix.atMs,
+                lat = pos.lat,
+                lon = pos.lon,
+                isApproximatedPosition = true,
+                isPinpointed = isPinpointed,
+                altitudeFtAgl = altFt,
+                hardwareIdentifier = "RID $radioId${tg?.let { " (TG $it)" }.orEmpty()}",
+                sightingCount = 1,
+                capabilities = listOf("Tactical RF", "LRRP GPS")
+            )
+            upsertAndFuseThreat(evaluated, lrrpThreat)
+            localRawObservations += RawSensorReportCandidate(
+                facetKey = facetKey,
+                rawLat = pos.lat,
+                rawLon = pos.lon,
+                signalDb = 45.0,
+                modality = "P25_LRRP_GPS",
+                additionalFacets = listOfNotNull(
+                    tg?.let { "p25:tg:$it" },
+                    fix.hz?.let { "rf:chan:$it:${fix.nac ?: "ANY"}" }
+                ),
+                agency = agency,
+                label = agency.friendlyLabel,
+                propClass = "GROUND_DIRECT",
+                uncertaintyRadiusM = radiusM.toDouble(),
+                isDerived = true,
+                localSightings = 1,
+                ssidHint = summaryLabel,
+                obsTimestampMs = fix.atMs
+            )
         }
 
         // 5. Evaluate ADS-B Aircraft & Unlisted Circling Spy Planes (grounded, gliders, and military excluded)

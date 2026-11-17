@@ -163,7 +163,7 @@ class P25Activity : AppCompatActivity() {
             android.widget.Toast.makeText(this@P25Activity, "No calls logged yet", android.widget.Toast.LENGTH_LONG).show()
             return@launch
         }
-        org.tucsoncommunity.kokoho.util.Exporter.share(this@P25Activity, "rf_sentinel_p25_calls_${org.tucsoncommunity.kokoho.util.Exporter.stamp()}.csv",
+        org.tucsoncommunity.kokoho.util.Exporter.share(this@P25Activity, "kokoho_p25_calls_${org.tucsoncommunity.kokoho.util.Exporter.stamp()}.csv",
             text, "text/csv", "Export P25 call log")
     }
 

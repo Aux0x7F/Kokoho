@@ -94,7 +94,7 @@ class TetraTest {
     /** A learned watch of the UHF band; a tone at [radio] lands 212.5 kHz above [uhf]. */
     private fun uhfWatch(dmr: Boolean): Pair<RadioWatch, Long> {
         val w = RadioWatch()
-        w.config = RadioWatch.Config(bands = listOf(RadioWatch.BANDS[3]), dmr = dmr)
+        w.config = RadioWatch.Config(bands = listOf(RadioWatch.BANDS.last()), dmr = dmr)
         var t = 0L
         repeat(8) { s ->
             val b = RadioWatch.burstSpectrum(iq(null, seed = s), count, rate)

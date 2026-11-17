@@ -28,7 +28,11 @@ import kotlin.math.sin
  * shared bands get that check too. A repeater fills both slots and stays on, so only handsets show it; P25
  * Phase 2 keeps the same time. NXDN has no time slots, so it stays a plain transmission.
  */
-class RadioWatch {
+class RadioWatch(
+    /** A channel's busy / quiet history takes one step this often at most (0: every look). A watch that looks many times a
+     *  second ([TetraWatch]) would otherwise learn a radio's own call as an always-busy channel within a second or two. */
+    private val learnEveryMs: Long = 0
+) {
 
     enum class Kind { PUBLIC_SAFETY_MOBILE, SHARED, CUSTOM, TARGET, CELLULAR_UPLINK, TETRA }
 
@@ -46,7 +50,9 @@ class RadioWatch {
         /** A transmission counts from this many dB above the noise (lower = more sensitive). */
         val minSnrDb: Int = DEFAULT_MIN_SNR,
         /** Also look for DMR time slots on the shared bands (each chunk then takes twice as long). */
-        val dmr: Boolean = false
+        val dmr: Boolean = false,
+        /** TETRA City mode: only stronger bursts count, so far-off radios in town stay quiet (off: Highway, the most sensitive). */
+        val tetraCity: Boolean = false
     ) {
         /** Whether [band] gets the time-slot check. */
         fun slotted(band: Band) = band.kind == Kind.TETRA || (dmr && band.kind == Kind.SHARED)
@@ -58,19 +64,32 @@ class RadioWatch {
      * [tdma]: it came in time-slot bursts, named by [slots].
      */
     data class Event(val freqHz: Long, val snrDb: Int, val band: Band, val confidence: Int,
-                     val target: Target? = null, val repeat: Boolean = false, val tdma: Boolean = false) {
+                     val target: Target? = null, val repeat: Boolean = false, val tdma: Boolean = false,
+                     /** It decoded as P25 (a frame header with this network access code): a P25 radio, not just energy. */
+                     val p25Nac: Int? = null,
+                     /** On a walkie-talkie channel ([walkies]): only to play, never reported. */
+                     val walkie: Boolean = false) {
         val mhz: String get() = "%.4f".format(java.util.Locale.US, freqHz / 1e6)
         /** The radio system its time slots point to; null without them. */
         val slots: String? get() = if (!tdma) null else if (band.kind == Kind.TETRA) "TETRA" else "DMR"
     }
 
     @Volatile var config = Config()
+    /**
+     * Play voice transmissions: the walkie-talkie channels (FRS / GMRS / MURS), left out of the watch, are looked at too, their
+     * transmissions marked [Event.walkie]. Without this a walkie-talkie next to you is skipped and the ghosts its strong signal
+     * makes on the channels around it are played instead: noise.
+     */
+    @Volatile var walkies = false
 
     private class Channel {
         var visits = 0
         /** The last 32 visits, 1 = energy on the channel. */
         var recent = 0L
         var lastEvent = Long.MIN_VALUE / 2 // never reported
+        var learnedAt = Long.MIN_VALUE / 2
+        /** Energy seen since the last learning step ([learnEveryMs]). */
+        var pending = false
         fun busyRatio(): Double {
             val n = minOf(visits, 32)
             return if (n == 0) 0.0 else java.lang.Long.bitCount(recent and ((1L shl n) - 1)).toDouble() / n
@@ -95,23 +114,25 @@ class RadioWatch {
     /**
      * One tuned chunk: [psdDb] is the averaged power spectrum (FFT-shifted, DC in the middle)
      * at [centerHz] and [sampleRate]. Returns the transmissions worth reporting. [bursts]: the
-     * same samples in time steps, for the time-slot check.
+     * same samples in time steps, for the time-slot check. [usableHz]: the flat middle of the spectrum each side of the centre.
      */
-    fun analyze(centerHz: Long, psdDb: FloatArray, sampleRate: Int, now: Long, bursts: Bursts? = null): List<Event> {
+    fun analyze(centerHz: Long, psdDb: FloatArray, sampleRate: Int, now: Long, bursts: Bursts? = null,
+                usableHz: Double = USABLE_HZ): List<Event> {
         val n = psdDb.size
         val binHz = sampleRate.toDouble() / n
-        val usableBins = (USABLE_HZ / binHz).toInt()
+        val usableBins = (usableHz / binHz).toInt()
         val floor = median(FloatArray(2 * usableBins) { psdDb[(n / 2 - usableBins + it).coerceIn(0, n - 1)] })
         val half = maxOf(1, (CHANNEL_HALF_HZ / binHz).roundToInt())
         val found = ArrayList<Event>()
         val cfg = config
         for (band in cfg.bands) {
             if (band.kind == Kind.CELLULAR_UPLINK) { widebandScan(band, centerHz, psdDb, sampleRate, now, cfg, found); continue }
-            var f = ((maxOf(band.startHz, centerHz - USABLE_HZ.toLong()) + STEP_HZ - 1) / STEP_HZ) * STEP_HZ
-            val last = minOf(band.endHz, centerHz + USABLE_HZ.toLong())
+            var f = ((maxOf(band.startHz, centerHz - usableHz.toLong()) + STEP_HZ - 1) / STEP_HZ) * STEP_HZ
+            val last = minOf(band.endHz, centerHz + usableHz.toLong())
             while (f <= last) {
                 val off = f - centerHz
-                if (kotlin.math.abs(off) > DC_GUARD_HZ && !excluded(f, cfg)) {
+                val walkie = walkies && WALKIES.any { f in it } && cfg.excluded.none { f in it }
+                if (kotlin.math.abs(off) > DC_GUARD_HZ && (walkie || !excluded(f, cfg))) {
                     val mid = n / 2 + (off / binHz).roundToInt()
                     var p = -200f
                     for (k in mid - half..mid + half) if (k in 0 until n && psdDb[k] > p) p = psdDb[k]
@@ -131,10 +152,12 @@ class RadioWatch {
                     }
                     val ch = channels.getOrPut(f) { Channel() }
                     val active = snr >= ACTIVE_DB
-                    ch.recent = (ch.recent shl 1) or (if (active) 1L else 0L)
-                    ch.visits++
+                    if (learnEveryMs <= 0 || now - ch.learnedAt >= learnEveryMs) {
+                        ch.recent = (ch.recent shl 1) or (if (active || ch.pending) 1L else 0L)
+                        ch.visits++; ch.learnedAt = now; ch.pending = false
+                    } else if (active) ch.pending = true
                     // The busy-channel learning keeps the fixed level; a low sensitivity setting only reports weaker radios.
-                    if (snr >= activeDb(cfg.minSnrDb)) eventFor(f, snr, band, ch, now, cfg.minSnrDb, tdma)?.let { found += it }
+                    if (snr >= activeDb(cfg.minSnrDb)) eventFor(f, snr, band, ch, now, cfg.minSnrDb, tdma, cfg.tetraCity)?.let { found += it.copy(walkie = walkie) }
                 }
                 f += STEP_HZ
             }
@@ -142,7 +165,7 @@ class RadioWatch {
         // Watched frequencies: require a brief baseline window and suppress always-on spurs/control carriers.
         for (t in cfg.targets) {
             val off = t.freqHz - centerHz
-            if (kotlin.math.abs(off) > USABLE_HZ || kotlin.math.abs(off) <= DC_GUARD_HZ) continue
+            if (kotlin.math.abs(off) > usableHz || kotlin.math.abs(off) <= DC_GUARD_HZ) continue
             val mid = n / 2 + (off / binHz).roundToInt()
             var p = -200f
             for (k in mid - half..mid + half) if (k in 0 until n && psdDb[k] > p) p = psdDb[k]
@@ -225,13 +248,13 @@ class RadioWatch {
 
     /** [min]: the sensitivity setting; at the default (30 dB) the thresholds are the original ones. */
     private fun eventFor(f: Long, snr: Int, band: Band, ch: Channel, now: Long, min: Int = DEFAULT_MIN_SNR,
-                         tdma: Boolean = false): Event? {
+                         tdma: Boolean = false, city: Boolean = false): Event? {
         if (sweeps < LEARN_SWEEPS) return null                                   // still learning what's always there
         if (ch.visits >= MIN_VISITS_BUSY && ch.busyRatio() >= BUSY_RATIO) return null // tower / control channel / pager
         val confidence = when {
             band.kind == Kind.PUBLIC_SAFETY_MOBILE -> when { snr >= min + 10 -> 75; snr >= min -> 60; else -> return null }
             // TETRA time slots on the handset band: an emergency-services radio, and a strong sign even when weaker.
-            band.kind == Kind.TETRA && tdma -> when { snr >= min + 5 -> 80; snr >= min - 5 -> 65; else -> return null }
+            band.kind == Kind.TETRA && tdma -> tetraMinDb(min, city).let { t -> when { snr >= t + 10 -> 80; snr >= t -> 65; else -> return null } }
             else -> when { snr >= min + 15 -> 55; snr >= min + 5 -> 35; else -> return null }
         }
         return Event(f, snr, band, confidence, repeat = now - ch.lastEvent < REPEAT_MS, tdma = tdma)
@@ -257,6 +280,18 @@ class RadioWatch {
         private const val REPEAT_MS = 120_000L
         /** Default sensitivity: 30 dB above the noise (the original public-safety threshold). */
         const val DEFAULT_MIN_SNR = 30
+        /** TETRA's burst rhythm is its own false-alarm filter: the sensitivity setting never asks more of it than this. */
+        const val TETRA_CAP_DB = 20
+        /** City mode: this much more for TETRA, so radios streets away stay quiet. */
+        const val CITY_EXTRA_DB = 8
+
+        /** dB above the noise a TETRA burst needs at sensitivity [min]: capped, so turning sensitivity down never makes TETRA deaf. */
+        fun tetraMinDb(min: Int, city: Boolean) = minOf(min - 5, TETRA_CAP_DB) + if (city) CITY_EXTRA_DB else 0
+
+        /** How near a radio [snr] dB above the noise is: "Far", "Closer" or "Very close". */
+        fun proximity(snr: Int) = when { snr >= VERY_CLOSE_DB -> "Very close"; snr >= CLOSER_DB -> "Closer"; else -> "Far" }
+        const val CLOSER_DB = 30
+        const val VERY_CLOSE_DB = 40
         private const val TARGET_CONFIDENCE = 70
         /** A cellular uplink slice must rise this many dB above its learned quiet level to count. */
         private const val CELL_RISE_DB = 8
@@ -332,13 +367,42 @@ class RadioWatch {
             Band("UHF land-mobile band", 450_000_000L, 470_000_000L, Kind.SHARED)
         )
 
-        /** Consumer, marine, railroad, weather and paging channels - never police radios. */
-        private val EXCLUDED = listOf(
+        /** Walkie-talkie channels: MURS, FRS / GMRS. */
+        private val WALKIES = listOf(
             151_815_000L..151_945_000L, 154_565_000L..154_605_000L,  // MURS
+            462_537_500L..462_737_500L, 467_537_500L..467_737_500L    // FRS / GMRS
+        )
+
+        /** The walkie-talkie channels themselves: FRS / GMRS every 12.5 kHz, the five MURS ones. */
+        private val WALKIE_CHANNELS = (0..14).flatMap { listOf(462_550_000L + it * STEP_HZ, 467_550_000L + it * STEP_HZ) } +
+            listOf(151_820_000L, 151_880_000L, 151_940_000L, 154_570_000L, 154_600_000L)
+
+        /**
+         * The walkie-talkie channel a transmission found at [f] is on: the centre of its power within 15 kHz in [psd] (tuned
+         * to [center]), on the nearest channel. A wide-deviation FM voice spills into the next channel and its strongest
+         * moment can sit there; tuned that 12.5 kHz off, all that's played is noise.
+         */
+        fun walkieHz(f: Long, center: Long, psd: FloatArray, rate: Int): Long {
+            val binHz = rate.toDouble() / psd.size
+            val mid = psd.size / 2 + ((f - center) / binHz).roundToInt()
+            val span = (15_000 / binHz).roundToInt()
+            var sum = 0.0; var at = 0.0
+            for (k in mid - span..mid + span) if (k in psd.indices) {
+                val p = Math.pow(10.0, psd[k] / 10.0); sum += p; at += p * (center + (k - psd.size / 2) * binHz)
+            }
+            val c = if (sum > 0) at / sum else f.toDouble()
+            return WALKIE_CHANNELS.minBy { kotlin.math.abs(it - c) }
+        }
+
+        /** The walkie-talkie channel within 5 kHz of [f], unless the user excluded it; null when there is none. */
+        fun walkieChannel(f: Long, cfg: Config): Long? = WALKIE_CHANNELS.minBy { kotlin.math.abs(it - f) }
+            .takeIf { kotlin.math.abs(it - f) <= 5_000L && cfg.excluded.none { r -> it in r } }
+
+        /** Consumer, marine, railroad, weather and paging channels - never police radios. */
+        private val EXCLUDED = WALKIES + listOf(
             156_000_000L..157_450_000L, 160_600_000L..162_025_000L,  // marine VHF
             159_810_000L..161_565_000L,                               // railroad
-            162_400_000L..162_550_000L,                               // NOAA weather radio
-            462_537_500L..462_737_500L, 467_537_500L..467_737_500L    // FRS / GMRS walkie-talkies
+            162_400_000L..162_550_000L                                // NOAA weather radio
         ) + listOf(152_007_500L, 152_240_000L, 152_480_000L, 157_740_000L, 158_100_000L, 158_700_000L) // paging
             .map { it - 6_250L..it + 6_250L }
 
@@ -370,6 +434,35 @@ class RadioWatch {
             val peak = (mid - half..mid + half).filter { it in psd.indices }.maxOfOrNull { psd[it] } ?: return 0
             val noise = psd.sorted()[psd.size / 2]
             return (peak - noise).roundToInt()
+        }
+
+        /**
+         * The strongest [widthHz]-wide stretch of the usable middle of [psd]: its offset from the centre in Hz and its
+         * level, then the quiet level (the lower quartile), all averaged over [widthHz] in dB. A broadcast station fills
+         * the width; a one-bin spur of the receiver's own is averaged away.
+         */
+        fun widePeak(spectrum: FloatArray, sampleRate: Int, widthHz: Long): Triple<Long, Float, Float> {
+            val binHz = sampleRate.toDouble() / spectrum.size
+            // The receiver's own spike at the centre levelled to the noise beside it, as the waterfall does.
+            val psd = spectrum.copyOf()
+            val mid = psd.size / 2
+            val guard = maxOf(1, (DC_GUARD_HZ / binHz).toInt())
+            if (mid - guard - 1 >= 0 && mid + guard + 1 < psd.size) {
+                val level = minOf(psd[mid - guard - 1], psd[mid + guard + 1])
+                for (k in mid - guard..mid + guard) psd[k] = level
+            }
+            val w = maxOf(1, (widthHz / binHz).roundToInt())
+            val from = (psd.size / 2 - (USABLE_HZ / binHz).toInt()).coerceAtLeast(0)
+            val to = (psd.size / 2 + (USABLE_HZ / binHz).toInt()).coerceAtMost(psd.size - 1)
+            var sum = 0f
+            val means = FloatArray((to - from + 2 - w).coerceAtLeast(0)) { i ->
+                if (i == 0) for (k in from until from + w) sum += psd[k] else sum += psd[from + i + w - 1] - psd[from + i - 1]
+                sum / w
+            }
+            if (means.isEmpty()) return Triple(0L, 0f, 0f)
+            val best = means.indices.maxBy { means[it] }
+            val offset = ((from + best + (w - 1) / 2.0 - psd.size / 2) * binHz).toLong()
+            return Triple(offset, means[best], means.sorted()[means.size / 4])
         }
 
         /**

@@ -23,6 +23,12 @@ interface DetectionDao {
         ORDER BY timestamp DESC LIMIT 1000""")
     fun search(query: String, like: String, likeHex: String, category: String?, since: Long): Flow<List<DetectionEntity>>
 
+    /** Where each of [macs] was logged: the middle and the corners of the box around it ([org.tucsoncommunity.kokoho.detect.FixedRouter]). */
+    @Query("""SELECT mac, AVG(latitude) AS lat, AVG(longitude) AS lon, MIN(latitude) AS minLat, MIN(longitude) AS minLon,
+        MAX(latitude) AS maxLat, MAX(longitude) AS maxLon FROM detections
+        WHERE mac IN (:macs) AND latitude IS NOT NULL AND longitude IS NOT NULL GROUP BY mac""")
+    suspend fun spots(macs: List<String>): List<Spot>
+
     /** The categories in the log, for the filter chips. */
     @Query("SELECT DISTINCT category FROM detections")
     suspend fun categories(): List<String>
@@ -60,3 +66,6 @@ interface DetectionDao {
     """)
     suspend fun purgeErroneousRecordsV116(): Int
 }
+
+/** Where a device was logged ([DetectionDao.spots]). */
+data class Spot(val mac: String, val lat: Double, val lon: Double, val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)

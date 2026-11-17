@@ -1,86 +1,65 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="14dp">
+    android:padding="16dp">
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textColor="#FFFFFF"
-        android:textSize="15sp"
-        android:textStyle="bold" />
+        android:textSize="@dimen/text_body" />
 
     <TextView
         android:id="@+id/hintText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="3dp"
-        android:layout_marginBottom="10dp"
-        android:textColor="#E2E8F0"
-        android:textSize="13.5sp" />
+        android:layout_marginTop="2dp"
+        android:layout_marginBottom="8dp"
+        android:textColor="?android:attr/textColorSecondary"
+        android:textSize="@dimen/text_caption" />
 
     <org.tucsoncommunity.kokoho.ui.WaterfallView
         android:id="@+id/waterfall"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
+        android:focusable="true"
         android:contentDescription="Radio waterfall: tap to zoom in on a frequency" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
+        android:layout_marginTop="8dp"
+        android:baselineAligned="false"
         android:orientation="horizontal">
+
+        <!-- Same height for all three (a two-line label made its button taller and shifted the others), so none moves. -->
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/tuneButton"
+            style="?attr/materialButtonOutlinedStyle"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:layout_weight="1"
-            android:backgroundTint="#24324B"
-            android:text="Tune"
-            android:textAllCaps="false"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            app:cornerRadius="12dp"
-            app:strokeColor="#AAFFFFFF"
-            app:strokeWidth="1dp" />
+            android:text="Tune" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/sweepButton"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:layout_marginStart="8dp"
             android:layout_weight="1"
-            android:backgroundTint="#FDE68A"
-            android:text="Back to Sweep"
-            android:textAllCaps="false"
-            android:textColor="#0F172A"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            app:cornerRadius="12dp"
-            app:strokeColor="#FFFFFF"
-            app:strokeWidth="1dp" />
+            android:text="Back to sweep" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/antennaButton"
+            style="?attr/materialButtonOutlinedStyle"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:layout_marginStart="8dp"
             android:layout_weight="1"
-            android:backgroundTint="#24324B"
-            android:text="Antenna Check"
-            android:textAllCaps="false"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            app:cornerRadius="12dp"
-            app:strokeColor="#AAFFFFFF"
-            app:strokeWidth="1dp" />
+            android:text="Antenna check" />
     </LinearLayout>
 </LinearLayout>

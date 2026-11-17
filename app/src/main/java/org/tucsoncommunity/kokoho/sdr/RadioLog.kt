@@ -32,7 +32,9 @@ object RadioLog {
         val lastLon: Double? = null,
         val peakLat: Double? = null,
         val peakLon: Double? = null,
-        val travelSpanM: Double = 0.0
+        val travelSpanM: Double = 0.0,
+        /** Digital mode & cipher label decoded on this channel (e.g. "digital radio (DMR) · clear", "MDC-1200 unit 4102"). */
+        val digital: String? = null
     ) {
         val mhz: String get() = "%.4f".format(java.util.Locale.US, freqHz / 1e6)
     }
@@ -162,6 +164,13 @@ object RadioLog {
             travelSpanM = maxOf(prev.travelSpanM, spanFromOrigin)
         )
         return trend
+    }
+
+    /** Records a decoded digital voice/signaling note (DMR, NXDN, MDC-1200) on [freqHz]. */
+    @Synchronized
+    fun digital(freqHz: Long, note: String) {
+        val prev = entries[freqHz] ?: return
+        entries[freqHz] = prev.copy(digital = note)
     }
 
     /** Heard within [KEEP_MS], most recent first. */

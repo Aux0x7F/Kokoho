@@ -3,7 +3,8 @@ package org.tucsoncommunity.kokoho.sdr
 /**
  * P25 Phase 1 frames, second stage: the dibits after a frame sync ([P25Demod]) to the network ID and
  * the control channel's trunking blocks (TSBKs). Status symbols out, the NID's BCH(63,16) code corrected,
- * then each 98-dibit block de-interleaved, rate-1/2 trellis decoded (Viterbi) and CRC checked.
+ * then each 98-dibit block de-interleaved, rate-1/2 trellis decoded (Viterbi, on the symbols' soft values when the
+ * demodulator gives them) and CRC checked.
  * Constants from TIA-102.BAAA (the trellis table, interleave and CRC as OP25 implements them).
  * Pure: unit-tested.
  */
@@ -26,14 +27,19 @@ object P25Frame {
     /** What a frame held: its NID (null when uncorrectable) and the blocks that passed their CRC. */
     class Decoded(val nid: Nid?, val tsbks: List<Tsbk>, val badBlocks: Int)
 
-    fun decode(frame: IntArray): Decoded {
+    /**
+     * [soft]: the frame's symbol values (±1 for ±3, as [P25Demod.soft]), same length as [frame]; null for hard decisions.
+     * [nac]: the channel's known NAC, for a NID too damaged otherwise ([nid]).
+     */
+    fun decode(frame: IntArray, soft: DoubleArray? = null, nac: Int? = null): Decoded {
         val d = stripStatus(frame)
-        val nid = nid(d) ?: return Decoded(null, emptyList(), 0)
+        val sd = soft?.takeIf { it.size == frame.size }?.let { stripStatus(it) }
+        val nid = nid(d, sd, nac) ?: return Decoded(null, emptyList(), 0)
         if (nid.duid != DUID_TSDU) return Decoded(nid, emptyList(), 0)
         val out = ArrayList<Tsbk>(); var bad = 0
         var at = NID_DIBITS
         while (out.size + bad < 3 && at + BLOCK_DIBITS <= d.size) {
-            val b = trellis(deinterleave(d, at))
+            val b = trellis(deinterleave(d, at), sd?.let { deinterleaveSoft(it, at) })
             at += BLOCK_DIBITS
             if (b == null || !crcOk(b)) { bad++; continue }
             val t = Tsbk(b.copyOf(10))
@@ -46,9 +52,8 @@ object P25Frame {
     /** Takes out the status symbols: every 36th dibit counting from the sync's first ([frame] starts after the sync). */
     fun stripStatus(frame: IntArray): IntArray =
         frame.filterIndexed { i, _ -> (i + SYNC_DIBITS + 1) % 36 != 0 }.toIntArray()
-
-    fun stripStatus(frame: FloatArray): FloatArray =
-        frame.filterIndexed { i, _ -> (i + SYNC_DIBITS + 1) % 36 != 0 }.toFloatArray()
+    fun stripStatus(frame: DoubleArray): DoubleArray =
+        frame.filterIndexed { i, _ -> (i + SYNC_DIBITS + 1) % 36 != 0 }.toDoubleArray()
 
     // ---- NID: 16 bits (NAC, DUID), 47 BCH parity bits, 1 parity bit ----
 
@@ -64,51 +69,46 @@ object P25Frame {
 
     private val codewords: LongArray by lazy { LongArray(1 shl 16) { nidCodeword(it) } }
 
-    /**
-     * The NID from the first 32 dibits; null when more than 11 bits are wrong (or 15 with [nac] known: the same
-     * 16-codeword subcode has minimum distance 23, so 7 false-alarm bits stay as far away as 11 across all 65,536).
-     * With [soft] symbols, the two bits of each dibit are weighted by how clean its slice was.
-     */
-    fun nid(d: IntArray, soft: FloatArray? = null, nac: Int? = null): Nid? {
+    /** The NID from the first 32 dibits; null when more than 11 bits are wrong. */
+    fun nid(d: IntArray): Nid? {
         if (d.size < NID_DIBITS) return null
         var v = 0L
         for (i in 0 until NID_DIBITS) v = v shl 2 or d[i].toLong()
         val received = v ushr 1 // the 64th bit is a plain parity bit
-        val w = if (soft != null && soft.size >= NID_DIBITS) bitWeights(soft) else null
-        val range = if (nac != null) (nac shl 4) until ((nac + 1) shl 4) else codewords.indices
-        val maxErr = if (nac != null) 15 else 11
-        var best = -1; var bestErr = 64; var bestCost = Float.MAX_VALUE
+        var best = -1; var bestErr = 64
         val cw = codewords
-        for (info in range) {
-            val diff = cw[info] xor received
-            val e = java.lang.Long.bitCount(diff)
-            if (w == null) {
-                if (e < bestErr) { bestErr = e; best = info; if (e == 0) break }
-            } else if (e <= maxErr) {
-                val c = softCost(diff, w)
-                if (c < bestCost) { bestCost = c; bestErr = e; best = info }
+        for (info in cw.indices) {
+            val e = java.lang.Long.bitCount(cw[info] xor received)
+            if (e < bestErr) { bestErr = e; best = info; if (e == 0) break }
+        }
+        return if (bestErr <= 11) Nid(best shr 4, best and 0xf, bestErr) else null
+    }
+
+    /**
+     * [nid], and when that fails with the channel's [nac] known: the closest of that NAC's NIDs to the [soft] symbol
+     * values (status symbols out), when it is the only closest and no more than 15 bits off. SDRTrunk's
+     * P25P1MessageFramer.softDecodeNID: 7 candidates make a random word pass about once in 7,700.
+     */
+    fun nid(d: IntArray, soft: DoubleArray?, nac: Int?): Nid? {
+        nid(d)?.let { return it }
+        if (nac == null || soft == null || soft.size < NID_DIBITS || d.size < NID_DIBITS) return null
+        var best = -1; var bestDist = Double.MAX_VALUE; var second = Double.MAX_VALUE; var bestErr = 0
+        for (duid in SOFT_DUIDS) {
+            val cw = nidCodeword(nac shl 4 or duid) shl 1 // the 64th bit, a plain parity bit, either way
+            var dist = 0.0; var err = 0
+            for (k in 0 until NID_DIBITS) {
+                val sent = (cw ushr (62 - 2 * k) and 3L).toInt()
+                dist += if (k < NID_DIBITS - 1) (soft[k] - LEVEL[sent]).let { it * it }
+                    else minOf((soft[k] - LEVEL[sent and 2]).let { it * it }, (soft[k] - LEVEL[sent or 1]).let { it * it })
+                err += Integer.bitCount((sent xor d[k]) and (if (k < NID_DIBITS - 1) 3 else 2))
             }
+            if (dist < bestDist) { second = bestDist; bestDist = dist; best = duid; bestErr = err } else if (dist < second) second = dist
         }
-        return if (best >= 0 && bestErr <= maxErr) Nid(best shr 4, best and 0xf, bestErr) else null
+        return if (best >= 0 && bestDist < second && bestErr <= 15) Nid(nac, best, bestErr) else null
     }
 
-    /** Confidence (0.1..1) of each of the 63 NID bits from its symbol's slice distance to the nearest boundary. */
-    private fun bitWeights(soft: FloatArray): FloatArray = FloatArray(63) { b ->
-        val s = soft[b / 2]
-        // High bit (sign): boundary at 0; low bit (inner / outer): boundaries at -2 and +2.
-        val margin = if (b % 2 == 0) kotlin.math.abs(s) else kotlin.math.abs(kotlin.math.abs(s) - 2f)
-        margin.coerceIn(0.1f, 1f)
-    }
-
-    private fun softCost(diff: Long, w: FloatArray): Float {
-        var x = diff; var c = 0f
-        while (x != 0L) {
-            val bit = 62 - java.lang.Long.numberOfLeadingZeros(x)
-            c += w[bit]
-            x = x xor (1L shl bit)
-        }
-        return c
-    }
+    /** The data unit IDs P25 phase 1 uses: header, terminator, LDU1, trunking, LDU2, data packet, terminator with LC. */
+    private val SOFT_DUIDS = intArrayOf(0x0, 0x3, 0x5, 0x7, 0xA, 0xC, 0xF)
 
     // ---- Trunking blocks ----
 
@@ -119,28 +119,45 @@ object P25Frame {
     fun deinterleave(d: IntArray, from: Int): IntArray =
         IntArray(49) { k -> d[from + SYMBOL_AT[k]] shl 2 or d[from + SYMBOL_AT[k] + 1] }
 
+    /** The block's soft values in trellis order: symbol k's two dibits at [2k] and [2k + 1]. */
+    fun deinterleaveSoft(d: DoubleArray, from: Int): DoubleArray =
+        DoubleArray(98) { i -> d[from + SYMBOL_AT[i / 2] + i % 2] }
+
+    /** Each dibit's symbol value (±1 for ±3): 01 → +1, 00 → +1/3, 10 → -1/3, 11 → -1. */
+    private val LEVEL = doubleArrayOf(1.0 / 3, 1.0, -1.0 / 3, -1.0)
+
     /** Rate-1/2 trellis: the symbol sent for input dibit [in] from state (the previous input) [s]: NEXT[s][in]. */
     val NEXT = arrayOf(intArrayOf(0x2, 0xC, 0x1, 0xF), intArrayOf(0xE, 0x0, 0xD, 0x3),
         intArrayOf(0x9, 0x7, 0xA, 0x4), intArrayOf(0x5, 0xB, 0x6, 0x8))
 
-    /** Viterbi decode of 49 symbols into 48 dibits (12 bytes; the 49th input is the flush). Null when too damaged. */
-    fun trellis(sym: IntArray): ByteArray? {
-        val inf = Int.MAX_VALUE / 2
-        var metric = intArrayOf(0, inf, inf, inf)
+    /**
+     * Viterbi decode of 49 symbols into 48 dibits (12 bytes; the 49th input is the flush). Null when too damaged.
+     * With [soft] (from [deinterleaveSoft]) the path is chosen by distance to the sent levels (about 2 dB better than
+     * counting bits); the damage limit still counts the bits the chosen path disagrees with.
+     */
+    fun trellis(sym: IntArray, soft: DoubleArray? = null): ByteArray? {
+        val inf = Double.MAX_VALUE / 4
+        var metric = doubleArrayOf(0.0, inf, inf, inf)
         val from = Array(sym.size) { IntArray(4) }
         for (t in sym.indices) {
-            val next = IntArray(4) { inf }
+            val next = DoubleArray(4) { inf }
             for (s in 0 until 4) if (metric[s] < inf) for (input in 0 until 4) {
-                val m = metric[s] + Integer.bitCount(NEXT[s][input] xor sym[t])
+                val c = NEXT[s][input]
+                val cost = if (soft == null) Integer.bitCount(c xor sym[t]).toDouble()
+                    else (soft[2 * t] - LEVEL[c shr 2]).let { it * it } + (soft[2 * t + 1] - LEVEL[c and 3]).let { it * it }
+                val m = metric[s] + cost
                 if (m < next[input]) { next[input] = m; from[t][input] = s }
             }
             metric = next
         }
         // Ends in state 0: the flush input.
         var s = 0
-        if (metric[0] > MAX_TRELLIS_ERRORS) return null
+        if (metric[0] >= inf) return null
         val dibits = IntArray(sym.size)
         for (t in sym.indices.reversed()) { dibits[t] = s; s = from[t][s] }
+        var errors = 0; var state = 0
+        for (t in sym.indices) { errors += Integer.bitCount(NEXT[state][dibits[t]] xor sym[t]); state = dibits[t] }
+        if (errors > MAX_TRELLIS_ERRORS) return null
         val out = ByteArray(12)
         for (i in 0 until 48) out[i / 4] = (out[i / 4].toInt() or (dibits[i] shl (6 - 2 * (i % 4)))).toByte()
         return out
@@ -148,28 +165,19 @@ object P25Frame {
 
     /**
      * The block's 96 bits divided by x^16+x^12+x^5+1 leave all ones when it is intact (the sender appends the
-     * inverted CRC-CCITT of the first 10 bytes). Corrects a single bit error in place when [fixOne] is on.
+     * inverted CRC-CCITT of the first 10 bytes). One wrong bit is put right in [b], as SDRTrunk's CRCP25.correctCCITT80
+     * does after the trellis; two or more fail.
      */
-    fun crcOk(b: ByteArray, fixOne: Boolean = true): Boolean {
-        val syn = remainder(b) xor 0xffff
-        if (syn == 0) return true
-        if (!fixOne) return false
-        val bit = SINGLE_BIT[syn] ?: return false
-        b[bit / 8] = (b[bit / 8].toInt() xor (1 shl (7 - bit % 8))).toByte()
+    fun crcOk(b: ByteArray): Boolean {
+        val s = remainder(b) xor 0xffff
+        if (s == 0) return true
+        val bit = SINGLE_BIT.indexOf(s).takeIf { it >= 0 && b.size == 12 } ?: return false
+        b[bit / 8] = (b[bit / 8].toInt() xor (0x80 ushr (bit % 8))).toByte()
         return true
     }
 
-    /** Syndrome -> bit index (0..95, MSB first) for every 1-bit error in a 96-bit block (all 96 syndromes are distinct). */
-    private val SINGLE_BIT: Map<Int, Int> by lazy {
-        HashMap<Int, Int>(128).also { m ->
-            val z = ByteArray(12)
-            for (bit in 0 until 96) {
-                z[bit / 8] = (1 shl (7 - bit % 8)).toByte()
-                m[remainder(z)] = bit
-                z[bit / 8] = 0
-            }
-        }
-    }
+    /** What one wrong bit (MSB first) does to a 12-byte block's remainder: the distance-4 code makes each unique. */
+    private val SINGLE_BIT = IntArray(96) { i -> remainder(ByteArray(12).also { it[i / 8] = (0x80 ushr (i % 8)).toByte() }) }
 
     /** Remainder of [b] (bits MSB first) divided by the CCITT polynomial. */
     fun remainder(b: ByteArray): Int {

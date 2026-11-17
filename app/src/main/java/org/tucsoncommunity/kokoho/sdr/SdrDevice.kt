@@ -19,6 +19,8 @@ interface SdrDevice {
     fun open(): Boolean
     fun close()
     fun setSampleRate(rate: Int)
+    /** Where a signal seen at [hz] (tuned to [centerHz]) may really come from: the tuner's image frequency; null if it has none. */
+    fun imageHz(centerHz: Long, hz: Long): Long? = null
     /** Tunes to [hz]; false when it didn't take (PLL not locked, request failed). */
     fun tune(hz: Long): Boolean
     /** Fixed gain in tenths of a dB: a steady scale for comparing channels over time. */
@@ -28,6 +30,17 @@ interface SdrDevice {
     /** Reads unsigned 8-bit I/Q into [buf]; bytes read, or a negative value on error. */
     fun read(buf: ByteArray, len: Int): Int
     fun read(buf: ByteArray): Int = read(buf, buf.size)
-    /** Where the tuner's image of a signal at [hz] is in the sky when tuned to [centerHz]; null for a zero-IF tuner. */
-    fun imageHz(centerHz: Long, hz: Long): Long? = null
+
+    /** The crystal's error in parts per million, taken out of every [tune] (0: none). */
+    var ppm: Double
+        get() = 0.0
+        set(_) {}
+
+    /** Power on the antenna port for an active antenna or amplifier; false when this device has no way to. */
+    fun setBiasTee(on: Boolean): Boolean = false
+
+    companion object {
+        /** What to ask the tuner for so it lands on [hz] when its crystal is [ppm] off. */
+        fun corrected(hz: Long, ppm: Double): Long = if (ppm == 0.0) hz else Math.round(hz / (1 + ppm / 1e6))
+    }
 }

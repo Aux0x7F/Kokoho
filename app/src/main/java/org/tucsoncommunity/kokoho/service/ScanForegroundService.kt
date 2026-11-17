@@ -479,9 +479,9 @@ class ScanForegroundService : Service() {
             val rolling24hAgo = System.currentTimeMillis() - 24L * 3_600_000L
             val db = AppDatabase.getInstance(this@ScanForegroundService)
             runCatching {
-                org.tucsoncommunity.kokoho.detect.FixedRouter.load(
-                    db.knownDeviceDao().familiarRouters(org.tucsoncommunity.kokoho.detect.FixedRouter.MIN_SESSIONS, rolling24hAgo)
-                )
+                val familiarMacs = db.knownDeviceDao().familiarFixed(org.tucsoncommunity.kokoho.detect.FixedRouter.MIN_SESSIONS, rolling24hAgo)
+                val spots = if (familiarMacs.isEmpty()) emptyList() else familiarMacs.chunked(500).flatMap { db.detectionDao().spots(it) }
+                org.tucsoncommunity.kokoho.detect.FixedRouter.load(familiarMacs, spots)
             }
             // Maintain bounded 48-hour unfiltered evidence ring in SQLite
             runCatching {
@@ -600,10 +600,19 @@ class ScanForegroundService : Service() {
         org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Record = Prefs.p25Record(this)
         org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Listen = org.tucsoncommunity.kokoho.sdr.SdrRadio.Listen.entries[Prefs.p25Listen(this)]
         org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Watched = org.tucsoncommunity.kokoho.sdr.P25Log.watched(Prefs.p25Talkgroups(this))
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Priority = Prefs.p25Priority(this)
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Lockout = Prefs.p25Lockout(this)
         org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Mute = Prefs.p25Mute(this)
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.stayOnActivity = Prefs.sdrStay(this)
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.saveCalls = Prefs.p25SaveCalls(this)
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.sweepListen = Prefs.sweepListen(this)
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.sweepRecord = Prefs.sweepRecord(this)
+        org.tucsoncommunity.kokoho.sdr.P25Transcribe.enabled = Prefs.p25Transcribe(this)
         org.tucsoncommunity.kokoho.sdr.SdrRadio.pagerChannel = Prefs.pagerChannel(this)
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onPagerPage = { page -> pipeline.post { onPagerPage(page) } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onP25Input = { call, hz, snr -> pipeline.post { onP25Input(call, hz, snr) } }
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.onP25Nearby = { msg, snr, tg -> pipeline.post { onP25Nearby(msg, snr, tg) } }
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.onP25Position = { pos, hz, nac -> pipeline.post { onP25Position(pos, hz, nac) } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.location = { (lastLocation ?: lastFix)?.let { it.latitude to it.longitude } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onAircraft = { planes, unlocated -> onlineWatch.localAircraft(planes, unlocated) }
         if (sdrModes.isNotEmpty() || radioOn) {
@@ -1054,7 +1063,10 @@ class ScanForegroundService : Service() {
                 this, mac, trackerHit.label, a.rssi, now, DeviceRegistry.linkedFrom(mac))
         ) return
         if (WhitelistCache.contains(mac)) return
-        if (!org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(mac, c.hits, Prefs.alertThreshold(this, best.category))) noteLocating(mac)
+        if (!org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(
+                mac, c.hits, a.name, a.wifi?.capabilities, placedLoc?.latitude, placedLoc?.longitude
+            )
+        ) noteLocating(mac)
 
         maybeLog(a, best, c.vendor, placedLoc, now, via)
         if (!quiet) maybeAlert(a, best, c.hits, now, via)
@@ -1552,8 +1564,12 @@ class ScanForegroundService : Service() {
             if (upSince != null && now > upSince && (now - upSince) > org.tucsoncommunity.kokoho.posture.KokohoSignatures.MAX_MOBILE_BEACON_UPTIME_MS) return
             if (!a.name.isNullOrBlank() && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isOpenPublicWifiCapabilities(wifi.capabilities)) return
         }
-        // A shop's router you pass every day: listed and logged, no alert.
-        if (org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(a.mac, hits, Prefs.alertThreshold(this, best.category))) return
+        // A shop's router you pass every day near its home spot: listed and logged, no alert (re-alerts if it moves!).
+        val alertPos = lastLocation ?: lastFix
+        if (org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(
+                a.mac, hits, a.name, a.wifi?.capabilities, alertPos?.latitude, alertPos?.longitude
+            )
+        ) return
         // Acknowledged from the list: listed and logged, no alert.
         if (org.tucsoncommunity.kokoho.data.AlertMutes.isMuted(this, a.mac, now)) return
         val window = Prefs.dedupeWindowMs(this)
@@ -2060,6 +2076,65 @@ class ScanForegroundService : Service() {
             "P25 control channel grant + SDR signal strength on the input (no voice)")
         radioDetection(hit, "P25 radio ${call.source}", snr, now, "p25in:${call.tg ?: call.target}",
             "Radio keyed up $near, $called", confidence >= Prefs.alertThreshold(this, Category.RADIO), talkgroup = true)
+    }
+
+    /** A P25 radio heard directly on the control channel's uplink (switching on, affiliating, status, emergency). */
+    private fun onP25Nearby(msg: org.tucsoncommunity.kokoho.sdr.P25Tsbk.Inbound, snr: Int, tg: Int?) {
+        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        val now = System.currentTimeMillis()
+        org.tucsoncommunity.kokoho.sdr.P25Link.heard(
+            msg.radio,
+            DeviceRegistry.snapshot(now)
+                .filter { org.tucsoncommunity.kokoho.ui.LiveWindow.inRange(it, now) && !WhitelistCache.contains(it.mac) }
+                .map { it.mac },
+            now
+        )
+        if (tg != null && org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupTalkgroup(tg)?.agencyCode == "IGNORE") return
+        val min = Prefs.radioMinSnr(this)
+        val confidence = p25InputConfidence(snr, min)
+        val tgSig = tg?.let { org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchTalkgroup(it) }
+        val called = tgSig?.label ?: tg?.let { "talkgroup $it" } ?: "RID ${msg.radio}"
+        val near = when { snr >= 40 -> "very close"; snr >= 30 -> "close"; else -> "nearby" }
+        val detail = "P25 radio ${msg.radio} sent ${msg.kind} on the site's uplink ($snr dB SNR - $near)" +
+            (tg?.let { " while affiliated to $called" }.orEmpty()) + "."
+        val hit = Hit(Category.RADIO, "P25 radio $near: $called", confidence, detail, "P25 control-channel uplink")
+        if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isSharingActive(this)) {
+            maybeEvaluatePostureForSharing(now)
+        }
+        radioDetection(hit, "P25 radio ${msg.radio}", snr, now, "p25up:${msg.radio}",
+            "P25 radio $near", confidence >= Prefs.alertThreshold(this, Category.RADIO), talkgroup = true)
+    }
+
+    /** Actual hardware GPS coordinates broadcast by a P25 radio via Motorola LRRP PDU! */
+    private fun onP25Position(pos: org.tucsoncommunity.kokoho.sdr.P25Tsbk.Position, hz: Long?, nac: Int?) {
+        val now = System.currentTimeMillis()
+        org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.ingestP25RadioGps(this, pos, hz, nac, now)
+        if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isSharingActive(this)) {
+            lastPostureShareEvalAt = 0L // evaluate immediately for an exact radio GPS fix
+            maybeEvaluatePostureForSharing(now)
+        } else {
+            serviceScope.launch {
+                runCatching { org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this@ScanForegroundService, now) }
+            }
+        }
+        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        val tg = org.tucsoncommunity.kokoho.sdr.SdrRadio.p25Log.talkgroupOf(pos.radio)
+        if (tg != null && org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupTalkgroup(tg)?.agencyCode == "IGNORE") return
+        val tgSig = tg?.let { org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchTalkgroup(it) }
+        val freqSig = hz?.let { org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(it, includeRepeaters = true) }
+        val agencyLabel = tgSig?.agencyEnum?.friendlyLabel ?: freqSig?.agencyEnum?.friendlyLabel ?: "P25 Radio"
+        val mhzStr = hz?.let { String.format(java.util.Locale.US, " on %.4f MHz", it / 1e6) }.orEmpty()
+        val radStr = pos.radiusM?.let { " (±${it.toInt()} m)" }.orEmpty()
+        val hit = Hit(
+            Category.RADIO,
+            "$agencyLabel LRRP GPS: RID ${pos.radio}",
+            90,
+            "P25 radio ${pos.radio} broadcast LRRP GPS coordinates %.5f, %.5f%s%s.".format(
+                java.util.Locale.US, pos.lat, pos.lon, radStr, mhzStr
+            ),
+            "P25 Phase 1 LRRP data packet"
+        )
+        logDetection("P25 GPS ${pos.radio}", "SDR", hit, now, pos.lat, pos.lon, rssi = 45)
     }
 
     private var p25UnusualAt = 0L

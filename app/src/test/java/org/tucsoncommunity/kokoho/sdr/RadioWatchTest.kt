@@ -91,7 +91,7 @@ class RadioWatchTest {
     @Test
     fun planCoversEveryBandWithoutLteUplink() {
         val plan = RadioWatch.plan()
-        assertEquals(37, plan.size)
+        assertEquals(46, plan.size)
         for (b in RadioWatch.BANDS) assertTrue(plan.any { it - RadioWatch.USABLE_HZ <= b.startHz })
         assertFalse(RadioWatch.BANDS.any { it.endHz > 814_000_000L && it.startHz < 849_000_000L && it.startHz > 806_000_000L })
     }

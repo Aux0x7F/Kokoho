@@ -19,7 +19,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbManager
 
-object Rtl8812auMonitor {
+class Rtl8812auMonitor {
     @Volatile var running = false; private set
     @Volatile private var stop = false
 
@@ -31,25 +31,8 @@ object Rtl8812auMonitor {
     private var rfe = 0
     /** The chip's revision: 0 = A, 1 = B, 2 = C... */
     private var cut = 0
-    private const val MAX_PKT = 12000
-    private const val DWELL_MS = 350L
 
     private val FRESH_MS get() = (HOP.size * DWELL_MS * 9 / 5).coerceAtLeast(3000L)
-    private const val REPORT_MS = 10_000L
-    private const val FCS_LEN = 4
-
-    private const val OUT_VENDOR = 0x40; private const val IN_VENDOR = 0xC0
-    private const val VREQ = 0x05
-    private const val REG_RX_DRVINFO_SZ = 0x060F; private const val RCR_APP_PHYST_RXFF = 0x10000000
-    private const val REG_SYS_FUNC_EN = 0x02; private const val FEN_USBA = 0x04; private const val FEN_BB_GLB_RSTN = 0x02; private const val FEN_BBRSTB = 0x01
-    private const val FEN_ELDR = 0x1000
-    private const val REG_RF_CTRL = 0x1F; private const val REG_RF_B_CTRL = 0x76
-    private const val REG_SYS_CLKR = 0x08; private const val LOADER_CLK_EN = 0x20; private const val ANA8M = 0x02
-    private const val REG_SYS_CFG = 0xF0
-    private const val REG_EFUSE_CTRL = 0x30; private const val REG_EFUSE_ACCESS = 0xCF
-
-    private const val rA_LSSIWrite = 0xC90; private const val rB_LSSIWrite = 0xE90
-    private const val rHSSIRead = 0x8B0; private const val rA_PIRead = 0xD04; private const val rB_PIRead = 0xD44
 
     /** What was last written to each radio register, per path: reading one back through the baseband is slow. */
     private val rfShadow = arrayOf(HashMap<Int, Int>(), HashMap<Int, Int>())
@@ -70,40 +53,7 @@ object Rtl8812auMonitor {
             UsbWifi.log("=== RTL8812AU bring-up (rtl8812au) ===")
             UsbWifi.log("RTL8812AU: RX EP=0x%02x".format(rx.address))
 
-            onStatus("RTL8812AU · powering on…")
-            if (!powerOn(conn)) UsbWifi.log("RTL8812AU: power-on poll timed out (continuing)")
-            w16(conn, Rtl8812auTables.REG_CR, 0x0000)
-            w16(conn, Rtl8812auTables.REG_CR, Rtl8812auTables.CR_INIT16)
-            w16(conn, Rtl8812auTables.REG_RXFF_BNDY, Rtl8812auTables.RX_DMA_BOUNDARY)
-            w16(conn, Rtl8812auTables.REG_CR, r16(conn, Rtl8812auTables.REG_CR) or Rtl8812auTables.CR_MACEN8)
-            val cr = r16(conn, Rtl8812auTables.REG_CR)
-            cut = (r32(conn, REG_SYS_CFG) ushr 12) and 0xF
-            UsbWifi.log("RTL8812AU: MAC on, REG_CR=0x%04x, chip revision %d".format(cr, cut))
-            if (cr == 0xEAEA) { onStatus("RTL8812AU: MAC didn't power on - unplug the adapter and plug it back in"); return }
-            rfe = runCatching { readRfeType(conn) }.getOrDefault(0)
-            UsbWifi.log("RTL8812AU: board type (RFE) $rfe")
-
-            onStatus("RTL8812AU · loading MAC/BB/RF…")
-            applyTable(conn, Rtl8812auTables.MAC_REG, Kind.MAC)
-            // The baseband and both radio paths on (PHY_BBConfig8812).
-            run { val v = r8(conn, REG_SYS_FUNC_EN); w8(conn, REG_SYS_FUNC_EN, v or FEN_USBA); w8(conn, REG_SYS_FUNC_EN, v or FEN_USBA or FEN_BB_GLB_RSTN or FEN_BBRSTB) }
-            w8(conn, REG_RF_CTRL, 0x07)
-            w8(conn, REG_RF_B_CTRL, 0x07)
-            sleep(1)
-            applyTable(conn, Rtl8812auTables.PHY_REG, Kind.BB)
-            applyTable(conn, Rtl8812auTables.AGC_TAB, Kind.BB)
-            applyTable(conn, Rtl8812auTables.RADIOA, Kind.RF_A)
-            applyTable(conn, Rtl8812auTables.RADIOB, Kind.RF_B)
-
-            w8(conn, REG_RX_DRVINFO_SZ, 0x04)
-            w32(conn, Rtl8812auTables.REG_RCR, Rtl8812auTables.RCR_MONITOR or RCR_APP_PHYST_RXFF)
-            w16(conn, Rtl8812auTables.REG_RXFLTMAP0, Rtl8812auTables.RXFLTMAP_ALL)
-            w16(conn, Rtl8812auTables.REG_RXFLTMAP1, Rtl8812auTables.RXFLTMAP_ALL)
-            w16(conn, Rtl8812auTables.REG_RXFLTMAP2, Rtl8812auTables.RXFLTMAP_ALL)
-            // The first channel: the band is switched by the tune itself.
-            channelTune(conn, HOP[0])
-            UsbWifi.log("RTL8812AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch ${HOP[0]}".format(
-                r32(conn, Rtl8812auTables.REG_RCR), r32(conn, 0x800)))
+            if (!bringUp(conn, HOP[0], onStatus)) return
             onStatus("RTL8812AU · live · 2.4 + 5 GHz monitor")
 
             rxLoop(conn, rx, onFrame, onStatus)
@@ -116,6 +66,46 @@ object Rtl8812auMonitor {
             runCatching { conn.close() }
             running = false
         }
+    }
+
+    /** Power-on and MAC / BB / RF set-up, tuned to [ch]; false when the MAC didn't come on. Run again by [revive]. */
+    private fun bringUp(conn: UsbDeviceConnection, ch: Int, onStatus: (String) -> Unit): Boolean {
+        rfShadow.forEach { it.clear() } // the radio is reloaded from its tables
+        onStatus("RTL8812AU · powering on…")
+        if (!powerOn(conn)) UsbWifi.log("RTL8812AU: power-on poll timed out (continuing)")
+        w16(conn, Rtl8812auTables.REG_CR, 0x0000)
+        w16(conn, Rtl8812auTables.REG_CR, Rtl8812auTables.CR_INIT16)
+        w16(conn, Rtl8812auTables.REG_RXFF_BNDY, Rtl8812auTables.RX_DMA_BOUNDARY)
+        w16(conn, Rtl8812auTables.REG_CR, r16(conn, Rtl8812auTables.REG_CR) or Rtl8812auTables.CR_MACEN8)
+        val cr = r16(conn, Rtl8812auTables.REG_CR)
+        cut = (r32(conn, REG_SYS_CFG) ushr 12) and 0xF
+        UsbWifi.log("RTL8812AU: MAC on, REG_CR=0x%04x, chip revision %d".format(cr, cut))
+        if (cr == 0xEAEA) { onStatus("RTL8812AU: MAC didn't power on - unplug the adapter and plug it back in"); return false }
+        rfe = runCatching { readRfeType(conn) }.getOrDefault(0)
+        UsbWifi.log("RTL8812AU: board type (RFE) $rfe")
+
+        onStatus("RTL8812AU · loading MAC/BB/RF…")
+        applyTable(conn, Rtl8812auTables.MAC_REG, Kind.MAC)
+        // The baseband and both radio paths on (PHY_BBConfig8812).
+        run { val v = r8(conn, REG_SYS_FUNC_EN); w8(conn, REG_SYS_FUNC_EN, v or FEN_USBA); w8(conn, REG_SYS_FUNC_EN, v or FEN_USBA or FEN_BB_GLB_RSTN or FEN_BBRSTB) }
+        w8(conn, REG_RF_CTRL, 0x07)
+        w8(conn, REG_RF_B_CTRL, 0x07)
+        sleep(1)
+        applyTable(conn, Rtl8812auTables.PHY_REG, Kind.BB)
+        applyTable(conn, Rtl8812auTables.AGC_TAB, Kind.BB)
+        applyTable(conn, Rtl8812auTables.RADIOA, Kind.RF_A)
+        applyTable(conn, Rtl8812auTables.RADIOB, Kind.RF_B)
+
+        w8(conn, REG_RX_DRVINFO_SZ, 0x04)
+        w32(conn, Rtl8812auTables.REG_RCR, Rtl8812auTables.RCR_MONITOR or RCR_APP_PHYST_RXFF)
+        w16(conn, Rtl8812auTables.REG_RXFLTMAP0, Rtl8812auTables.RXFLTMAP_ALL)
+        w16(conn, Rtl8812auTables.REG_RXFLTMAP1, Rtl8812auTables.RXFLTMAP_ALL)
+        w16(conn, Rtl8812auTables.REG_RXFLTMAP2, Rtl8812auTables.RXFLTMAP_ALL)
+        // The first channel: the band is switched by the tune itself.
+        channelTune(conn, ch)
+        UsbWifi.log("RTL8812AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch $ch".format(
+            r32(conn, Rtl8812auTables.REG_RCR), r32(conn, 0x800)))
+        return true
     }
 
     private enum class Kind { MAC, BB, RF_A, RF_B }
@@ -198,59 +188,18 @@ object Rtl8812auMonitor {
         return if (tries < 100) r8(conn, REG_EFUSE_CTRL) else 0xFF
     }
 
-    /** The efuse's logical map out of its raw bytes (Hal_EfuseReadEFuse8812A): headers say which words follow. */
-    internal object EfuseMap {
-        fun logical(rawLen: Int, raw: (Int) -> Int): IntArray {
-            val words = IntArray(64 * 4) { 0xFFFF }
-            var addr = 0
-            var h = raw(addr)
-            if (h == 0xFF) return IntArray(512) { 0xFF }
-            addr++
-            while (h != 0xFF && addr < rawLen) {
-                val offset: Int; var wren: Int
-                if ((h and 0x1F) == 0x0F) {
-                    val low = (h and 0xE0) shr 5
-                    h = raw(addr)
-                    if ((h and 0x0F) == 0x0F) {
-                        addr++
-                        h = raw(addr)
-                        if (h != 0xFF && addr < rawLen) addr++
-                        continue
-                    }
-                    offset = ((h and 0xF0) shr 1) or low
-                    wren = h and 0x0F
-                    addr++
-                } else {
-                    offset = (h shr 4) and 0x0F
-                    wren = h and 0x0F
-                }
-                for (i in 0 until 4) {
-                    if ((wren and 1) == 0) {
-                        val lo = raw(addr); addr++
-                        if (addr >= rawLen) break
-                        val hi = raw(addr); addr++
-                        if (offset < 64) words[offset * 4 + i] = lo or (hi shl 8)
-                        if (addr >= rawLen) break
-                    }
-                    wren = wren shr 1
-                }
-                h = raw(addr)
-                if (h != 0xFF && addr < rawLen) addr++
-            }
-            return IntArray(512) { i -> val w = words[i / 2]; if (i % 2 == 0) w and 0xFF else (w shr 8) and 0xFF }
-        }
-    }
-
     private class RxState {
         var total = 0L; var bufs = 0L; var lastLog = 0L; var hopAt = 0L; var lastEmit = 0L; var hopIdx = 0; var round = 0
         var frames = 0L
+        /** Times the chip was brought up again because nothing arrived ([revive]); 0 again once data flows. */
+        var revivals = 0
         fun start() { val t = System.currentTimeMillis(); lastLog = t; hopAt = t; lastEmit = t }
     }
 
     private fun rxTick(conn: UsbDeviceConnection, now: Long, st: RxState,
                        onFrame: (List<MonitorSighting>) -> Unit, onStatus: (String) -> Unit) {
         if (now - st.lastLog > 3000) {
-            val (aps, clients) = frames.live(now, REPORT_MS)
+            val (aps, clients) = frames.live(now, FRESH_MS)
             UsbWifi.log("RTL8812AU: RX ${st.bufs} bufs / ${st.total} B ch ${HOP[st.hopIdx]} | ${aps + clients} live ($aps AP · $clients client, ${frames.tracked} tracked)")
             st.lastLog = now
         }
@@ -261,8 +210,9 @@ object Rtl8812auMonitor {
             if (lock < 0 && st.hopIdx + 1 >= HOP.size) HOP = round(++st.round) // same length every round
             val ni = if (lock >= 0) lock else (st.hopIdx + 1) % HOP.size
             if (ni != st.hopIdx) { st.hopIdx = ni; runCatching { channelTune(conn, HOP[st.hopIdx]) } }
-            val (aps, clients) = frames.live(now, REPORT_MS)
-            onStatus("RTL8812AU · live · $aps access points · $clients devices · ch ${HOP[st.hopIdx]}")
+            val (aps, clients) = frames.live(now, FRESH_MS)
+            onStatus("RTL8812AU · live · $aps access points · $clients devices · ch ${HOP[st.hopIdx]}" +
+                if (st.revivals > MAX_REVIVALS) " · nothing heard: if WiFi networks are around, unplug the adapter for 5 s and plug it back in" else "")
             st.hopAt = System.currentTimeMillis() // the dwell starts once the retune is done
         }
     }
@@ -271,11 +221,32 @@ object Rtl8812auMonitor {
                        onFrame: (List<MonitorSighting>) -> Unit, onStatus: (String) -> Unit) {
         val st = RxState().apply { start() }
         BulkRx.run("RTL8812AU", conn, epRx, 24, 16384, { stop || UsbCtl.gone }, { b, n ->
-            st.total += n; st.bufs++
+            st.total += n; st.bufs++; st.revivals = 0
             st.frames += parseRxBuf(b, n, HOP[st.hopIdx])
-        }, syncTimeoutMs = 500) { now -> rxTick(conn, now, st, onFrame, onStatus) }
+        }, syncTimeoutMs = 500, onDeaf = { ms -> revive(conn, ms, st, onStatus) }) { now -> rxTick(conn, now, st, onFrame, onStatus) }
         frames.emit(FRESH_MS, onFrame)
         UsbWifi.log("RTL8812AU: RX loop stopped (${st.total} B)")
+    }
+
+    /**
+     * Nothing at all from the adapter for [silentMs] (as the RTL8821AU after a quick half-unplug and replug, tester log
+     * 2.45.0). Brings the chip up again, twice at most; after that the status asks for a real replug.
+     */
+    private fun revive(conn: UsbDeviceConnection, silentMs: Long, st: RxState, onStatus: (String) -> Unit) {
+        st.revivals++
+        if (st.revivals > MAX_REVIVALS + 1) return // already said so
+        val regs = runCatching {
+            "CR 0x%04x RCR 0x%08x SYS_FUNC 0x%02x RF_CTRL 0x%02x/0x%02x RXPKT 0x%08x".format(r16(conn, Rtl8812auTables.REG_CR),
+                r32(conn, Rtl8812auTables.REG_RCR), r8(conn, REG_SYS_FUNC_EN), r8(conn, REG_RF_CTRL), r8(conn, REG_RF_B_CTRL),
+                r32(conn, REG_RXPKT_NUM))
+        }.getOrDefault("registers unreadable")
+        if (st.revivals > MAX_REVIVALS) {
+            UsbWifi.log("RTL8812AU: still nothing received after $MAX_REVIVALS restarts ($regs) - asking for a replug")
+            return
+        }
+        UsbWifi.log("RTL8812AU: nothing received for ${silentMs / 1000} s ($regs) - bringing the chip up again (${st.revivals} of $MAX_REVIVALS)")
+        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8812AU: restart failed — ${it.message}") }
+        st.hopAt = System.currentTimeMillis()
     }
 
     /** Parses one USB buffer; returns how many good frames it held. */
@@ -312,9 +283,6 @@ object Rtl8812auMonitor {
         }
         return good
     }
-
-    /** One RF path's receive power from a jaguar PHY status (gain_trsw[i], as phydm reads it), null when empty. */
-    internal fun pathPower(b: ByteArray, at: Int): Int? = ((b[at].toInt() and 0x7f) - 110).takeIf { it in -109..-1 }
 
     private fun rtlRssi(b: ByteArray, di: Int, rate: Int): Int {
         fun u8(i: Int) = b[i].toInt() and 0xff
@@ -364,7 +332,76 @@ object Rtl8812auMonitor {
         val cur = rfRead(conn, path, addr); rfWrite(conn, path, addr, (cur and mask.inv()) or ((v shl sh(mask)) and mask))
     }
 
-    private fun sh(mask: Int) = Integer.numberOfTrailingZeros(mask)
-    private fun le32(b: ByteArray, i: Int) = (b[i].toInt() and 0xff) or ((b[i+1].toInt() and 0xff) shl 8) or ((b[i+2].toInt() and 0xff) shl 16) or ((b[i+3].toInt() and 0xff) shl 24)
-    private fun sleep(ms: Int) = try { Thread.sleep(ms.toLong()) } catch (_: InterruptedException) {}
+    companion object {
+        private const val MAX_PKT = 12000
+        private const val DWELL_MS = 350L
+        /** Chip restarts when nothing arrives ([revive]) before asking for a replug. */
+        private const val MAX_REVIVALS = 2
+        /** RX packet count and RX DMA state (REG_RXPKT_NUM), logged when the receiver is deaf. */
+        private const val REG_RXPKT_NUM = 0x284
+        private const val FCS_LEN = 4
+
+        private const val OUT_VENDOR = 0x40; private const val IN_VENDOR = 0xC0
+        private const val VREQ = 0x05
+        private const val REG_RX_DRVINFO_SZ = 0x060F; private const val RCR_APP_PHYST_RXFF = 0x10000000
+        private const val REG_SYS_FUNC_EN = 0x02; private const val FEN_USBA = 0x04; private const val FEN_BB_GLB_RSTN = 0x02; private const val FEN_BBRSTB = 0x01
+        private const val FEN_ELDR = 0x1000
+        private const val REG_RF_CTRL = 0x1F; private const val REG_RF_B_CTRL = 0x76
+        private const val REG_SYS_CLKR = 0x08; private const val LOADER_CLK_EN = 0x20; private const val ANA8M = 0x02
+        private const val REG_SYS_CFG = 0xF0
+        private const val REG_EFUSE_CTRL = 0x30; private const val REG_EFUSE_ACCESS = 0xCF
+
+        private const val rA_LSSIWrite = 0xC90; private const val rB_LSSIWrite = 0xE90
+        private const val rHSSIRead = 0x8B0; private const val rA_PIRead = 0xD04; private const val rB_PIRead = 0xD44
+
+        /** The efuse's logical map out of its raw bytes (Hal_EfuseReadEFuse8812A): headers say which words follow. */
+        internal object EfuseMap {
+            fun logical(rawLen: Int, raw: (Int) -> Int): IntArray {
+                val words = IntArray(64 * 4) { 0xFFFF }
+                var addr = 0
+                var h = raw(addr)
+                if (h == 0xFF) return IntArray(512) { 0xFF }
+                addr++
+                while (h != 0xFF && addr < rawLen) {
+                    val offset: Int; var wren: Int
+                    if ((h and 0x1F) == 0x0F) {
+                        val low = (h and 0xE0) shr 5
+                        h = raw(addr)
+                        if ((h and 0x0F) == 0x0F) {
+                            addr++
+                            h = raw(addr)
+                            if (h != 0xFF && addr < rawLen) addr++
+                            continue
+                        }
+                        offset = ((h and 0xF0) shr 1) or low
+                        wren = h and 0x0F
+                        addr++
+                    } else {
+                        offset = (h shr 4) and 0x0F
+                        wren = h and 0x0F
+                    }
+                    for (i in 0 until 4) {
+                        if ((wren and 1) == 0) {
+                            val lo = raw(addr); addr++
+                            if (addr >= rawLen) break
+                            val hi = raw(addr); addr++
+                            if (offset < 64) words[offset * 4 + i] = lo or (hi shl 8)
+                            if (addr >= rawLen) break
+                        }
+                        wren = wren shr 1
+                    }
+                    h = raw(addr)
+                    if (h != 0xFF && addr < rawLen) addr++
+                }
+                return IntArray(512) { i -> val w = words[i / 2]; if (i % 2 == 0) w and 0xFF else (w shr 8) and 0xFF }
+            }
+        }
+
+        /** One RF path's receive power from a jaguar PHY status (gain_trsw[i], as phydm reads it), null when empty. */
+        internal fun pathPower(b: ByteArray, at: Int): Int? = ((b[at].toInt() and 0x7f) - 110).takeIf { it in -109..-1 }
+
+        private fun sh(mask: Int) = Integer.numberOfTrailingZeros(mask)
+        private fun le32(b: ByteArray, i: Int) = (b[i].toInt() and 0xff) or ((b[i+1].toInt() and 0xff) shl 8) or ((b[i+2].toInt() and 0xff) shl 16) or ((b[i+3].toInt() and 0xff) shl 24)
+        private fun sleep(ms: Int) = try { Thread.sleep(ms.toLong()) } catch (_: InterruptedException) {}
+    }
 }

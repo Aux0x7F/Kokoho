@@ -16,6 +16,7 @@ import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -136,8 +137,9 @@ object DeviceRegistry {
         var fingerprint: String? = null
         /** Patrol-kit role (see [PatrolCluster.roleOf]) - sticky once known. */
         var role: String? = null
-        /** The address this device most likely used before its address rotated. */
+        /** The address this device most likely used before its address rotated, and what linked them. */
         var linkedFrom: String? = null
+        var linkedBy: String? = null
         var inherited: List<Hit> = emptyList()
         /** The device's own strongest recent match, held for [HIT_HOLD_MS] after it was last seen. */
         var heldHit: Hit? = null
@@ -234,9 +236,17 @@ object DeviceRegistry {
                 if (t.path.size > 200) t.path.removeFirst()
             }
             if (location != null && t.hits.isNotEmpty() && (t.readings.isEmpty() || now - t.readings.last.time >= LOCATE_SPACING_MS)) {
-                t.readings.addLast(Locator.Reading(now, location.lat, location.lon, a.rssi))
-                if (t.readings.size > LOCATE_MAX) t.readings.removeFirst()
-                t.readingsSinceFit++
+                val last = t.readings.lastOrNull()
+                // Stopped at a light, a spot's readings would push the rest of the route out: one per spot, its strongest.
+                if (last != null && metersBetween(last.lat, last.lon, location.lat, location.lon) < Locator.CELL_M) {
+                    t.readings.removeLast()
+                    t.readings.addLast(Locator.Reading(now, last.lat, last.lon, max(last.rssi, a.rssi)))
+                    if (a.rssi > last.rssi) t.readingsSinceFit++
+                } else {
+                    t.readings.addLast(Locator.Reading(now, location.lat, location.lon, a.rssi))
+                    if (t.readings.size > LOCATE_MAX) t.readings.removeFirst()
+                    t.readingsSinceFit++
+                }
             }
         }
         relocate(t, now)
@@ -294,23 +304,27 @@ object DeviceRegistry {
      * address uses the WPS UUID its probe requests send (USB adapter) instead.
      */
     private fun linkRotatedAddress(t: Track, a: Advert, now: Long) {
-        val uuid = if (a.isWifi && org.tucsoncommunity.kokoho.util.MacUtil.isRandomized(a.mac)) org.tucsoncommunity.kokoho.usb.ProbeIntel.of(a.mac)?.wps?.uuid else null
-        val fp = AdvertFingerprint.of(a) ?: uuid?.let { "uuid:$it" } ?: return
-        synchronized(t) { t.fingerprint = fp }
-        if (!AdvertFingerprint.mayRotate(a) && uuid == null) return
-        val candidates = tracks.values.filter { o ->
-            o !== t && synchronized(o) {
-                o.fingerprint == fp && o.lastSeen <= now - ROTATION_SILENCE_MS && now - o.lastSeen <= ROTATION_WINDOW_MS
-            }
+        val random = a.isWifi && org.tucsoncommunity.kokoho.util.MacUtil.isRandomized(a.mac)
+        val probe = if (random) org.tucsoncommunity.kokoho.usb.ProbeIntel.of(a.mac) else null
+        val uuid = probe?.wps?.uuid
+        val seqPrev = probe?.previous?.let { tracks[it] }?.takeIf { it !== t }
+        val fp = AdvertFingerprint.of(a) ?: uuid?.let { "uuid:$it" }
+        if (fp != null) synchronized(t) { t.fingerprint = fp }
+        val prev = seqPrev ?: run {
+            if (fp == null || (!AdvertFingerprint.mayRotate(a) && uuid == null)) return
+            tracks.values.filter { o ->
+                o !== t && synchronized(o) {
+                    o.fingerprint == fp && o.lastSeen <= now - ROTATION_SILENCE_MS && now - o.lastSeen <= ROTATION_WINDOW_MS
+                }
+            }.singleOrNull() ?: return
         }
-        val prev = candidates.singleOrNull() ?: return
+        val by = when { seqPrev != null -> "same probe fingerprint, frame count carried on"; uuid != null -> "same WPS UUID"; else -> "same advert fingerprint" }
         val carried = synchronized(prev) {
             (prev.hits.ifEmpty { prev.inherited }).map { h ->
                 h.copy(
                     confidence = (h.confidence - 5).coerceAtLeast(0),
-                    evidence = "Same device as ${prev.mac} before its address rotated (identical " +
-                        (if (uuid != null) "WPS UUID" else "advert fingerprint") +
-                        ", ${(now - prev.lastSeen) / 1000} s gap). Original evidence: ${h.evidence}"
+                    evidence = "Same device as ${prev.mac} before its address rotated ($by, " +
+                        "${(now - prev.lastSeen) / 1000} s gap). Original evidence: ${h.evidence}"
                 )
             } to (prev.name to prev.role)
         }
@@ -319,6 +333,7 @@ object DeviceRegistry {
         val follow = synchronized(prev) { Triple(prev.since, prev.path.toList(), prev.following) }
         synchronized(t) {
             t.linkedFrom = prev.mac
+            t.linkedBy = by
             t.inherited = carried.first
             if (t.name == null) t.name = carried.second.first
             if (t.role == null) t.role = carried.second.second
@@ -528,7 +543,7 @@ object DeviceRegistry {
         deviceType = hiddenRouterType(t) ?: t.identity.type,
         facts = t.identity.facts +
             listOfNotNull(
-                t.linkedFrom?.let { "Previous address" to "$it (address rotated, same advert fingerprint)" },
+                t.linkedFrom?.let { "Previous address" to "$it (address rotated, ${t.linkedBy ?: "same advert fingerprint"})" },
                 t.role?.let { "Patrol-kit role" to it }
             ) + if (full && Advert.Source.WIFI in t.sources) usbWifiFacts(t) else emptyList(),
         hits = t.hits,

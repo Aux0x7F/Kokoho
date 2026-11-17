@@ -29,6 +29,8 @@ class MonitorFrames {
         var wildcard = false; var flockIe = false
         /** How steadily it sends wildcard probes ([org.tucsoncommunity.kokoho.detect.ProbeBehaviour]). */
         var probeRate: org.tucsoncommunity.kokoho.detect.ProbeBehaviour.Counter? = null
+        /** Its last probe request's 802.11 sequence number (-1: none yet); the random address it used before ([rotatedFrom]). */
+        var lastSeq = -1; var previous: String? = null; var linkTried = false
         /** An access point's latest beacon elements and its "protected" capability bit; [iesAt]: when they, or a client's [traits], were read. */
         var ies: List<Pair<Int, ByteArray>>? = null; var iesAt = 0L; var privacy = false
         /** What a client's probe requests say about it in words ([ProbeIntel.traits]), refreshed every [IES_REFRESH_MS]. */
@@ -40,7 +42,15 @@ class MonitorFrames {
         // Per-window counters for driver diagnostics (debug builds).
         var winHits = 0; var winMeasured = 0; var winMax = -128; var winSum = 0L
         var winOfdm = 0; var winA = -128; var winB = -128
+        /** For the adapter's log ([diagnose]): its number there (no address), when first heard, whether logged yet. */
+        var id = 0; var firstSeen = 0L; var logged = false
     }
+
+    /** What one channel heard since the last log line ([diagnose]). */
+    private class Ch { var frames = 0; var beacons = 0; var probes = 0; var data = 0; var max = -128; var newDevices = 0 }
+    private val chs = java.util.TreeMap<Int, Ch>()
+    private var chSince = 0L
+    private var nextId = 0
 
     private val sightings = LinkedHashMap<String, Sighting>()
 
@@ -62,9 +72,13 @@ class MonitorFrames {
               pathA: Int? = null, pathB: Int? = null) {
         frameCount.incrementAndGet()
         PcapRecorder.frame(b, d, end, channel, rssi, now)
+        val c = chs.getOrPut(channel) { Ch() }
+        c.frames++
+        if (rssi != null && rssi > c.max) c.max = rssi
         if (end - d < 24 || end > b.size) return
         fun u8(i: Int) = b[i].toInt() and 0xff
         val fc = u8(d); val ftype = (fc shr 2) and 3; val sub = (fc shr 4) and 0xf
+        when { ftype == 0 && (sub == 8 || sub == 5) -> c.beacons++; ftype == 0 && sub == 4 -> c.probes++; ftype == 2 -> c.data++ }
         val fc1 = u8(d + 1); val toDs = fc1 and 0x01; val fromDs = (fc1 shr 1) and 0x01
         val a1 = d + 4; val a2 = d + 10; val a3 = d + 16
         val check = AntennaCheck.listening
@@ -73,7 +87,7 @@ class MonitorFrames {
         fun touch(at: Int, ap: Boolean, ch: Int = channel, sent: Boolean = true): Sighting? {
             if (!isReal(b, at)) return null
             val m = mac(b, at)
-            val s = sightings.getOrPut(m) { Sighting(m, ap) }
+            val s = sightings.getOrPut(m) { Sighting(m, ap).also { it.id = ++nextId; it.firstSeen = now; c.newDevices++ } }
             val rssi = rssi.takeIf { sent }
             if (sent) s.heard = true
             // Strongest reading of the last couple of seconds, so a device that drove off fades.
@@ -91,7 +105,8 @@ class MonitorFrames {
         }
         // Deauthentication (12) / disassociation (10) not protected by 802.11w: counted for flood alarms.
         if (ftype == 0 && (sub == 12 || sub == 10) && (fc1 and 0x40) == 0 && isReal(b, a3)) {
-            DeauthWatch.frame(mac(b, a3), (0 until 6).all { b[a1 + it] == 0xFF.toByte() }, channel, now)
+            val reason = if (ProbeIntel.withoutFcs(b, d, end) - d >= 26) u8(d + 24) or (u8(d + 25) shl 8) else -1
+            DeauthWatch.frame(mac(b, a3), (0 until 6).all { b[a1 + it] == 0xFF.toByte() }, channel, now, disassoc = sub == 10, reason = reason)
         }
         when (ftype) {
             0 -> when (sub) {
@@ -135,6 +150,9 @@ class MonitorFrames {
                     if (ies.flockIe) s.flockIe = true
                     ProbeIntel.fingerprint(b, d + 24, body)?.let { s.fingerprint = it }
                     ProbeIntel.skeletonHash(b, d + 24, body)?.let { s.skeleton = it }
+                    val seq = (u8(d + 22) or (u8(d + 23) shl 8)) shr 4
+                    if (!s.linkTried && s.fingerprint != null) { s.linkTried = true; s.previous = rotatedFrom(s, seq) }
+                    s.lastSeq = seq
                     if (s.traits == null || now - s.iesAt > IES_REFRESH_MS) {
                         ProbeIntel.traits(elements(b, d + 24, body))?.let { s.traits = it }; s.iesAt = now
                     }
@@ -180,6 +198,26 @@ class MonitorFrames {
             u8(body + 4) == 0x82 && u8(body + 5) == 0x84 && u8(body + 6) == 0x8B && u8(body + 7) == 0x96
     }
 
+    /**
+     * The random address the client [s] used before, as it starts probing with sequence number [seq]: exactly one client with
+     * the same probe fingerprint went quiet less than [LINK_WINDOW_MS] before [s] was first heard, and its last probe's sequence
+     * number is at most [LINK_SEQ_GAP] short of [seq]. Many phones keep one 802.11 frame counter across address changes
+     * (Vanhoef et al., "Why MAC address randomization is not enough", 2016; the idea, not code). Null when none or several.
+     */
+    private fun rotatedFrom(s: Sighting, seq: Int): String? {
+        if (!randomMac(s.mac)) return null
+        val prev = sightings.values.filter { o ->
+            o !== s && !o.isAp && o.fingerprint == s.fingerprint && o.lastSeq >= 0 && randomMac(o.mac) &&
+                o.lastSeen < s.firstSeen && s.firstSeen - o.lastSeen <= LINK_WINDOW_MS && ((seq - o.lastSeq) and 0xFFF) in 1..LINK_SEQ_GAP
+        }.singleOrNull() ?: return null
+        if (sightings.values.any { it.previous == prev.mac }) return null // that address already went on as another
+        if (UsbWifi.logAll) UsbWifi.log("${UsbWifi.label}: #${s.id} is #${prev.id} after an address change (same probe fingerprint, " +
+            "sequence +${(seq - prev.lastSeq) and 0xFFF}, ${(s.firstSeen - prev.lastSeen) / 1000} s apart)")
+        return prev.mac
+    }
+
+    private fun randomMac(m: String) = ((m.take(2).toIntOrNull(16) ?: 0) and 0x02) != 0
+
     private fun revealFromAssociation(b: ByteArray, from: Int, end: Int, bssid: String) {
         if (from >= end) return
         val name = Ies.read(b, from, end).ssid?.takeIf { validSsid(it) } ?: return
@@ -223,7 +261,8 @@ class MonitorFrames {
                 capabilities = s.ies?.let { capabilities(it, s.privacy) } ?: "",
                 standard = s.ies?.let { standard(it) },
                 upSince = s.upSince,
-                dataBytes = s.dataBytes
+                dataBytes = s.dataBytes,
+                previousMac = s.previous
             )
         }
         sightings.entries.removeAll { now - it.value.lastSeen > pruneMs }
@@ -231,8 +270,55 @@ class MonitorFrames {
     }
 
     fun emit(freshMs: Long, onFrame: (List<MonitorSighting>) -> Unit) {
-        val batch = drain(System.currentTimeMillis(), freshMs)
+        val now = System.currentTimeMillis()
+        diagnose(now)
+        val batch = drain(now, freshMs)
         if (batch.isNotEmpty()) onFrame(batch)
+    }
+
+    /**
+     * The adapter's log: what each channel heard, every minute (30 s with [UsbWifi.logAll]), and the planned channels
+     * that heard nothing; with [UsbWifi.logAll] also each device as it is first heard and as it goes. No full address
+     * or network name: a device is "#12", its maker part of the address at most.
+     */
+    private fun diagnose(now: Long) {
+        val tag = UsbWifi.label
+        if (UsbWifi.logAll) for (s in sightings.values) {
+            if (!s.logged && (s.isAp || s.heard)) { s.logged = true; UsbWifi.log("$tag: ${heardLine(s, now)}") }
+            else if (s.logged && now - s.lastSeen > PRUNE_MS)
+                UsbWifi.log("$tag: #${s.id} gone, heard for ${(s.lastSeen - s.firstSeen) / 1000} s, last ${s.rssi} dBm on ch ${s.channel}")
+        }
+        if (chSince == 0L) chSince = now
+        if (now - chSince < if (UsbWifi.logAll) 30_000L else 60_000L) return
+        val heard = chs.entries.joinToString(" · ") { (ch, c) ->
+            "$ch: ${c.frames} (${c.beacons} beacon, ${c.probes} probe, ${c.data} data)" +
+                (if (c.max > -128) " max ${c.max} dBm" else "") + (if (c.newDevices > 0) ", ${c.newDevices} new" else "")
+        }
+        val silent = UsbWifi.takePlanned().filter { it !in chs }.sorted()
+        UsbWifi.log("$tag: by channel, last ${(now - chSince) / 1000} s: ${heard.ifEmpty { "nothing heard" }}" +
+            if (silent.isNotEmpty()) " | nothing on ${silent.joinToString()}" else "")
+        chs.clear(); chSince = now
+    }
+
+    private fun heardLine(s: Sighting, now: Long): String {
+        val p = mutableListOf("#${s.id} new ${if (s.isAp) "access point" else "client"} ch ${s.channel} " +
+            if (s.measured) "${s.rssi} dBm" else "no signal reading")
+        p += if ((s.mac.take(2).toIntOrNull(16) ?: 0) and 0x02 != 0) "random address" else "maker ${s.mac.take(8)}"
+        if (s.isAp) {
+            s.ies?.let { p += capabilities(it, s.privacy).ifBlank { "open" }; p += standard(it) }
+            if (s.hidden) p += "hidden name"
+            s.upSince?.let { p += "up ${(now - it) / 3_600_000} h" }
+        } else {
+            if (s.bssid != null) p += "on a network"
+            if (s.wildcard) p += "wildcard probes"
+            if (s.probed.isNotEmpty()) p += "asked for ${s.probed.size} network names"
+            s.fingerprint?.let { p += "fingerprint $it" }
+            s.traits?.let { p += it }
+            if (s.flockIe) p += "Flock probe element"
+        }
+        s.wps?.product?.let { p += "WPS $it" }
+        if (s.dataBytes > 0) p += "${s.dataBytes / 1024} KB data"
+        return p.joinToString(", ")
     }
 
     /**
@@ -302,6 +388,9 @@ class MonitorFrames {
         fun validSsid(s: String) = s.isNotEmpty() && s.length <= 32 && s.none { it < ' ' || it == '�' }
 
         private const val MAX_PROBED = 16
+        /** [rotatedFrom]: the old address went quiet this shortly before the new one, its frame count this little behind. */
+        private const val LINK_WINDOW_MS = 30_000L
+        private const val LINK_SEQ_GAP = 64
         private const val IES_REFRESH_MS = 10_000L
         /** A beacon clock past 5 years is junk (a corrupt frame), not uptime. */
         private const val MAX_TSF_US = 5L * 365 * 86_400 * 1_000_000

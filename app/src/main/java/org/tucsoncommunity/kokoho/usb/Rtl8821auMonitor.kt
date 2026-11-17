@@ -18,37 +18,14 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbManager
 
-object Rtl8821auMonitor {
+class Rtl8821auMonitor {
     @Volatile var running = false; private set
     @Volatile private var stop = false
 
     private val frames = MonitorFrames()
-    private val HOP_24 = UsbWifi.HOP_24
-    /** Settings > External hardware: also hop 5 GHz (experimental); read when the adapter starts. */
-    @Volatile var scan5g = false
-    /** The adapter's light blinks with traffic (Settings > External hardware); off = it stays dark. Changes apply live. */
-    @Volatile var lightEnabled = true
     private var HOP = HOP_24
-    private const val MAX_PKT = 12000
-    private const val DWELL_MS = 350L
 
     private val FRESH_MS get() = (HOP.size * DWELL_MS * 9 / 5).coerceAtLeast(3000L)
-    private const val REPORT_MS = 10_000L
-    private const val FCS_LEN = 4
-
-    private const val OUT_VENDOR = 0x40; private const val IN_VENDOR = 0xC0
-    private const val VREQ = 0x05
-    private const val REG_RX_DRVINFO_SZ = 0x060F; private const val RCR_APP_PHYST_RXFF = 0x10000000
-
-    /**
-     * The adapter's light: LED pin 2 on the RTL8811AU / 8821AU (as Linux's rtw88 drives it).
-     * Bit 5 = software control, bit 3 = off. Bit 7 belongs to the 5 GHz band switch: kept as is.
-     */
-    private const val REG_LEDCFG2 = 0x4E
-    /** How often the light may toggle while frames arrive (a visible blink, a few writes a second). */
-    private const val BLINK_MS = 150L
-
-    private const val rA_LSSIWrite = 0xC90; private const val rHSSIRead = 0x8B0; private const val rA_PIRead = 0xD04
 
     private val rfShadow = HashMap<Int, Int>()
 
@@ -67,36 +44,9 @@ object Rtl8821auMonitor {
             UsbWifi.log("=== RTL8821AU bring-up (88xxau) ===")
             UsbWifi.log("RTL8821AU: RX EP=0x%02x".format(rx.address))
 
-            onStatus("RTL8821AU · powering on…")
-            resetMac(conn)
-            if (!powerOn(conn)) UsbWifi.log("RTL8821AU: power-on poll timed out (continuing)")
-            w16(conn, Rtl8821auTables.REG_CR, 0x0000)
-            w16(conn, Rtl8821auTables.REG_CR, Rtl8821auTables.CR_INIT16)
-            w16(conn, Rtl8821auTables.REG_RXFF_BNDY, Rtl8821auTables.RX_DMA_BOUNDARY)
-            w16(conn, Rtl8821auTables.REG_CR, r16(conn, Rtl8821auTables.REG_CR) or Rtl8821auTables.CR_MACEN8)
-            val cr = r16(conn, Rtl8821auTables.REG_CR)
-            UsbWifi.log("RTL8821AU: MAC on, REG_CR=0x%04x".format(cr))
-            if (cr == 0xEAEA) { onStatus("RTL8821AU: MAC didn't power on - unplug the adapter and plug it back in"); return }
-
-            onStatus("RTL8821AU · loading MAC/BB/RF…")
-            applyRegTable(conn, Rtl8821auTables.MAC_REG, rf = false)
-
-            run { val v = r8(conn, 0x02); w8(conn, 0x02, v or 0x04); w8(conn, 0x02, v or 0x07); w8(conn, 0x1F, 0x07) }
-            sleep(1)
-            applyRegTable(conn, Rtl8821auTables.PHY_REG, rf = false)
-            applyRegTable(conn, Rtl8821auTables.AGC_TAB, rf = false)
-            applyRegTable(conn, Rtl8821auTables.RADIOA, rf = true)
-
-            w8(conn, REG_RX_DRVINFO_SZ, 0x04)
-            w32(conn, Rtl8821auTables.REG_RCR, Rtl8821auTables.RCR_MONITOR or RCR_APP_PHYST_RXFF)
-            w16(conn, Rtl8821auTables.REG_RXFLTMAP0, Rtl8821auTables.RXFLTMAP_ALL)
-            w16(conn, Rtl8821auTables.REG_RXFLTMAP1, Rtl8821auTables.RXFLTMAP_ALL)
-            w16(conn, Rtl8821auTables.REG_RXFLTMAP2, Rtl8821auTables.RXFLTMAP_ALL)
             HOP = round(0)
             if (scan5g) UsbWifi.log("RTL8821AU: 5 GHz hopping on (experimental): ${HOP.joinToString()}")
-            channelTune(conn, HOP[0])
-            UsbWifi.log("RTL8821AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch ${HOP[0]}".format(
-                r32(conn, Rtl8821auTables.REG_RCR), r32(conn, 0x800)))
+            if (!bringUp(conn, HOP[0], onStatus)) return
             onStatus("RTL8821AU · live · 2.4 GHz monitor")
             runCatching { led(conn, lightEnabled) }
             UsbWifi.log(if (lightEnabled) "RTL8821AU: light on, blinks with received traffic" else "RTL8821AU: light off (Settings)")
@@ -114,9 +64,39 @@ object Rtl8821auMonitor {
         }
     }
 
-    /** The light's next state: dark when switched off; else it flips while frames arrive and stays on when the air is quiet. */
-    internal fun nextLight(enabled: Boolean, framesArrived: Boolean, on: Boolean): Boolean =
-        if (!enabled) false else if (framesArrived) !on else true
+    /** Power-on and MAC / BB / RF set-up, tuned to [ch]; false when the MAC didn't come on. Run again by [revive]. */
+    private fun bringUp(conn: UsbDeviceConnection, ch: Int, onStatus: (String) -> Unit): Boolean {
+        rfShadow.clear() // the radio is reloaded from its table
+        onStatus("RTL8821AU · powering on…")
+        resetMac(conn)
+        if (!powerOn(conn)) UsbWifi.log("RTL8821AU: power-on poll timed out (continuing)")
+        w16(conn, Rtl8821auTables.REG_CR, 0x0000)
+        w16(conn, Rtl8821auTables.REG_CR, Rtl8821auTables.CR_INIT16)
+        w16(conn, Rtl8821auTables.REG_RXFF_BNDY, Rtl8821auTables.RX_DMA_BOUNDARY)
+        w16(conn, Rtl8821auTables.REG_CR, r16(conn, Rtl8821auTables.REG_CR) or Rtl8821auTables.CR_MACEN8)
+        val cr = r16(conn, Rtl8821auTables.REG_CR)
+        UsbWifi.log("RTL8821AU: MAC on, REG_CR=0x%04x".format(cr))
+        if (cr == 0xEAEA) { onStatus("RTL8821AU: MAC didn't power on - unplug the adapter and plug it back in"); return false }
+
+        onStatus("RTL8821AU · loading MAC/BB/RF…")
+        applyRegTable(conn, Rtl8821auTables.MAC_REG, rf = false)
+
+        run { val v = r8(conn, 0x02); w8(conn, 0x02, v or 0x04); w8(conn, 0x02, v or 0x07); w8(conn, 0x1F, 0x07) }
+        sleep(1)
+        applyRegTable(conn, Rtl8821auTables.PHY_REG, rf = false)
+        applyRegTable(conn, Rtl8821auTables.AGC_TAB, rf = false)
+        applyRegTable(conn, Rtl8821auTables.RADIOA, rf = true)
+
+        w8(conn, REG_RX_DRVINFO_SZ, 0x04)
+        w32(conn, Rtl8821auTables.REG_RCR, Rtl8821auTables.RCR_MONITOR or RCR_APP_PHYST_RXFF)
+        w16(conn, Rtl8821auTables.REG_RXFLTMAP0, Rtl8821auTables.RXFLTMAP_ALL)
+        w16(conn, Rtl8821auTables.REG_RXFLTMAP1, Rtl8821auTables.RXFLTMAP_ALL)
+        w16(conn, Rtl8821auTables.REG_RXFLTMAP2, Rtl8821auTables.RXFLTMAP_ALL)
+        channelTune(conn, ch)
+        UsbWifi.log("RTL8821AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch $ch".format(
+            r32(conn, Rtl8821auTables.REG_RCR), r32(conn, 0x800)))
+        return true
+    }
 
     /** Light on or off under software control; the band-switch bit and the rest of the byte are kept. */
     private fun led(conn: UsbDeviceConnection, on: Boolean) {
@@ -176,13 +156,15 @@ object Rtl8821auMonitor {
         var total = 0L; var bufs = 0L; var lastLog = 0L; var hopAt = 0L; var lastEmit = 0L; var hopIdx = 0; var round = 0
         /** Good frames received, and how many there were at the light's last change. */
         var frames = 0L; var ledFrames = 0L; var ledAt = 0L; var ledOn = lightEnabled
+        /** Times the chip was brought up again because nothing arrived ([revive]); 0 again once data flows. */
+        var revivals = 0
         fun start() { val t = System.currentTimeMillis(); lastLog = t; hopAt = t; lastEmit = t; ledAt = t }
     }
 
     private fun rxTick(conn: UsbDeviceConnection, now: Long, st: RxState,
                        onFrame: (List<MonitorSighting>) -> Unit, onStatus: (String) -> Unit) {
         if (now - st.lastLog > 3000) {
-            val (aps, clients) = frames.live(now, REPORT_MS)
+            val (aps, clients) = frames.live(now, FRESH_MS)
             UsbWifi.log("RTL8821AU: RX ${st.bufs} bufs / ${st.total} B ch ${HOP[st.hopIdx]} | ${aps + clients} live ($aps AP · $clients client, ${frames.tracked} tracked)")
             st.lastLog = now
         }
@@ -199,8 +181,9 @@ object Rtl8821auMonitor {
             if (lock < 0 && st.hopIdx + 1 >= HOP.size) HOP = round(++st.round) // same length every round
             val ni = if (lock >= 0) lock else (st.hopIdx + 1) % HOP.size
             if (ni != st.hopIdx) { st.hopIdx = ni; runCatching { channelTune(conn, HOP[st.hopIdx]) } }
-            val (aps, clients) = frames.live(now, REPORT_MS)
-            onStatus("RTL8811AU / 8821AU · live · $aps access points · $clients devices · ch ${HOP[st.hopIdx]}")
+            val (aps, clients) = frames.live(now, FRESH_MS)
+            onStatus("RTL8811AU / 8821AU · live · $aps access points · $clients devices · ch ${HOP[st.hopIdx]}" +
+                if (st.revivals > MAX_REVIVALS) " · nothing heard: if WiFi networks are around, unplug the adapter for 5 s and plug it back in" else "")
             st.hopAt = System.currentTimeMillis() // the dwell starts once the retune is done
         }
     }
@@ -209,11 +192,33 @@ object Rtl8821auMonitor {
                        onFrame: (List<MonitorSighting>) -> Unit, onStatus: (String) -> Unit) {
         val st = RxState().apply { start() }
         BulkRx.run("RTL8821AU", conn, epRx, 24, 16384, { stop || UsbCtl.gone }, { b, n ->
-            st.total += n; st.bufs++
+            st.total += n; st.bufs++; st.revivals = 0
             st.frames += parseRxBuf(b, n, HOP[st.hopIdx])
-        }, syncTimeoutMs = 500) { now -> rxTick(conn, now, st, onFrame, onStatus) }
+        }, syncTimeoutMs = 500, onDeaf = { ms -> revive(conn, ms, st, onStatus) }) { now -> rxTick(conn, now, st, onFrame, onStatus) }
         frames.emit(FRESH_MS, onFrame)
         UsbWifi.log("RTL8821AU: RX loop stopped (${st.total} B)")
+    }
+
+    /**
+     * Nothing at all from the adapter for [silentMs]. Seen after a quick half-unplug and replug: the chip comes back,
+     * its registers read right, yet no frame ever arrives (tester log, 2.45.0). Brings the chip up again, twice at most;
+     * after that the status asks for a real replug. Logs the receive-path registers each time for the next log.
+     */
+    private fun revive(conn: UsbDeviceConnection, silentMs: Long, st: RxState, onStatus: (String) -> Unit) {
+        st.revivals++
+        if (st.revivals > MAX_REVIVALS + 1) return // already said so
+        val regs = runCatching {
+            "CR 0x%04x RCR 0x%08x SYS_FUNC 0x%02x RF_CTRL 0x%02x RXPKT 0x%08x".format(r16(conn, Rtl8821auTables.REG_CR),
+                r32(conn, Rtl8821auTables.REG_RCR), r8(conn, 0x02), r8(conn, 0x1F), r32(conn, REG_RXPKT_NUM))
+        }.getOrDefault("registers unreadable")
+        if (st.revivals > MAX_REVIVALS) {
+            UsbWifi.log("RTL8821AU: still nothing received after $MAX_REVIVALS restarts ($regs) - asking for a replug")
+            return
+        }
+        UsbWifi.log("RTL8821AU: nothing received for ${silentMs / 1000} s ($regs) - bringing the chip up again (${st.revivals} of $MAX_REVIVALS)")
+        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8821AU: restart failed — ${it.message}") }
+        st.ledOn = !st.ledOn // the light was reset with the chip: the next blink step writes it again
+        st.hopAt = System.currentTimeMillis()
     }
 
     /** Parses one USB buffer; returns how many good frames it held. */
@@ -303,7 +308,40 @@ object Rtl8821auMonitor {
         val cur = rfRead(conn, addr); rfWrite(conn, addr, (cur and mask.inv()) or ((v shl sh(mask)) and mask))
     }
 
-    private fun sh(mask: Int) = Integer.numberOfTrailingZeros(mask)
-    private fun le32(b: ByteArray, i: Int) = (b[i].toInt() and 0xff) or ((b[i+1].toInt() and 0xff) shl 8) or ((b[i+2].toInt() and 0xff) shl 16) or ((b[i+3].toInt() and 0xff) shl 24)
-    private fun sleep(ms: Int) = try { Thread.sleep(ms.toLong()) } catch (_: InterruptedException) {}
+    companion object {
+        private val HOP_24 = UsbWifi.HOP_24
+        /** Settings > External hardware: also hop 5 GHz (experimental); read when the adapter starts. */
+        @Volatile var scan5g = false
+        /** The adapter's light blinks with traffic (Settings > External hardware); off = it stays dark. Changes apply live. */
+        @Volatile var lightEnabled = true
+        private const val MAX_PKT = 12000
+        private const val DWELL_MS = 350L
+        /** Chip restarts when nothing arrives ([revive]) before asking for a replug. */
+        private const val MAX_REVIVALS = 2
+        /** RX packet count and RX DMA state (REG_RXPKT_NUM), logged when the receiver is deaf. */
+        private const val REG_RXPKT_NUM = 0x284
+        private const val FCS_LEN = 4
+
+        private const val OUT_VENDOR = 0x40; private const val IN_VENDOR = 0xC0
+        private const val VREQ = 0x05
+        private const val REG_RX_DRVINFO_SZ = 0x060F; private const val RCR_APP_PHYST_RXFF = 0x10000000
+
+        /**
+         * The adapter's light: LED pin 2 on the RTL8811AU / 8821AU (as Linux's rtw88 drives it).
+         * Bit 5 = software control, bit 3 = off. Bit 7 belongs to the 5 GHz band switch: kept as is.
+         */
+        private const val REG_LEDCFG2 = 0x4E
+        /** How often the light may toggle while frames arrive (a visible blink, a few writes a second). */
+        private const val BLINK_MS = 150L
+
+        private const val rA_LSSIWrite = 0xC90; private const val rHSSIRead = 0x8B0; private const val rA_PIRead = 0xD04
+
+        /** The light's next state: dark when switched off; else it flips while frames arrive and stays on when the air is quiet. */
+        internal fun nextLight(enabled: Boolean, framesArrived: Boolean, on: Boolean): Boolean =
+            if (!enabled) false else if (framesArrived) !on else true
+
+        private fun sh(mask: Int) = Integer.numberOfTrailingZeros(mask)
+        private fun le32(b: ByteArray, i: Int) = (b[i].toInt() and 0xff) or ((b[i+1].toInt() and 0xff) shl 8) or ((b[i+2].toInt() and 0xff) shl 16) or ((b[i+3].toInt() and 0xff) shl 24)
+        private fun sleep(ms: Int) = try { Thread.sleep(ms.toLong()) } catch (_: InterruptedException) {}
+    }
 }

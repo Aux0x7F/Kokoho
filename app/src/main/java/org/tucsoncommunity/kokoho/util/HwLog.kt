@@ -13,9 +13,11 @@ import java.util.concurrent.ConcurrentHashMap
  * files/[file] (the previous one kept as [file].1), so it survives a restart. Privacy-safe lines only: no nearby
  * device's address or name, no server name or IP address ([redact]).
  */
-class HwLog(val title: String, val file: String) {
+class HwLog(val title: String, val file: String, private val maxBytes: Long = 1_000_000L) {
     private val lines = ArrayDeque<String>()
     private val lastShape = ConcurrentHashMap<String, String>()
+    /** Each line as it is logged (the SDR's go into traces and snapshots with time and position: [org.tucsoncommunity.kokoho.service.SdrTrack]). */
+    @Volatile var onLine: ((String) -> Unit)? = null
 
     fun log(line: String) {
         Log.d("HwLog", "$title: $line")
@@ -25,11 +27,12 @@ class HwLog(val title: String, val file: String) {
             while (lines.size > 300) lines.removeFirst()
             dir?.let { File(it, file) }?.let { f ->
                 runCatching {
-                    if (f.length() > MAX_BYTES) { val old = File(f.path + ".1"); old.delete(); f.renameTo(old) }
+                    if (f.length() > maxBytes) { val old = File(f.path + ".1"); old.delete(); f.renameTo(old) }
                     f.appendText(SimpleDateFormat("MM-dd HH:mm:ss", Locale.US).format(now) + "  " + line + "\n")
                 }
             }
         }
+        onLine?.let { runCatching { it(line) } }
     }
 
     /**
@@ -71,7 +74,6 @@ class HwLog(val title: String, val file: String) {
     }
 
     companion object {
-        private const val MAX_BYTES = 1_000_000L
         @Volatile private var dir: File? = null
 
         /** Where the log files go; set when the app starts. */
@@ -91,7 +93,8 @@ class HwLog(val title: String, val file: String) {
 
 /** Each piece of hardware's own log. */
 object HwLogs {
-    val usbWifi = HwLog("USB WiFi adapter", "usbwifi.log")
+    // 4 MB a file: "Log everything" fills 1 MB in about 20 min of driving, this keeps a few hours.
+    val usbWifi = HwLog("USB WiFi adapter", "usbwifi.log", 4_000_000L)
     val usbBt = HwLog("USB Bluetooth adapter", "usbbt.log")
     val sdr = HwLog("RTL-SDR / HackRF", "sdr.log")
     val esp = HwLog("ESP32 board", "esp32.log")
@@ -102,4 +105,23 @@ object HwLogs {
     val relay = HwLog("Sentinel Link internet relay", "relay.log")
     val phone = HwLog("Phone Bluetooth and WiFi", "phone.log")
     val all = listOf(phone, usbWifi, usbBt, sdr, esp, meshRadio, ouiSpy, meshNode, link, relay)
+
+    /** [log]'s hardware status now, for its report. */
+    fun status(log: HwLog): String = when (log) {
+        phone -> if (org.tucsoncommunity.kokoho.service.ScanForegroundService.isRunning) "scanning" else ""
+        usbWifi -> org.tucsoncommunity.kokoho.usb.UsbWifi.status
+        usbBt -> org.tucsoncommunity.kokoho.usb.UsbBluetooth.status
+        sdr -> org.tucsoncommunity.kokoho.sdr.SdrRadio.status
+        esp -> org.tucsoncommunity.kokoho.esp.EspBoards.status
+        meshRadio -> org.tucsoncommunity.kokoho.esp.MeshBle.status
+        ouiSpy -> org.tucsoncommunity.kokoho.esp.OuiSpyBle.status
+        meshNode -> org.tucsoncommunity.kokoho.link.MeshNode.status
+        link -> org.tucsoncommunity.kokoho.link.PhoneLink.status
+        relay -> org.tucsoncommunity.kokoho.link.MqttRelay.safeStatus
+        else -> ""
+    }
+
+    /** [log] as Settings › Export a hardware log sends it, and adb reads it ([LogProvider]). */
+    fun report(context: Context, log: HwLog): String =
+        log.report(context, status(log), if (log in listOf(usbWifi, usbBt, sdr, esp)) org.tucsoncommunity.kokoho.usb.UsbWifi.usbDevices(context) else null)
 }

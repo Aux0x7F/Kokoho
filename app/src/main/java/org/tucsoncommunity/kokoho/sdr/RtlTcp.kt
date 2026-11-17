@@ -19,6 +19,8 @@ class RtlTcp(private val host: String, private val port: Int, private val log: (
     override var sampleRate = 0; private set
     override var ctlErrors = 0; private set
     @Volatile override var lost = false; private set
+    /** Why [open] failed, in a few words for the status line; null once connected. */
+    @Volatile var why: String? = null; private set
     override val tunerWriteFails = 0
     override val settleReads = 2
 
@@ -39,11 +41,13 @@ class RtlTcp(private val host: String, private val port: Int, private val log: (
             val h = ByteArray(HEADER)
             if (fill(h, 0, HEADER) < HEADER || String(h, 0, 4, Charsets.US_ASCII) != "RTL0") {
                 log("Network SDR: $host:$port doesn't answer like an rtl_tcp server")
+                why = "not an rtl_tcp server"
                 return fail()
             }
             log("Network SDR: connected to $host:$port, tuner ${TUNERS[be32(h, 4)] ?: "type ${be32(h, 4)}"}, ${be32(h, 8)} gain steps")
         } catch (e: IOException) {
             log("Network SDR: can't connect to $host:$port (${e.javaClass.simpleName})")
+            why = reason(e)
             return fail()
         }
         command(AGC, 0)
@@ -57,18 +61,26 @@ class RtlTcp(private val host: String, private val port: Int, private val log: (
     private fun fail(): Boolean { lost = true; close(); return false }
 
     override fun close() {
+        if (biasTee) command(BIAS_TEE, 0) // the server keeps the dongle open: no power left on its antenna
+        biasTee = false
         runCatching { socket?.close() }
         socket = null; input = null; output = null
     }
+
+    @Volatile override var ppm = 0.0
+
+    /** rtl_tcp's bias-tee command (servers built from librtlsdr 0.6 or later; older ones ignore it). */
+    override fun setBiasTee(on: Boolean): Boolean = command(BIAS_TEE, if (on) 1 else 0).also { if (it) biasTee = on }
+    private var biasTee = false
 
     /** librtlsdr picks the nearest rate the dongle can make; close enough for the spectrum. */
     override fun setSampleRate(rate: Int) {
         if (command(SAMPLE_RATE, rate)) sampleRate = rate
     }
 
-    /** Tunes to [hz]; the server doesn't say whether the PLL locked, so only the tuner's range is checked. */
+    /** Tunes to [hz] (corrected by [ppm]); the server doesn't say whether the PLL locked, so only the tuner's range is checked. */
     override fun tune(hz: Long): Boolean {
-        if (hz !in MIN_HZ..MAX_HZ || !command(FREQUENCY, hz.toInt())) return false
+        if (hz !in MIN_HZ..MAX_HZ || !command(FREQUENCY, SdrDevice.corrected(hz, ppm).toInt())) return false
         // shortcut: skips a fixed amount for the samples still on their way from before the retune (~50 ms at 2 MS/s); measure the round trip if sweeps over slow WiFi still show the old frequency.
         skip(available() + STALE_BYTES)
         return true
@@ -132,6 +144,14 @@ class RtlTcp(private val host: String, private val port: Int, private val log: (
 
     companion object {
         const val DEFAULT_PORT = 1234
+        /** A failed connection in words: a typo in the address reads differently from a server that is off. */
+        internal fun reason(e: IOException) = when (e) {
+            is java.net.UnknownHostException -> "host not found"
+            is SocketTimeoutException -> "timed out"
+            is java.net.NoRouteToHostException -> "host unreachable"
+            is java.net.ConnectException -> if (e.message?.contains("refused", ignoreCase = true) != false) "connection refused" else "host unreachable"
+            else -> "network error"
+        }
         private const val HEADER = 12
         private const val CONNECT_MS = 5_000
         private const val READ_MS = 2_000

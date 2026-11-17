@@ -90,6 +90,12 @@ interface KnownDeviceDao {
         (vendor LIKE '%cradlepoint%' OR vendor LIKE '%sierra wireless%' OR vendor LIKE '%peplink%' OR vendor LIKE '%inseego%')""")
     suspend fun familiarRouters(minSessions: Int, before: Long): List<String>
 
+    /** Router and printer makers' devices heard in [minSessions] sessions or more, the first before [before] ([org.tucsoncommunity.kokoho.detect.FixedRouter]). */
+    @Query("""SELECT mac FROM known_devices WHERE sessions >= :minSessions AND firstSeen < :before AND
+        (vendor LIKE '%cradlepoint%' OR vendor LIKE '%sierra wireless%' OR vendor LIKE '%peplink%' OR vendor LIKE '%inseego%' OR
+         vendor LIKE '%zebra%' OR vendor LIKE '%brother%')""")
+    suspend fun familiarFixed(minSessions: Int, before: Long): List<String>
+
     @Query("SELECT mac FROM known_devices WHERE favorite = 1")
     suspend fun favorites(): List<String>
 

@@ -8,19 +8,21 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.tucsoncommunity.kokoho.databinding.ActivityWaterfallBinding
+import org.tucsoncommunity.kokoho.sdr.AudioDemod
 import org.tucsoncommunity.kokoho.sdr.FreqNames
 import org.tucsoncommunity.kokoho.sdr.RadioWatch
 import org.tucsoncommunity.kokoho.sdr.SdrRadio
 import org.tucsoncommunity.kokoho.sdr.SdrWaterfall
+import org.tucsoncommunity.kokoho.util.HwLogs
 import org.tucsoncommunity.kokoho.util.applySystemBarInsets
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The SDR's live radio waterfall. It opens on the band sweep (a row per sweep of the watched bands,
- * radio detection carries on); tapping a frequency or Tune zooms in: the SDR holds those ~2 MHz for a
- * fast live view, and detection pauses until Back to sweep or leaving the screen. Receive-only.
+ * The SDR's live radio waterfall. Opens on the band sweep (one row per sweep of the watched bands);
+ * tapping a frequency or Tune zooms in (~2 MHz live view + optional live audio demodulation), and
+ * detection resumes immediately on Back to sweep or closing the screen. Receive-only.
  */
 class WaterfallActivity : AppCompatActivity() {
 
@@ -33,8 +35,16 @@ class WaterfallActivity : AppCompatActivity() {
         while (true) { val row = queue.poll() ?: break; binding.waterfall.add(row); any = true }
         if (any) binding.waterfall.invalidate()
     }
-    /** Rows show the zoomed-in view (vs the sweep), to clear the view once when it switches. */
+    /** An antenna check is waiting for its answer. */
+    private var checking = false
+    /** Rows show the zoomed-in view (vs the sweep), to clear queued rows when switching. */
     private var showingTuned: Boolean? = null
+
+    private val onRow: (SdrWaterfall.Row) -> Unit = { row ->
+        queue.add(row)
+        while (queue.size > MAX_QUEUED) queue.poll()
+        if (posted.compareAndSet(false, true)) binding.waterfall.post(drain)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,7 +57,7 @@ class WaterfallActivity : AppCompatActivity() {
             bgColorArgb = bg,
             menuItemsProvider = {
                 listOf(
-                    KokohoJourneyUi.SubjourneyMenuItem("Tune Frequency…") { askFrequency() },
+                    KokohoJourneyUi.SubjourneyMenuItem("Tune / Listen…") { askFrequency() },
                     KokohoJourneyUi.SubjourneyMenuItem("Run Antenna Check") { antennaCheck() }
                 )
             }
@@ -57,28 +67,29 @@ class WaterfallActivity : AppCompatActivity() {
         shell.applySystemBarInsets()
         binding.waterfall.onTap = { hz -> zoom(hz) }
         binding.tuneButton.setOnClickListener { askFrequency() }
-        binding.sweepButton.setOnClickListener { SdrRadio.tuneHz = null; refresh() }
+        binding.sweepButton.setOnClickListener { SdrRadio.listen = false; SdrRadio.tuneHz = null; refresh() }
         binding.antennaButton.setOnClickListener { antennaCheck() }
-        // Opened from a radio transmission's Locate: straight to its frequency (not again after a rotation).
         if (savedInstanceState == null) intent.getLongExtra(EXTRA_TUNE_HZ, 0L).takeIf { it > 0 }?.let { zoom(it) }
         refreshWhileStarted(1000) { refresh() }
     }
 
     override fun onStart() {
         super.onStart()
-        SdrWaterfall.listener = { row ->
-            queue.add(row)
-            while (queue.size > MAX_QUEUED) queue.poll()
-            if (posted.compareAndSet(false, true)) binding.waterfall.post(drain)
-        }
+        SdrWaterfall.listener = onRow
+        SdrRadio.screenOpened()
+        HwLogs.sdr.log("Radio waterfall screen opened")
     }
 
     override fun onStop() {
         super.onStop()
         SdrWaterfall.listener = null
+        HwLogs.sdr.log("Radio waterfall screen closed")
         queue.clear()
-        // Radio detection never stays paused behind a closed screen (a redraw for a new theme comes straight back).
-        if (!isChangingConfigurations) SdrRadio.tuneHz = null
+        if (!isChangingConfigurations) {
+            SdrRadio.screenClosed()
+            SdrRadio.listen = false
+            SdrRadio.tuneHz = null
+        }
     }
 
     override fun onSupportNavigateUp(): Boolean { finish(); return true }
@@ -89,25 +100,54 @@ class WaterfallActivity : AppCompatActivity() {
         refresh()
     }
 
-    /** One reading of the weather-radio channels: always on the air in the US and Canada, so a quick test of antenna and SDR. */
+    /** Quick test of FM broadcast + NOAA weather radio channels to verify antenna and dongle health. */
     private fun antennaCheck() {
         if (!SdrRadio.running) { Toast.makeText(this, "No SDR running", Toast.LENGTH_SHORT).show(); return }
-        Toast.makeText(this, "Listening on the weather channels…", Toast.LENGTH_SHORT).show()
-        SdrRadio.weatherCheck = { r ->
+        checking = true
+        refresh()
+        SdrRadio.antennaCheck = { r ->
             runOnUiThread {
-                if (!isFinishing && !isDestroyed) com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                    .setTitle("Antenna check")
-                    .setMessage(r.verdict + "\n\nMeasured on the weather radio channels, 162.400 to 162.550 MHz.")
-                    .setPositiveButton("OK", null).show()
+                checking = false
+                if (!isDestroyed) refresh()
+                if (!isFinishing && !isDestroyed) {
+                    MaterialAlertDialogBuilder(this)
+                        .setTitle("Antenna check")
+                        .setMessage(r.verdict + "\n\nMeasured on FM radio (87.5–108 MHz) and NOAA weather radio (162.400–162.550 MHz).")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
             }
         }
     }
 
     private fun askFrequency() {
         if (!SdrRadio.running) { Toast.makeText(this, "No SDR running", Toast.LENGTH_SHORT).show(); return }
+        val listenItem = SdrRadio.tuneHz?.let { hz ->
+            if (SdrRadio.listen) "Stop listening"
+            else String.format(Locale.US, "Listen to %.4f MHz\n%s, at the phone's media volume", hz / 1e6,
+                AudioDemod.modeFor(hz).label.replaceFirstChar { it.uppercase() })
+        }
+        val items = listOfNotNull(listenItem) + PRESETS.map { "${it.name}\n${it.about}" } + "Type a frequency…"
+        MaterialAlertDialogBuilder(this)
+            .setTitle("What to look at")
+            .setItems(items.toTypedArray()) { _, picked ->
+                if (listenItem != null && picked == 0) {
+                    SdrRadio.listen = !SdrRadio.listen
+                    refresh()
+                    return@setItems
+                }
+                val i = if (listenItem != null) picked - 1 else picked
+                PRESETS.getOrNull(i)?.let { zoom(it.hz) } ?: typeFrequency()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun typeFrequency() {
         val input = EditText(this).apply {
             hint = "Frequency in MHz, e.g. 155.475"
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            keyListener = android.text.method.DigitsKeyListener.getInstance("0123456789.,")
+            setRawInputType(InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
             SdrRadio.tuneHz?.let { setText(String.format(Locale.US, "%.4f", it / 1e6)) }
         }
         val pad = (20 * resources.displayMetrics.density).toInt()
@@ -129,32 +169,54 @@ class WaterfallActivity : AppCompatActivity() {
         if (showingTuned != (tuned != null)) {
             showingTuned = tuned != null
             queue.clear()
-            binding.waterfall.clear()
         }
         val running = SdrRadio.running
+        binding.waterfall.focusHz = tuned
         binding.statusText.text = when {
             !running -> SdrRadio.status.ifBlank { "No SDR running" }
             tuned != null -> String.format(Locale.US, "%.4f MHz", tuned / 1e6) +
-                (FreqNames.lookup(tuned, RadioWatch.STEP_HZ)?.let { " · ${it.name}" } ?: "") + "\n" + SdrRadio.status
+                ((FreqNames.lookup(tuned, RadioWatch.STEP_HZ)?.name ?: PRESETS.firstOrNull { it.hz == tuned }?.name)?.let { " · $it" } ?: "") +
+                "\n" + SdrRadio.status
             else -> SdrRadio.status
         }
         binding.hintText.text = when {
             !running -> "Plug in an RTL-SDR or HackRF and start scanning to see the radio bands live."
-            tuned != null -> "Zoomed in on about 2 MHz. Radio detection is paused until you go back to the sweep. Tap to move."
-            SdrRadio.mode == SdrRadio.Mode.ADSB -> "The SDR is receiving ADS-B. Tune to look at a frequency."
-            SdrRadio.mode == SdrRadio.Mode.P25 -> "The SDR is following a P25 control channel. Tune to look at a frequency."
-            SdrRadio.mode == SdrRadio.Mode.PAGER -> "The SDR is decoding pagers. Tune to look at a frequency."
-            else -> "One row per sweep of your watched bands, newest at the top. Tap a signal to zoom in."
+            tuned != null -> (PRESETS.firstOrNull { it.hz == tuned }?.look ?: "Zoomed in on about 2 MHz.") +
+                " Pinch to zoom; tap or use arrow keys to move; Tune › Listen plays audio; Back to sweep resumes scanning."
+            SdrRadio.p25Hold != null -> "The SDR is holding a P25 talkgroup. Tune to look at a frequency."
+            else -> "One row per sweep of your watched bands, newest on top. Tap or pinch to zoom in, tap again at 8× to tune, or tap Tune."
         }
-        binding.sweepButton.visibility = if (tuned != null) View.VISIBLE else View.GONE
+        binding.sweepButton.isEnabled = running && tuned != null
         binding.tuneButton.isEnabled = running
-        binding.antennaButton.isEnabled = running
+        binding.antennaButton.isEnabled = running && !checking
+        binding.antennaButton.text = if (checking) "Checking…" else "Antenna check"
+        androidx.core.view.ViewCompat.setStateDescription(binding.waterfall, when {
+            !running -> "No SDR running"
+            tuned != null -> String.format(Locale.US, "Zoomed in on %.3f MHz", tuned / 1e6)
+            else -> "Sweep of your watched bands"
+        })
     }
 
+    private class Preset(val name: String, val about: String, val hz: Long, val look: String)
+
     companion object {
-        /** A frequency (Hz) to zoom in on as the screen opens. */
+        private val PRESETS = listOf(
+            Preset("FM radio", "Broadcast stations, always on: a quick first test", 98_000_000L,
+                "FM broadcast stations show as wide bright stripes."),
+            Preset("Weather radio (NOAA)", "162.400 to 162.550 MHz", 162_475_000L,
+                "A nearby NOAA transmitter shows as a steady continuous stripe."),
+            Preset("Federal VHF", "162 to 174 MHz tactical/repeater band", 168_500_000L,
+                "P25 and analog VHF channels show as sharp intermittent columns."),
+            Preset("Federal UHF", "406.1 to 420 MHz federal band", 412_000_000L,
+                "Federal UHF repeaters and simplex radios show as crisp narrow bursts."),
+            Preset("700 / 800 MHz P25", "Trunked control & voice channels", 856_000_000L,
+                "Control channels run continuously; voice grants appear beside them."),
+            Preset("Aircraft voice", "Pilots and towers, 118 to 120 MHz", 119_000_000L,
+                "AM airband transmissions show as short bright marks."),
+            Preset("Aircraft transponders", "ADS-B, 1090 MHz", 1_090_000_000L,
+                "Mode S / ADS-B squitters appear as short speckles around 1090 MHz.")
+        )
         const val EXTRA_TUNE_HZ = "tune_hz"
-        /** Rows waiting for the screen; older ones are dropped if it falls behind. */
         private const val MAX_QUEUED = 64
         private const val MIN_MHZ = 1.0
         private const val MAX_MHZ = 6000.0

@@ -128,8 +128,8 @@ class KokohoTest {
         assertTrue(distFt.startsWith("Distance: ~") && distFt.contains("±500 ft"))
         assertEquals("±500 ft", KokohoPostureEngine.formatAccuracyRadius(activity, 150))
 
-        // Verify top-level tabs are Monitor and Map (Utilities moved to Sandwich menu in v1.3.0)
-        assertEquals(listOf("Monitor", "Map"), KokohoViews.Tab.values().map { it.title })
+        // Verify top-level tabs enum (Monitor, Map, Search; Search gated to internal channel via visibleTabs)
+        assertEquals(listOf("Monitor", "Map", "Search"), KokohoViews.Tab.values().map { it.title })
 
         // Metric option in Settings
         KokohoSignatures.setImperialUnits(activity, false)
@@ -198,10 +198,10 @@ class KokohoTest {
         views.syncRunningState(true)
         assertNotNull(views.menuButton)
 
-        // Verify Share / Stop action-verb binary pill: shows pause bars + "Share" when paused,
+        // Verify Share / Stop action-verb binary pill: plain "Share" text when paused (pause bars removed in v1.3.6),
         // slowly pulsing red dot + "Stop" when active, and dims ("Share") when disabled in Settings > Privacy.
         assertEquals("Share", views.shareToggleButton.text.toString())
-        assertTrue(views.isSharingShowingPause)
+        assertFalse(views.isSharingShowingPause)
         assertFalse(views.isSharingPulsingRed)
         assertFalse(KokohoSignatures.isContributeObservationsEnabled(activity))
         renderViewToPng(views.shareToggleButton, 360, 120, Color.parseColor("#1B5E20"), "kokoho_v1_2_1_sharing_paused.png")
@@ -215,20 +215,20 @@ class KokohoTest {
 
         views.shareToggleButton.performClick()
         assertEquals("Share", views.shareToggleButton.text.toString())
-        assertTrue(views.isSharingShowingPause)
+        assertFalse(views.isSharingShowingPause)
         assertFalse(views.isSharingPulsingRed)
         assertFalse(KokohoSignatures.isContributeObservationsEnabled(activity))
 
         KokohoSignatures.setContributionAllowedInSettings(activity, false)
         views.syncSharePillState()
         assertEquals("Share", views.shareToggleButton.text.toString())
-        assertTrue(views.isSharingShowingPause)
+        assertFalse(views.isSharingShowingPause)
         assertFalse(views.isSharingPulsingRed)
         assertEquals(0.55f, views.shareToggleButton.alpha, 0.02f)
         KokohoSignatures.setContributionAllowedInSettings(activity, true)
         views.syncSharePillState()
         assertEquals("Share", views.shareToggleButton.text.toString())
-        assertTrue(views.isSharingShowingPause)
+        assertFalse(views.isSharingShowingPause)
 
         // Verify intersection "rmat" traffic cabinets and retail routers are excluded while 7400 Oracle signals match
         assertNull(KokohoSignatures.matchOuiOrSsid("00:30:44:55:00:06", "rmat", "Cradlepoint"))

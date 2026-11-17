@@ -19,8 +19,6 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
 
     override val label = "RTL-SDR"
     override val settleReads = 2
-    /** Low-IF tuner (LO at f + IF): a strong transmitter at f + 2*IF also lands in the IF passband, mirrored around the centre. */
-    override fun imageHz(centerHz: Long, hz: Long): Long? = 2 * (centerHz + intFreq) - hz
 
     enum class Tuner { R820T, R828D }
 
@@ -67,15 +65,16 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
         val maker = runCatching { device.manufacturerName }.getOrNull().orEmpty()
         val product = runCatching { device.productName }.getOrNull().orEmpty()
         setI2cRepeater(true)
-        // a second look when nothing answers: right after plug-in one I2C read can go unanswered
-        for (attempt in 0 until 2) {
+        // More looks when nothing answers: right after a plug-in the tuner can stay silent for most of a second,
+        // and two looks 50 ms apart called a Blog V4L "not supported" six times in a row (tester log, 2026-11-10).
+        for (attempt in 0 until 6) {
             tuner = when {
                 i2cReadReg(R820T_I2C_ADDR, 0x00) == R82XX_CHECK_VAL -> Tuner.R820T
                 i2cReadReg(R828D_I2C_ADDR, 0x00) == R82XX_CHECK_VAL -> Tuner.R828D
                 else -> null
             }
             if (tuner != null) break
-            try { Thread.sleep(50) } catch (_: InterruptedException) {}
+            try { Thread.sleep(200) } catch (_: InterruptedException) {}
         }
         blogV4 = tuner == Tuner.R828D && maker == "RTLSDRBlog" && product == "Blog V4"
         blogV4L = tuner == Tuner.R820T && maker == "RTLSDRBlog" && product == "Blog V4L"
@@ -96,6 +95,7 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
     override fun close() {
         if (lost) return
         runCatching {
+            if (biasTee) setBiasTee(false) // no power left on the antenna once the scan is over
             setI2cRepeater(true); r82xxStandby(); setI2cRepeater(false)
             writeReg(SYSB, DEMOD_CTL, 0x20, 1) // power off the demodulator and ADCs
         }
@@ -160,10 +160,23 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
         if (centerHz > 0) tune(centerHz)
     }
 
-    /** Tunes to [hz]; false when the tuner's PLL doesn't lock. */
+    @Volatile override var ppm = 0.0
+
+    // The R820T's LO sits intFreq above the wanted signal: a strong one 2 x intFreq above shows mirrored into the chunk.
+    override fun imageHz(centerHz: Long, hz: Long): Long? = 2 * (centerHz + intFreq) - hz
+
+    /** GPIO 0 powers the antenna port on RTL-SDR Blog dongles (librtlsdr's rtlsdr_set_bias_tee). */
+    override fun setBiasTee(on: Boolean): Boolean {
+        setGpioOutput(0); setGpioBit(0, on)
+        biasTee = on
+        return true
+    }
+    private var biasTee = false
+
+    /** Tunes to [hz] (corrected by [ppm]); false when the tuner's PLL doesn't lock. */
     override fun tune(hz: Long): Boolean {
         setI2cRepeater(true)
-        val ok = r82xxSetFreq(hz)
+        val ok = r82xxSetFreq(SdrDevice.corrected(hz, ppm))
         setI2cRepeater(false)
         if (ok) centerHz = hz
         return ok
@@ -183,7 +196,11 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
     override fun read(buf: ByteArray, len: Int): Int {
         val t0 = System.nanoTime()
         val n = conn.bulkTransfer(rx, buf, len, 1000)
-        if (n > 0) { fastFails = 0; return n }
+        if (n > 0) {
+            // Whether clearing the endpoint worked: the log only said that reads failed.
+            if (fastFails > 0) log("RTL-SDR: samples back after $fastFails failed reads")
+            fastFails = 0; return n
+        }
         // A quiet stream takes the whole timeout; a read that fails at once is a stalled endpoint or a lost
         // interface. Clear the stall and pause instead of spinning, and give the dongle up after ~10 s of it
         // (SdrRadio then opens it again from scratch).

@@ -147,8 +147,10 @@ class KokohoViews(
             (sharePulseAnimator?.isStarted == true)
 
     val isSharingShowingPause: Boolean
-        get() = sharingIndicatorDrawable.mode == SharingIndicatorMode.PAUSED_BARS ||
-            sharingIndicatorDrawable.mode == SharingIndicatorMode.DISABLED_BARS
+        get() = shareToggleButton.icon != null && (
+            sharingIndicatorDrawable.mode == SharingIndicatorMode.PAUSED_BARS ||
+                sharingIndicatorDrawable.mode == SharingIndicatorMode.DISABLED_BARS
+            )
 
     private val topHeaderBar: LinearLayout
     private val headerLogo: ImageView

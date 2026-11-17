@@ -213,6 +213,14 @@ object KokohoSignatures {
     @Volatile
     private var witnessCache: MutableMap<String, WitnessReportRecord> = mutableMapOf()
 
+    private const val KEY_CONFIRMED_EVIDENCE_FACETS = "confirmed_evidence_facets_v1"
+    private val confirmedEvidenceFacets: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    fun clearWitnessAndConfirmedCacheInMemory() {
+        witnessCache.clear()
+        confirmedEvidenceFacets.clear()
+    }
+
     @Synchronized
     fun ensureLoaded(context: Context) {
         Units.imperial = isImperialUnits(context)
@@ -509,18 +517,120 @@ object KokohoSignatures {
         rawId.removePrefix("kokoho:").trim()
 
     private fun loadWitnessCache(context: Context) {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_WITNESS_REPORTS_JSON, null) ?: return
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs.getStringSet(KEY_CONFIRMED_EVIDENCE_FACETS, null)?.forEach { f ->
+            if (f.isNotBlank()) confirmedEvidenceFacets.add(f.trim())
+        }
+        val raw = prefs.getString(KEY_WITNESS_REPORTS_JSON, null) ?: return
         runCatching {
             val type = object : TypeToken<List<WitnessReportRecord>>() {}.type
             val list: List<WitnessReportRecord> = Gson().fromJson(raw, type) ?: emptyList()
             val next = mutableMapOf<String, WitnessReportRecord>()
             for (r in list) {
-                next[normalizeEntityId(r.targetKey)] = r
+                val normTarget = normalizeEntityId(r.targetKey)
+                next[normTarget] = r
                 r.entityUuid?.let { next[normalizeEntityId(it)] = r }
+                if (hasConfirmingReport(r)) {
+                    confirmedEvidenceFacets.add("entity:$normTarget")
+                    r.entityUuid?.let { confirmedEvidenceFacets.add("entity:${normalizeEntityId(it)}") }
+                    confirmedEvidenceFacets.addAll(canonicalConfirmableFacetKeys(listOfNotNull(r.targetKey, r.entityUuid), null))
+                }
             }
             witnessCache = next
         }
+    }
+
+    private fun persistConfirmedEvidence(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putStringSet(KEY_CONFIRMED_EVIDENCE_FACETS, confirmedEvidenceFacets.toSet())
+        }
+    }
+
+    /**
+     * Extracts canonical unit-specific evidence keys (`hw:mac:*`, `hw:kit:*`, `kitmac:*`, `uas:mac:*`,
+     * `adsb:icao:*`, `rf:rid:*`) that uniquely identify hardware/radios across time.
+     * Deliberately excludes shared channels (`rf:chan:*`) and shared talkgroups (`p25:tg:*`).
+     */
+    fun canonicalConfirmableFacetKeys(facets: Collection<String>, hardwareIdentifier: String? = null): Set<String> {
+        val out = LinkedHashSet<String>()
+        fun absorbToken(raw: String) {
+            val t = raw.trim()
+            if (t.isEmpty()) return
+            when {
+                t.startsWith("hw:mac:", ignoreCase = true) -> {
+                    val mac = normalizeMac(t.substringAfter("hw:mac:"))
+                    if (mac.length == 17) {
+                        out += "hw:mac:$mac"
+                        out += "hw:mac:${routerRadioGroupKey(mac)}"
+                    }
+                }
+                t.startsWith("hw:kit:", ignoreCase = true) -> {
+                    val afterKit = t.substringAfter("hw:kit:")
+                    val kind = afterKit.substringBefore(':').lowercase()
+                    val mac = normalizeMac(afterKit.substringAfter(':', ""))
+                    if (mac.length == 17) {
+                        out += "hw:kit:$kind:$mac"
+                        out += "kitmac:$mac"
+                        out += "hw:mac:${routerRadioGroupKey(mac)}"
+                    }
+                }
+                t.startsWith("uas:mac:", ignoreCase = true) -> {
+                    val mac = normalizeMac(t.substringAfter("uas:mac:"))
+                    if (mac.length == 17) out += "uas:mac:$mac"
+                }
+                t.startsWith("adsb:icao:", ignoreCase = true) -> {
+                    val hex = t.substringAfter("adsb:icao:").trim().uppercase()
+                    if (hex.isNotEmpty()) out += "adsb:icao:$hex"
+                }
+                t.startsWith("rf:rid:", ignoreCase = true) -> {
+                    val rid = t.substringAfter("rf:rid:").trim()
+                    if (rid.isNotEmpty() && rid.all { it.isDigit() }) out += "rf:rid:$rid"
+                }
+                else -> {
+                    val maybeMac = normalizeMac(t)
+                    if (maybeMac.length == 17 && maybeMac.count { it == ':' } == 5) {
+                        out += "hw:mac:$maybeMac"
+                        out += "hw:mac:${routerRadioGroupKey(maybeMac)}"
+                        out += "kitmac:$maybeMac"
+                    } else if (t.startsWith("RID ", ignoreCase = true)) {
+                        val rid = t.removePrefix("RID ").removePrefix("rid ").trim().takeWhile { it.isDigit() }
+                        if (rid.isNotEmpty()) out += "rf:rid:$rid"
+                    } else if (t.contains("ICAO ", ignoreCase = true)) {
+                        val hex = t.substringAfter("ICAO ").trim().takeWhile { it.isLetterOrDigit() }.uppercase()
+                        if (hex.length == 6) out += "adsb:icao:$hex"
+                    }
+                }
+            }
+        }
+        facets.forEach(::absorbToken)
+        hardwareIdentifier?.let(::absorbToken)
+        return out
+    }
+
+    /** Marks one or more exact unit facets/MACs/RIDs as having been confirmed before. */
+    fun recordConfirmedEvidence(context: Context?, vararg rawFacetsOrMacs: String) {
+        val keys = canonicalConfirmableFacetKeys(rawFacetsOrMacs.toList(), null)
+        if (keys.isEmpty()) return
+        confirmedEvidenceFacets.addAll(keys)
+        if (context != null) persistConfirmedEvidence(context)
+    }
+
+    private fun harvestConfirmedEvidenceFromReport(context: Context, report: WitnessReportRecord) {
+        val normKey = normalizeEntityId(report.targetKey)
+        if (report.reportKind.equals("FALSE_POSITIVE", ignoreCase = true)) {
+            confirmedEvidenceFacets.remove("entity:$normKey")
+            report.entityUuid?.let { confirmedEvidenceFacets.remove("entity:${normalizeEntityId(it)}") }
+            persistConfirmedEvidence(context)
+            return
+        }
+        if (!hasConfirmingReport(report)) return
+        confirmedEvidenceFacets.add("entity:$normKey")
+        report.entityUuid?.let { confirmedEvidenceFacets.add("entity:${normalizeEntityId(it)}") }
+        val (facets, hwId) = KokohoPostureEngine.peekThreatFacets(context, normKey)
+        confirmedEvidenceFacets.addAll(
+            canonicalConfirmableFacetKeys(facets + listOfNotNull(report.targetKey, report.entityUuid), hwId)
+        )
+        persistConfirmedEvidence(context)
     }
 
     private fun persistWitnessCache(context: Context) {
@@ -554,6 +664,7 @@ object KokohoSignatures {
         )
         witnessCache[normKey] = cleaned
         cleaned.entityUuid?.let { witnessCache[normalizeEntityId(it)] = cleaned }
+        harvestConfirmedEvidenceFromReport(context, cleaned)
         if (cleaned.isApproved && (cleaned.agentName.isNotBlank() || cleaned.badgeNumber.isNotBlank())) {
             val summary = listOfNotNull(
                 cleaned.agentName.takeIf { it.isNotBlank() },
@@ -581,6 +692,7 @@ object KokohoSignatures {
             if (existing == null || approvedIncoming.isApproved || approvedIncoming.updatedAtMs >= existing.updatedAtMs) {
                 witnessCache[norm] = approvedIncoming
                 approvedIncoming.entityUuid?.let { witnessCache[normalizeEntityId(it)] = approvedIncoming }
+                harvestConfirmedEvidenceFromReport(context, approvedIncoming)
                 changed = true
             }
         }
@@ -1489,10 +1601,15 @@ object KokohoSignatures {
                 return true
             }
             val wifi = s.advert?.wifi
-            if (wifi != null && !wifi.client && !s.name.isNullOrBlank() && isOpenPublicWifiCapabilities(wifi.capabilities)) {
+            if (wifi != null && !wifi.client && (
+                (!s.name.isNullOrBlank() && isOpenPublicWifiCapabilities(wifi.capabilities)) ||
+                    org.tucsoncommunity.kokoho.detect.FixedRouter.isBranchDefaultOrOpenRouter(s.name, wifi.capabilities)
+                )
+            ) {
                 return true
             }
-            if (isStaticBaselineRouter(context, s.mac)) {
+            val pos = s.lastPosition ?: s.place
+            if (isStaticBaselineRouter(context, s.mac, pos?.lat, pos?.lon)) {
                 return true
             }
         }
@@ -1956,8 +2073,8 @@ object KokohoSignatures {
         }
     }
 
-    fun isStaticBaselineRouter(context: Context?, mac: String): Boolean {
-        if (org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliar(mac)) return true
+    fun isStaticBaselineRouter(context: Context?, mac: String, lat: Double? = null, lon: Double? = null): Boolean {
+        if (org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliarAt(mac, lat, lon)) return true
         val lm = lookupMacIntel(context, mac) ?: return false
         return lm.associationPattern == "STATIC_LOCALE" && lm.corroboratedHits == 0
     }
@@ -2183,16 +2300,58 @@ object KokohoSignatures {
         return caps.distinct()
     }
 
+    /** True when a user or peer has submitted a report confirming this sighting as law enforcement (`reportKind == "LE"`). */
+    fun hasConfirmingReport(witness: WitnessReportRecord?): Boolean =
+        witness != null && witness.reportKind.equals("LE", ignoreCase = true)
+
+    /**
+     * True when either:
+     *  1. Someone submitted a report confirming this particular sighting (`hasConfirmingReport(witness)` or `WITNESS_REPORT` badge), OR
+     *  2. Any exact unit-level evidence on [threat] (`hw:mac:*`, `hw:kit:*`, `uas:mac:*`, `adsb:icao:*`, `rf:rid:*`)
+     *     has been confirmed in a report before.
+     */
+    fun isExactEvidenceConfirmed(
+        threat: EvaluatedThreat,
+        witness: WitnessReportRecord? = null
+    ): Boolean {
+        if (hasConfirmingReport(witness)) return true
+        if (witness != null && witness.reportKind.equals("FALSE_POSITIVE", ignoreCase = true)) return false
+        if (threat.evidenceSources.any { it.kind == "WITNESS_REPORT" }) return true
+        val normUuid = normalizeEntityId(threat.uuid)
+        if ("entity:$normUuid" in confirmedEvidenceFacets) return true
+        if (hasConfirmingReport(witnessCache[normUuid])) return true
+        val exactKeys = canonicalConfirmableFacetKeys(
+            threat.evidenceSources.map { it.facetKey },
+            threat.hardwareIdentifier
+        )
+        for (key in exactKeys) {
+            if (key in confirmedEvidenceFacets) return true
+            if (hasConfirmingReport(witnessCache[key])) return true
+            val derivedUuid = KokohoPostureEngine.deterministicUuidV5(key)
+            if ("entity:$derivedUuid" in confirmedEvidenceFacets || hasConfirmingReport(witnessCache[derivedUuid])) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Epistemic prefix policy:
+     *  - `"Confirmed"` is strictly reserved for sightings with a confirming report OR exact unit evidence confirmed before.
+     *  - Unconfirmed high-confidence / explicit-SSID sightings cap at `"Likely"`.
+     *  - Lower-confidence sightings render as `"Suspected"`.
+     */
     fun epistemicPrefix(
         confidence: Int,
         witness: WitnessReportRecord? = null,
-        hasExplicitAgencySsid: Boolean = false
+        hasExplicitAgencySsid: Boolean = false,
+        evidenceConfirmedBefore: Boolean = false
     ): String {
-        val hasPositiveWitness = witness != null && witness.reportKind == "LE" &&
-            (witness.agentName.isNotBlank() || witness.badgeNumber.isNotBlank() || witness.vehicleNumber.isNotBlank() || witness.plateNumber.isNotBlank() || witness.accessoryKind.isNotBlank())
+        val isFalsePos = witness != null && witness.reportKind.equals("FALSE_POSITIVE", ignoreCase = true)
+        val confirmed = !isFalsePos && (hasConfirmingReport(witness) || evidenceConfirmedBefore)
         return when {
-            hasPositiveWitness || hasExplicitAgencySsid || confidence >= 88 -> "Confirmed"
-            confidence >= 65 -> "Likely"
+            confirmed -> "Confirmed"
+            hasExplicitAgencySsid || confidence >= 65 -> "Likely"
             else -> "Suspected"
         }
     }
@@ -2201,7 +2360,7 @@ object KokohoSignatures {
         threat: EvaluatedThreat,
         witness: WitnessReportRecord? = null
     ): String {
-        if (witness != null && witness.reportKind == "LE") {
+        if (hasConfirmingReport(witness) && witness != null) {
             val ag = (KokohoAgency.fromCode(witness.agencyCode) ?: threat.agency).friendlyLabel
             val subjectText = when {
                 witness.agentName.isNotBlank() && witness.badgeNumber.isNotBlank() -> "${witness.agentName} (#${witness.badgeNumber.removePrefix("#")})"
@@ -2213,13 +2372,13 @@ object KokohoSignatures {
                 else -> ""
             }
             if (subjectText.isNotBlank()) {
-                val tier = if (witness.isApproved) "Confirmed" else "Likely"
-                return "$tier $ag: $subjectText"
+                return "Confirmed $ag: $subjectText"
             }
         }
         val ssidCandidate = threat.evidenceSources.firstOrNull()?.detail
         val explicitSsid = isExplicitAgencyOrTacticalSsid(ssidCandidate) || isExplicitAgencyOrTacticalSsid(threat.recurrenceSummary)
-        val tier = epistemicPrefix(threat.combinedConfidence, witness, explicitSsid)
+        val confirmedEvidence = isExactEvidenceConfirmed(threat, witness)
+        val tier = epistemicPrefix(threat.combinedConfidence, witness, explicitSsid, confirmedEvidence)
         val summary = threat.recurrenceSummary.trim()
         val subject = when {
             threat.isDrone -> "Tactical Drone"
