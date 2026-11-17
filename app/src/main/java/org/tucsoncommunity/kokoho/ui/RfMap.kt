@@ -338,7 +338,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("icon-opacity" to get("opacity"))),
             layer(LABELS, "symbol", DEVICES, filter = flagged,
                 layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 13.0, "text-anchor" to "top",
-                    "text-offset" to a(0.0, 1.15), "text-optional" to true),
+                    "text-max-width" to 16.0, "text-offset" to a(0.0, 1.15), "text-optional" to true),
                 paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0, "text-opacity" to get("opacity"))),
             // Networks pinned from a WiGLE search: purple, with their name.
             layer(WIGLE, "circle", paint = o("circle-color" to WIGLE_COLOR, "circle-radius" to 7.0,
@@ -407,11 +407,11 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             } else {
                 p.lat to p.lon
             }
-            val iconId = ensureBadgeIcon(p.iconKind, p.color, p.agencyId)
+            val iconId = p.customIconId ?: ensureBadgeIcon(p.iconKind, p.color, p.agencyId)
             GeoJson.feature(
                 GeoJson.point(labelLat, labelLon),
                 "mac" to p.mac,
-                "label" to p.label.take(48),
+                "label" to p.label.take(110),
                 "color" to hex(p.color),
                 "icon" to iconId,
                 "flagged" to p.flagged,
@@ -491,8 +491,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         }
     }
 
-    /** Draws civic/facility Location pins, skipping GeoJSON rebuilds whenever visibility filters are unchanged. */
-    fun drawLocations() {
+    /** Draws civic/facility Location pins, skipping GeoJSON rebuilds whenever visibility filters and merged exclusions are unchanged. */
+    fun drawLocations(excludedIds: Set<String> = emptySet()) {
         if (!ready()) return
         if (tripMode) {
             if (locationsDrawnKey == "trip") return
@@ -502,11 +502,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             return
         }
         val visible = org.tucsoncommunity.kokoho.posture.KokohoDirectory.visibleLocations(activity)
-        val key = "${visible.size}|${visible.firstOrNull()?.id.orEmpty()}|${visible.lastOrNull()?.id.orEmpty()}"
+        locationsById = visible.associateBy { it.id }
+        val excludedKey = if (excludedIds.isEmpty()) "" else excludedIds.sorted().joinToString(",")
+        val key = "${visible.size}|${visible.firstOrNull()?.id.orEmpty()}|${visible.lastOrNull()?.id.orEmpty()}|$excludedKey"
         if (key == locationsDrawnKey) return
         locationsDrawnKey = key
-        locationsById = visible.associateBy { it.id }
-        set(LOCATIONS, visible.map { loc ->
+        val drawn = if (excludedIds.isEmpty()) visible else visible.filter { it.id !in excludedIds }
+        set(LOCATIONS, drawn.map { loc ->
             val isFire = loc.locationGroup.equals("FIRE", ignoreCase = true) ||
                 loc.title.contains("Fire", ignoreCase = true) ||
                 loc.description.contains("Fire", ignoreCase = true)
@@ -595,7 +597,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             var lat: Double,
             var lon: Double,
             var radiusM: Double,
-            var totalMass: Double
+            var totalMass: Double,
+            val stations: MutableList<org.tucsoncommunity.kokoho.posture.KokohoDirectory.FacilityLocation> = mutableListOf()
         )
 
         val clusters = mutableListOf<MergedCluster>()
@@ -687,23 +690,77 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
         }
 
+        // Merge nearby visible Facility Locations (Stations) into overlapping/adjacent detection centroids
+        // so the centroid shows the Station's icon above and lists the Station(s) FIRST in the comma-separated label!
+        val mergedStationIds = HashSet<String>()
+        if (!tripMode && zoomMergeM > 0.0 && clusters.isNotEmpty() &&
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapLocationsVisible(activity)
+        ) {
+            val candidateStations = org.tucsoncommunity.kokoho.posture.KokohoDirectory.visibleLocations(activity).filter { loc ->
+                val isFed = loc.locationGroup.equals("FEDERAL", ignoreCase = true) || loc.agency.isDhs
+                if (isFed) zoom >= 7.0 else zoom >= 10.5
+            }
+            for (loc in candidateStations) {
+                var bestCluster: MergedCluster? = null
+                var bestDist = Double.MAX_VALUE
+                for (c in clusters) {
+                    val thresholdM = kotlin.math.max(zoomMergeM, c.radiusM.coerceAtMost(150.0))
+                    val d = DeviceRegistry.metersBetween(loc.lat, loc.lon, c.lat, c.lon)
+                    if (d <= thresholdM && d < bestDist) {
+                        bestDist = d
+                        bestCluster = c
+                    }
+                }
+                if (bestCluster != null) {
+                    val stMass = kotlin.math.max(4.0, bestCluster.totalMass * 0.35)
+                    val nextMass = bestCluster.totalMass + stMass
+                    bestCluster.lat = ((bestCluster.lat * bestCluster.totalMass) + (loc.lat * stMass)) / nextMass
+                    bestCluster.lon = ((bestCluster.lon * bestCluster.totalMass) + (loc.lon * stMass)) / nextMass
+                    bestCluster.totalMass = nextMass
+                    bestCluster.stations += loc
+                    mergedStationIds += loc.id
+                }
+            }
+        }
+
         // Pure gravity-centered centroid bubbles (no blurry heatmap layer overlay)
         set(HEAT, emptyList())
-        drawLocations()
+        drawLocations(excludedIds = mergedStationIds)
 
         val shown = clusters.map { c ->
+            val sortedStations = c.stations
+                .distinctBy { it.id }
+                .sortedWith(
+                    compareBy<org.tucsoncommunity.kokoho.posture.KokohoDirectory.FacilityLocation> { it.agency.priorityRank }
+                        .thenBy { it.title }
+                )
+            val leadStation = sortedStations.firstOrNull()
+            val stationIconId = leadStation?.let { st ->
+                val isFire = st.locationGroup.equals("FIRE", ignoreCase = true) ||
+                    st.title.contains("Fire", ignoreCase = true) ||
+                    st.description.contains("Fire", ignoreCase = true)
+                if (isFire) "rf-facility-fire" else "rf-facility-${st.agency.id}"
+            }
+
             val threats = c.nodes.map { it.threat }
             val sorted = threats.sortedWith(
                 compareBy<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> { it.agency.priorityRank }
                     .thenBy { it.nearestEdgeDistanceM }
             )
             val lead = sorted.first()
-            val agenciesInline = if (sorted.size == 1) {
-                lead.title.ifBlank { lead.friendlyLabel }
-            } else {
-                sorted.map { t ->
-                    if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) t.label else t.friendlyLabel
-                }.distinct().joinToString(", ")
+            val agenciesInline = when {
+                sortedStations.isNotEmpty() -> {
+                    val detectionLabels = sorted.map { t ->
+                        if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) t.label else t.friendlyLabel
+                    }
+                    (sortedStations.map { it.title } + detectionLabels).distinct().joinToString(", ")
+                }
+                sorted.size == 1 -> lead.title.ifBlank { lead.friendlyLabel }
+                else -> {
+                    sorted.map { t ->
+                        if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) t.label else t.friendlyLabel
+                    }.distinct().joinToString(", ")
+                }
             }
             val newestMs = sorted.maxOf { it.lastSeenMs }
             val ageMs = (nowMs - newestMs).coerceAtLeast(0L)
@@ -745,11 +802,15 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 else ->
                     "Pinpointed position · Last detected $staleness."
             }
-            val unitLines = sorted.joinToString("\n") { t ->
+            val stationLines = sortedStations.joinToString("\n") { st ->
+                "• Station: ${st.title} (${st.agency.friendlyLabel})"
+            }
+            val detectionLines = sorted.joinToString("\n") { t ->
                 val st = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
                 val nameStr = if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) "${t.friendlyLabel} (${t.label})" else t.friendlyLabel
                 "• $nameStr: ${t.title} ($st)"
             }
+            val unitLines = listOf(stationLines, detectionLines).filter { it.isNotBlank() }.joinToString("\n")
             val hasVehicleOuiOrKit = sorted.any { u ->
                 u.evidenceSources.any {
                     it.facetKey.startsWith("hw:mac:", ignoreCase = true) ||
@@ -772,14 +833,17 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // Compute colocated agency gravity weights relative to cluster's center of gravity (c.lat, c.lon)
             val colocationScaleM = kotlin.math.max(100.0, kotlin.math.max(zoomMergeM * 0.75, c.radiusM * 0.85))
             val agencyGravity = mutableMapOf<org.tucsoncommunity.kokoho.posture.KokohoAgency, Double>()
+            for (st in sortedStations) {
+                agencyGravity[st.agency] = (agencyGravity[st.agency] ?: 0.0) + 3.0
+            }
             for (n in c.nodes) {
                 val distToCog = DeviceRegistry.metersBetween(n.lat, n.lon, c.lat, c.lon)
                 val colocWeight = n.mass * kotlin.math.exp(-(distToCog * distToCog) / (2.0 * colocationScaleM * colocationScaleM))
                 agencyGravity[n.threat.agency] = (agencyGravity[n.threat.agency] ?: 0.0) + colocWeight
             }
             val mixedColorArgb = org.tucsoncommunity.kokoho.posture.KokohoSignatures.mixAgencyColorsArgb(agencyGravity)
-            // When zoomed way in (zoom >= 15.5, zoomMergeM <= 0.0), always render each agent's puck at its center regardless of precision
-            val showCenterDot = zoomMergeM <= 0.0 || isPinpointed || sorted.any { it.isApproximatedPosition }
+            // Always render center icon when a Station is merged into the centroid, when zoomed in (>= 15.5), or when approximated/pinpointed
+            val showCenterDot = stationIconId != null || zoomMergeM <= 0.0 || isPinpointed || sorted.any { it.isApproximatedPosition }
             val countTag = if (sorted.size > 1) " (${sorted.size} agents)" else ""
             MapPin(
                 mac = "kokoho:${lead.uuid}",
@@ -794,7 +858,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 showDot = showCenterDot,
                 opacity = opacity,
                 iconKind = badgeKind,
-                agencyId = lead.agency.id,
+                agencyId = (leadStation?.agency ?: lead.agency).id,
+                customIconId = stationIconId,
+                groupFacilities = sortedStations,
                 groupMembers = sorted
             )
         }
@@ -1153,17 +1219,24 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         // Check direct puck dots BEFORE facility locations, and facility locations BEFORE wide precision bubbles!
         val dotPins = dots.distinct().mapNotNull { pins[it] }
         if (dotPins.isNotEmpty()) {
+            val allFacilities = dotPins.flatMap { it.groupFacilities }.distinctBy { it.id }
             val allMembers = dotPins.flatMap { it.groupMembers }.distinctBy { it.uuid }
-            if (selectCb != null && allMembers.isNotEmpty()) {
-                if (allMembers.size > 1) {
-                    MapDialogs.showGroupAgentsModal(activity, allMembers) { chosen ->
-                        selectCb(toDetectionSelection(chosen, dotPins.first().lat, dotPins.first().lon))
+            if (allFacilities.isNotEmpty() || allMembers.size > 1) {
+                MapDialogs.showGroupClusterModal(
+                    a = activity,
+                    facilities = allFacilities,
+                    members = allMembers,
+                    onPickFacility = { loc ->
+                        if (selectCb != null) selectCb(MapSelection.Facility(loc))
+                        else DeviceDetailActivity.openLocation(activity, loc.id)
+                    },
+                    onPickDetection = { chosen ->
+                        if (selectCb != null) selectCb(toDetectionSelection(chosen, dotPins.first().lat, dotPins.first().lon))
+                        else DeviceActions.openDetails(activity, "kokoho:${chosen.uuid}")
                     }
-                } else {
-                    selectCb(toDetectionSelection(allMembers.first(), dotPins.first().lat, dotPins.first().lon))
-                }
-            } else if (allMembers.size > 1) {
-                MapDialogs.showGroupAgentsModal(activity, allMembers)
+                )
+            } else if (selectCb != null && allMembers.size == 1) {
+                selectCb(toDetectionSelection(allMembers.first(), dotPins.first().lat, dotPins.first().lon))
             } else if (dotPins.size > 1) {
                 MapDialogs.showPins(activity, dotPins)
             } else {
@@ -1181,17 +1254,24 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         }
         val bubblePins = precisionHits.distinct().mapNotNull { pins[it] }
         if (bubblePins.isNotEmpty()) {
+            val allFacilities = bubblePins.flatMap { it.groupFacilities }.distinctBy { it.id }
             val allMembers = bubblePins.flatMap { it.groupMembers }.distinctBy { it.uuid }
-            if (selectCb != null && allMembers.isNotEmpty()) {
-                if (allMembers.size > 1) {
-                    MapDialogs.showGroupAgentsModal(activity, allMembers) { chosen ->
-                        selectCb(toDetectionSelection(chosen, bubblePins.first().lat, bubblePins.first().lon))
+            if (allFacilities.isNotEmpty() || allMembers.size > 1) {
+                MapDialogs.showGroupClusterModal(
+                    a = activity,
+                    facilities = allFacilities,
+                    members = allMembers,
+                    onPickFacility = { loc ->
+                        if (selectCb != null) selectCb(MapSelection.Facility(loc))
+                        else DeviceDetailActivity.openLocation(activity, loc.id)
+                    },
+                    onPickDetection = { chosen ->
+                        if (selectCb != null) selectCb(toDetectionSelection(chosen, bubblePins.first().lat, bubblePins.first().lon))
+                        else DeviceActions.openDetails(activity, "kokoho:${chosen.uuid}")
                     }
-                } else {
-                    selectCb(toDetectionSelection(allMembers.first(), bubblePins.first().lat, bubblePins.first().lon))
-                }
-            } else if (allMembers.size > 1) {
-                MapDialogs.showGroupAgentsModal(activity, allMembers)
+                )
+            } else if (selectCb != null && allMembers.size == 1) {
+                selectCb(toDetectionSelection(allMembers.first(), bubblePins.first().lat, bubblePins.first().lon))
             } else if (bubblePins.size > 1) {
                 MapDialogs.showPins(activity, bubblePins)
             } else {

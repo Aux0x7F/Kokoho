@@ -772,6 +772,250 @@ class KokohoV130FieldReplayAndHygieneTest {
         }
     }
 
+    @Test
+    fun v134SearchTabHamburgerWidthAndStationClusterMerge() {
+        val actCtrl = Robolectric.buildActivity(AppCompatActivity::class.java).setup()
+        val act = actCtrl.get()
+        val ctx = act.applicationContext
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoDirectory.ensureLoaded(ctx)
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        DeviceRegistry.clear()
+        RadioLog.clear()
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapLocationsVisible(ctx, true)
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.HOURS_24)
+
+        val nowMs = 1_794_900_000_000L
+
+        // 1. Fixed 90% Screen Width Hamburger Menu (both collapsed and expanded)
+        val expectedMenuWidth = (act.resources.displayMetrics.widthPixels * 0.90f).toInt()
+        val menuDialog = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.showRootSandwichMenu(act) {}
+        assertTrue("Hamburger menu dialog must be showing", menuDialog.isShowing)
+        assertEquals(
+            "Hamburger menu must start at fixed 90% screen width even when all submenus are collapsed",
+            expectedMenuWidth,
+            menuDialog.window!!.attributes.width
+        )
+        menuDialog.dismiss()
+
+        // 2. Station + Detection Centroid Merging (Station icon + Station first in comma list + no duplicate station pin)
+        val targetStation = KokohoDirectory.visibleLocations(ctx).first { it.title == "ICE FO" }
+
+        KokohoHubClient.ingestThreatObjectJson(
+            """
+            {
+              "uuid": "merge-ice-0001-4000-8000-000000000001",
+              "track_uuid": "merge-ice-0001-4000-8000-000000000001",
+              "updated_at_ms": ${nowMs - 60_000L},
+              "sighting_count": 4,
+              "corroboration_count": 3,
+              "confidence": { "overall": 0.95, "classification": 0.96, "spatial": 0.92, "temporal_freshness": 1.0 },
+              "location": { "lat": ${targetStation.lat + 0.00012}, "lon": ${targetStation.lon + 0.00010}, "uncertainty_radius_m": 45.0, "h3_res8": 614259430555648001, "propagation_class": "GROUND_DIRECT" },
+              "classification": {
+                "master_group": "DHS",
+                "category": "DHS_ICE",
+                "label": "ICE",
+                "recurrence_summary": "Tucson Field Unit",
+                "evidence_sources": [{ "kind": "WIFI_BLE_OUI", "facet_key": "hw:mac:00:30:44:91:AA:11", "detail": "00:30:44:91:AA:11", "weight": 0.95, "last_seen_ms": ${nowMs - 60_000L} }]
+              }
+            }
+            """.trimIndent()
+        )
+        KokohoHubClient.ingestThreatObjectJson(
+            """
+            {
+              "uuid": "merge-cbp-0002-4000-8000-000000000002",
+              "track_uuid": "merge-cbp-0002-4000-8000-000000000002",
+              "updated_at_ms": ${nowMs - 45_000L},
+              "sighting_count": 4,
+              "corroboration_count": 3,
+              "confidence": { "overall": 0.94, "classification": 0.95, "spatial": 0.91, "temporal_freshness": 1.0 },
+              "location": { "lat": ${targetStation.lat - 0.00010}, "lon": ${targetStation.lon - 0.00008}, "uncertainty_radius_m": 50.0, "h3_res8": 614259430555648001, "propagation_class": "GROUND_DIRECT" },
+              "classification": {
+                "master_group": "DHS",
+                "category": "DHS_CBP",
+                "label": "CBP",
+                "recurrence_summary": "Tucson Sector Unit",
+                "evidence_sources": [{ "kind": "WIFI_BLE_OUI", "facet_key": "hw:mac:00:30:44:92:BB:22", "detail": "00:30:44:92:BB:22", "weight": 0.95, "last_seen_ms": ${nowMs - 45_000L} }]
+              }
+            }
+            """.trimIndent()
+        )
+
+        var currentZoom = 12.0
+        val sourceData = mutableMapOf<String, String>()
+        val addedSources = mutableSetOf<String>()
+        val fakeEngine = object : org.tucsoncommunity.kokoho.ui.MapEngine {
+            override val provider = org.tucsoncommunity.kokoho.ui.MapEngine.Provider.OPENFREEMAP
+            override val view = android.view.View(act)
+            override val credit = ""
+            override val labelFont = listOf("Noto Sans Regular")
+            override fun onCreate(state: android.os.Bundle?) {}
+            override fun onStart() {}
+            override fun onResume() {}
+            override fun onPause() {}
+            override fun onStop() {}
+            override fun onLowMemory() {}
+            override fun onSaveInstanceState(out: android.os.Bundle) {}
+            override fun onDestroy() {}
+            override fun whenReady(ready: () -> Unit) { ready() }
+            override fun setStyle(dark: Boolean, loaded: (Boolean) -> Unit) { loaded(true) }
+            override val styleLoaded = true
+            override fun hasSource(id: String) = id in addedSources
+            override fun addImage(id: String, bitmap: android.graphics.Bitmap) {}
+            override fun addSource(id: String) { addedSources += id }
+            override fun setData(source: String, geoJson: String) { sourceData[source] = geoJson }
+            override fun addLayer(json: org.json.JSONObject) {}
+            override fun setPaint(layer: String, name: String, value: String) {}
+            override val camera get() = org.tucsoncommunity.kokoho.ui.MapEngine.Camera(targetStation.lat, targetStation.lon, currentZoom, 0.0, 0.0)
+            override fun jumpTo(lat: Double, lon: Double, zoom: Double?) {}
+            override fun zoomTo(zoom: Double) { currentZoom = zoom }
+            override fun easeTo(lat: Double?, lon: Double?, zoom: Double?, bearing: Double?, tilt: Double?, flat: Boolean, ms: Long) {}
+            override fun fit(points: List<Pair<Double, Double>>, paddingPx: Int, bottomPx: Int) {}
+            override fun visibleBox() = org.tucsoncommunity.kokoho.ui.MapEngine.Box(32.5, -110.7, 32.0, -111.2)
+            override fun toLatLon(x: Float, y: Float) = targetStation.lat to targetStation.lon
+            override fun setMinZoom(zoom: Double) {}
+            override var onCameraMove: (() -> Unit)? = null
+            override var onIdle: (() -> Unit)? = null
+            override var onClick: ((Float, Float) -> Unit)? = null
+            override var onLongClick: ((Double, Double) -> Unit)? = null
+            override var onUserGesture: (() -> Unit)? = null
+            override fun query(box: android.graphics.RectF, layers: List<Pair<String, String>>, result: (List<List<String>>) -> Unit) {
+                result(layers.map { emptyList() })
+            }
+            override fun setMarker(bitmap: android.graphics.Bitmap?) {}
+            override val draws3dMarker = false
+            override fun setMarker3d(model: File?, size: Float) {}
+            override fun startPuck() = true
+            override val puckOn = true
+            override fun pushFix(fix: android.location.Location) {}
+            override fun follow(mode: org.tucsoncommunity.kokoho.ui.MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) {}
+            override var onFollowDismissed: (() -> Unit)? = null
+            override fun placeBranding(topPx: Int, atEnd: Boolean) {}
+        }
+        val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
+        rfMap.loadStyle(dark = true) {}
+        val evalSnap = KokohoPostureEngine.evaluate(ctx, nowMs)
+        val mergedPins = rfMap.drawLive(emptyList(), evalSnap)
+        assertEquals("Colocated detections + station at zoom 12.0 must merge into 1 centroid pin", 1, mergedPins.size)
+        val mergedPin = mergedPins.single()
+        val leadMergedStation = mergedPin.groupFacilities.first()
+        assertTrue("Target station must be merged into groupFacilities", mergedPin.groupFacilities.any { it.id == targetStation.id })
+        assertEquals(
+            "Merged centroid must use the lead station's facility icon",
+            "rf-facility-${leadMergedStation.agency.id}",
+            mergedPin.customIconId
+        )
+        assertTrue("Merged centroid must display center icon dot", mergedPin.showDot)
+        assertTrue(
+            "Merged centroid label '${mergedPin.label}' must start with station title '${leadMergedStation.title}' followed by comma-listed Confirmed ICE, Confirmed CBP",
+            mergedPin.label.startsWith("${leadMergedStation.title}, ") &&
+                mergedPin.label.contains("Confirmed ICE") &&
+                mergedPin.label.contains("Confirmed CBP")
+        )
+        val locGeoAtZoom12 = sourceData["rf-kokoho-locations"].orEmpty()
+        assertTrue("rf-kokoho-locations GeoJSON must be populated with unmerged stations", locGeoAtZoom12.isNotEmpty())
+        assertFalse(
+            "Merged station '${targetStation.id}' must be excluded from rf-kokoho-locations GeoJSON so it never double-draws underneath",
+            locGeoAtZoom12.contains("\"id\":\"${targetStation.id}\"")
+        )
+
+        // Zoom in to 16.0 (>= 15.5): station unmerges back onto rf-kokoho-locations and detections split into individual pucks!
+        currentZoom = 16.0
+        val splitPins = rfMap.drawLive(emptyList(), evalSnap)
+        assertEquals("At zoom 16.0 detections must split into 2 distinct pucks", 2, splitPins.size)
+        assertTrue("At zoom 16.0 pucks must have no merged stations", splitPins.all { it.groupFacilities.isEmpty() })
+        val locGeoAtZoom16 = sourceData["rf-kokoho-locations"].orEmpty()
+        assertTrue(
+            "At zoom 16.0 unmerged station '${targetStation.id}' must return to rf-kokoho-locations GeoJSON",
+            locGeoAtZoom16.contains("\"id\":\"${targetStation.id}\"")
+        )
+
+        // 3. Third Main Tab: Search (Keyboard lifecycle, Autocomplete Filter Pills, Raw Search w/o Filter Match, & Tap-to-Detail)
+        val binding = org.tucsoncommunity.kokoho.databinding.ActivityMainBinding.inflate(act.layoutInflater)
+        act.setContentView(binding.root)
+        val views = KokohoViews(
+            activity = act,
+            binding = binding,
+            onSwitchPanes = {},
+            onFilterChanged = {}
+        )
+        assertEquals(
+            "Main activity must expose Monitor, Map, and Search tabs",
+            listOf("Monitor", "Map", "Search"),
+            KokohoViews.Tab.entries.map { it.title }
+        )
+
+        // Switch to Search tab -> Search root visible & keyboard input focused immediately
+        views.selectTab(KokohoViews.Tab.SEARCH)
+        assertEquals(android.view.View.VISIBLE, views.searchView.root.visibility)
+        assertTrue("Search input must receive focus immediately on entering Search tab", views.searchView.searchInput.hasFocus())
+
+        // Autocomplete pill commit via Tab key ("Loc" -> "Location" pill)
+        views.searchView.searchInput.setText("Loc")
+        views.searchView.refreshNowSynchronously()
+        views.searchView.searchInput.dispatchKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_TAB))
+        views.searchView.refreshNowSynchronously()
+        assertEquals(listOf("Location"), views.searchView.getActivePills())
+        assertEquals("", views.searchView.searchInput.text.toString())
+        val locOnlyRows = views.searchView.getCurrentResults()
+        assertTrue("Location filter pill must return non-empty Location rows", locOnlyRows.isNotEmpty())
+        assertTrue(
+            "Location filter pill must restrict results strictly to SchemaKind.LOCATION",
+            locOnlyRows.all { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.LOCATION }
+        )
+
+        // Dismiss pill via chip click
+        val pillsLayout = (views.searchView.root.getChildAt(0) as android.view.ViewGroup).getChildAt(0) as android.widget.HorizontalScrollView
+        val pillsRow = pillsLayout.getChildAt(0) as android.view.ViewGroup
+        while (pillsRow.childCount > 0) {
+            pillsRow.getChildAt(0).performClick()
+        }
+        assertTrue("Clicking pill chips must dismiss all active pills", views.searchView.getActivePills().isEmpty())
+
+        // Raw search while NO filter pill matches (partial MAC "91:aa:11" from Confirmed ICE unit)
+        views.searchView.searchInput.setText("91:aa:11")
+        views.searchView.refreshNowSynchronously()
+        val rawNoPillResults = views.searchView.getCurrentResults()
+        assertTrue(
+            "Raw search '91:aa:11' with no filter match must find both the Confirmed ICE Detection and its constituent Device",
+            rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DETECTION && it.targetDetailKey.contains("merge-ice-0001") } &&
+                rawNoPillResults.any { it.schema == org.tucsoncommunity.kokoho.ui.KokohoSearchView.SchemaKind.DEVICE && it.targetDetailKey.contains("00:30:44:91:AA:11", ignoreCase = true) }
+        )
+
+        // Tapping a result row launches DeviceDetailActivity with exact target key
+        val rv = views.searchView.recyclerView
+        rv.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(1080, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(1800, android.view.View.MeasureSpec.EXACTLY)
+        )
+        rv.layout(0, 0, 1080, 1800)
+        assertTrue("RecyclerView must lay out visible result cards", rv.childCount > 0)
+        rv.getChildAt(0).performClick()
+        val detailIntent = org.robolectric.Shadows.shadowOf(act).nextStartedActivity
+        assertNotNull("Tapping anywhere on a search result card must open DeviceDetailActivity", detailIntent)
+        assertEquals(DeviceDetailActivity::class.java.name, detailIntent.component?.className)
+
+        // Switch away to Monitor tab -> Search hidden & focus/keyboard dismissed
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        views.selectTab(KokohoViews.Tab.MONITOR)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(android.view.View.GONE, views.searchView.root.visibility)
+        assertFalse("Switching away from Search tab must clear focus and dismiss keyboard", views.searchView.searchInput.hasFocus())
+
+        actCtrl.pause().stop().destroy()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        DeviceRegistry.clear()
+    }
+
     private fun collectAllText(view: android.view.View): String {
         val sb = StringBuilder()
         fun walk(v: android.view.View) {

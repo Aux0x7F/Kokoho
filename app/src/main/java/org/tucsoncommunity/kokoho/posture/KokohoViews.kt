@@ -66,7 +66,8 @@ class KokohoViews(
 
     enum class Tab(val title: String) {
         MONITOR("Monitor"),
-        MAP("Map")
+        MAP("Map"),
+        SEARCH("Search")
     }
 
     var currentTab: Tab = Tab.MONITOR
@@ -158,8 +159,10 @@ class KokohoViews(
 
     private val tabRow: LinearLayout
     private val tabButtons = LinkedHashMap<Tab, TextView>()
+    fun tabButton(tab: Tab): TextView? = tabButtons[tab]
 
     private val monitorContainer: LinearLayout
+    val searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView
     private val bluetoothNoticePill: MaterialButton
     private val postureBadge: TextView
     val postureHeadline: TextView
@@ -507,7 +510,10 @@ class KokohoViews(
             addView(bottomFooterWrapper)
         }
 
+        searchView = org.tucsoncommunity.kokoho.ui.KokohoSearchView(activity)
+
         binding.contentArea.addView(monitorContainer)
+        binding.contentArea.addView(searchView.root)
 
         syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
@@ -629,11 +635,14 @@ class KokohoViews(
     }
 
     fun selectTab(tab: Tab) {
+        val wasSearch = currentTab == Tab.SEARCH
         currentTab = tab
         (binding.filterChips.parent as? View)?.visibility = View.GONE
 
         when (tab) {
             Tab.MONITOR -> {
+                if (wasSearch) searchView.onTabUnselected()
+                searchView.root.visibility = View.GONE
                 onSwitchPanes(emptySet())
                 binding.mapPane.visibility = View.GONE
                 binding.radarPane.visibility = View.GONE
@@ -642,8 +651,19 @@ class KokohoViews(
                 latestSnapshot?.let { updatePosture(System.currentTimeMillis(), it) }
             }
             Tab.MAP -> {
+                if (wasSearch) searchView.onTabUnselected()
+                searchView.root.visibility = View.GONE
                 monitorContainer.visibility = View.GONE
                 onSwitchPanes(setOf("map"))
+            }
+            Tab.SEARCH -> {
+                monitorContainer.visibility = View.GONE
+                onSwitchPanes(emptySet())
+                binding.mapPane.visibility = View.GONE
+                binding.radarPane.visibility = View.GONE
+                binding.listFrame.visibility = View.GONE
+                searchView.root.visibility = View.VISIBLE
+                searchView.onTabSelected()
             }
         }
         applySurfaceThemeColors()
@@ -696,8 +716,8 @@ class KokohoViews(
             }
         }
 
-        // While the Map tab is active, skip hidden Monitor view inflation/layout churn so Map panning stays at 120 FPS.
-        if (currentTab == Tab.MAP) {
+        // While the Map or Search tab is active, skip hidden Monitor view inflation/layout churn.
+        if (currentTab == Tab.MAP || currentTab == Tab.SEARCH) {
             applySurfaceThemeColors()
             return
         }

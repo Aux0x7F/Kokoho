@@ -321,8 +321,11 @@ object KokohoJourneyUi {
             }
             box.addView(btn)
         }
-        dialog.setContentView(box)
+        val modalWidthPx = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+        box.minimumWidth = modalWidthPx
+        dialog.setContentView(box, ViewGroup.LayoutParams(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.show()
+        dialog.window?.setLayout(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     /**
@@ -334,10 +337,15 @@ object KokohoJourneyUi {
     fun showRootSandwichMenu(
         activity: AppCompatActivity,
         onFiltersChanged: () -> Unit
-    ) {
+    ): Dialog {
+        val dm = activity.resources.displayMetrics
+        val menuWidthPx = (dm.widthPixels * 0.90f).toInt()
+        val maxScrollHeightPx = (dm.heightPixels * 0.72f).toInt()
         val dialog = createCustomModal(activity)
         val outer = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
+            minimumWidth = menuWidthPx
+            layoutParams = ViewGroup.LayoutParams(menuWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
             background = cardDrawable(activity, SURFACE_DARK, BORDER_STRONG, 18)
             setPadding(dp(activity, 16), dp(activity, 14), dp(activity, 16), dp(activity, 16))
         }
@@ -366,10 +374,15 @@ object KokohoJourneyUi {
         headerRow.addView(closeBtn)
         outer.addView(headerRow)
 
-        val scroll = ScrollView(activity).apply {
+        val scroll = object : ScrollView(activity) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val cappedHeightSpec = MeasureSpec.makeMeasureSpec(maxScrollHeightPx, MeasureSpec.AT_MOST)
+                super.onMeasure(widthMeasureSpec, cappedHeightSpec)
+            }
+        }.apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                (activity.resources.displayMetrics.heightPixels * 0.74f).toInt()
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
         }
         val body = LinearLayout(activity).apply {
@@ -689,8 +702,10 @@ object KokohoJourneyUi {
         }
         body.addView(settingsHeader)
 
-        dialog.setContentView(outer)
+        dialog.setContentView(outer, ViewGroup.LayoutParams(menuWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.show()
+        dialog.window?.setLayout(menuWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
+        return dialog
     }
 
     /**
@@ -1010,8 +1025,11 @@ object KokohoJourneyUi {
         populate(body) { dialog.dismiss() }
         scroll.addView(body)
         outer.addView(scroll)
-        dialog.setContentView(outer)
+        val modalWidthPx = (activity.resources.displayMetrics.widthPixels * 0.90f).toInt()
+        outer.minimumWidth = modalWidthPx
+        dialog.setContentView(outer, ViewGroup.LayoutParams(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT))
         dialog.show()
+        dialog.window?.setLayout(modalWidthPx, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
 
     /** High-contrast tappable row card for custom modals & lists. */

@@ -75,8 +75,15 @@ object KokohoDirectory {
             return fullName.lowercase(Locale.US).contains(t) ||
                 title.lowercase(Locale.US).contains(t) ||
                 resolvedAgencyDisplay.lowercase(Locale.US).contains(t) ||
+                agency.friendlyLabel.lowercase(Locale.US).contains(t) ||
+                agencyCode.lowercase(Locale.US).contains(t) ||
                 suite.lowercase(Locale.US).contains(t) ||
+                streetAddress.lowercase(Locale.US).contains(t) ||
+                stateCode.lowercase(Locale.US).contains(t) ||
                 email.lowercase(Locale.US).contains(t) ||
+                secondEmail.lowercase(Locale.US).contains(t) ||
+                primaryPhone.lowercase(Locale.US).contains(t) ||
+                mobilePhone.lowercase(Locale.US).contains(t) ||
                 badgeNumber.lowercase(Locale.US).contains(t)
         }
     }
@@ -403,6 +410,104 @@ object KokohoDirectory {
             )
         }
         return results.take(limit)
+    }
+
+    fun browsePersons(context: Context, limit: Int = 20): List<PersonRecord> {
+        ensureLoaded(context)
+        val results = ArrayList<PersonRecord>()
+        results.addAll(userPersons.values.sortedBy { it.fullName.lowercase(Locale.US) })
+        sqliteDb?.let { db ->
+            runCatching {
+                db.rawQuery(
+                    "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
+                        "FROM directory_persons ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT ?",
+                    arrayOf(limit.coerceAtLeast(1).toString())
+                ).use { c ->
+                    while (c.moveToNext()) {
+                        val p = cursorToPerson(c)
+                        if (results.none { it.personId == p.personId }) {
+                            results += p
+                        }
+                    }
+                }
+            }
+        }
+        return results.take(limit)
+    }
+
+    fun searchPersonsWithTokens(
+        context: Context,
+        tokens: List<String>,
+        limit: Int = 40
+    ): List<PersonRecord> {
+        ensureLoaded(context)
+        val cleanTokens = tokens
+            .flatMap { it.trim().lowercase(Locale.US).split(Regex("\\s+")) }
+            .filter { it.isNotEmpty() }
+        if (cleanTokens.isEmpty()) return browsePersons(context, limit)
+
+        val results = ArrayList<PersonRecord>()
+        for (up in userPersons.values) {
+            if (cleanTokens.all { up.matchesToken(it) }) results += up
+        }
+
+        // Map agency friendly labels / short names to agency_code when querying SQLite so pills like "ICE" or "DHS Air" hit indexed rows too!
+        val matchedAgencyCode = cleanTokens.firstNotNullOfOrNull { tok ->
+            KokohoAgency.entries.firstOrNull { ag ->
+                ag.friendlyLabel.equals(tok, ignoreCase = true) || ag.id.equals(tok, ignoreCase = true)
+            }?.id
+        }
+
+        sqliteDb?.let { db ->
+            val longestTok = cleanTokens.maxByOrNull { it.length } ?: cleanTokens.first()
+            val sql = if (matchedAgencyCode != null && cleanTokens.size == 1) {
+                "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
+                    "FROM directory_persons WHERE (agency_code = ? OR search_tokens LIKE ?) ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT 160"
+            } else {
+                "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
+                    "FROM directory_persons WHERE search_tokens LIKE ? ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT 160"
+            }
+            val args = if (matchedAgencyCode != null && cleanTokens.size == 1) {
+                arrayOf(matchedAgencyCode, "%$longestTok%")
+            } else {
+                arrayOf("%$longestTok%")
+            }
+            runCatching {
+                db.rawQuery(sql, args).use { c ->
+                    while (c.moveToNext()) {
+                        val p = cursorToPerson(c)
+                        if (cleanTokens.all { p.matchesToken(it) } && results.none { it.personId == p.personId }) {
+                            results += p
+                        }
+                    }
+                }
+            }
+        }
+        return results.take(limit)
+    }
+
+    fun suggestPersonPills(
+        context: Context,
+        prefix: String,
+        existingSetLower: Set<String>,
+        limit: Int = 5
+    ): List<String> {
+        val q = prefix.trim().lowercase(Locale.US)
+        if (q.length < 2) return emptyList()
+        val matches = searchPersons(context, q, limit = 24)
+        val out = LinkedHashSet<String>()
+        for (p in matches) {
+            for (cand in listOf(p.suite, p.title, p.fullName)) {
+                val clean = cand.trim()
+                if (clean.isEmpty()) continue
+                val low = clean.lowercase(Locale.US)
+                if (low !in existingSetLower && low.contains(q)) {
+                    out += clean
+                    if (out.size >= limit) return out.toList()
+                }
+            }
+        }
+        return out.toList()
     }
 
     fun personById(context: Context, personId: String): PersonRecord? {

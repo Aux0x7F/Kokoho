@@ -2701,7 +2701,124 @@ object KokohoPostureEngine {
         return evaluate(context, effectiveNowMs(nowMs)).color.colorArgb
     }
 
-    /** Finds an active or recently cached [EvaluatedThreat] by its UUID (accepts `"kokoho:<uuid>"` or `<uuid>`). */
+    /**
+     * Collects all known non-whitelisted [EvaluatedThreat] entities across live evaluation,
+     * the all-time SQLite [KokohoEntityLedger], local LE Witness Reports, and synced Auxnet Hub objects,
+     * regardless of the currently selected Map rolling window.
+     */
+    fun allSearchableThreats(context: Context, nowMs: Long? = null): List<EvaluatedThreat> {
+        val effNow = effectiveNowMs(nowMs)
+        val snap = evaluate(context, effNow)
+        val byUuid = LinkedHashMap<String, EvaluatedThreat>()
+        for (t in snap.activeThreats) byUuid[t.uuid] = t
+        for (t in snap.mapThreats) byUuid.putIfAbsent(t.uuid, t)
+
+        val allTimeWindowMs = KokohoSignatures.MapTimeWindow.HEAT.windowMs
+        for (persisted in KokohoEntityLedger.getWithinRollingWindow(context, effNow, allTimeWindowMs)) {
+            if (persisted.uuid in byUuid) continue
+            if (KokohoSignatures.isEntityWhitelisted(context, persisted.uuid)) continue
+            val witness = KokohoSignatures.getWitnessReport(context, persisted.uuid, approvedOnly = false)
+            val effectiveAgency = witness?.takeIf { it.reportKind == "LE" }?.agencyCode?.let { KokohoAgency.fromCode(it) } ?: persisted.agency
+            val title = KokohoSignatures.formatHighestOrderTitle(persisted.copy(agency = effectiveAgency), witness)
+            byUuid[persisted.uuid] = persisted.copy(agency = effectiveAgency, label = title)
+        }
+
+        if (KokohoSignatures.isAuxnetEnabled(context)) {
+            val userLoc = resolveUserLocation(context)
+            for (remote in KokohoHubClient.activeObjects(effNow, allTimeWindowMs)) {
+                if (remote.uuid in byUuid) continue
+                if (KokohoSignatures.isEntityWhitelisted(context, remote.uuid)) continue
+                if (KokohoSignatures.isFlockCamera(remote.uuid, remote.classification.label) ||
+                    remote.classification.evidenceSources.any { KokohoSignatures.isFlockCamera(it.facetKey, it.detail) }
+                ) continue
+                if (remote.location.propagationClass.equals("REPEATER_INFRASTRUCTURE", ignoreCase = true)) continue
+                val agency = KokohoAgency.fromCode(remote.classification.category) ?: continue
+                val uncertM = remote.location.uncertaintyRadiusM.roundToInt().coerceAtLeast(15)
+                val centerDistM = if (userLoc != null) {
+                    haversineMeters(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
+                } else 9_999
+                val classConf = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99)
+                val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
+                val badges = remote.classification.evidenceSources.map {
+                    EvidenceBadge(it.kind, it.facetKey, it.detail, it.weight, it.lastSeenMs)
+                }
+                val caps = KokohoSignatures.inferCapabilitiesFromEvidence(
+                    badges.map { it.facetKey },
+                    badges.map { it.detail } + remote.classification.label
+                )
+                val rawThreat = EvaluatedThreat(
+                    uuid = remote.uuid,
+                    trackUuid = remote.trackUuid,
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    posture = PostureColor.YELLOW,
+                    overallConfidence = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99),
+                    classificationConfidence = classConf,
+                    spatialConfidence = spatConf,
+                    estimatedDistanceM = centerDistM,
+                    uncertaintyRadiusM = uncertM,
+                    bearingDeg = remote.location.bearingDeg?.roundToInt(),
+                    closingVelocityMps = remote.location.velocityMps,
+                    recurrenceSummary = remote.classification.recurrenceSummary,
+                    evidenceSources = badges,
+                    updatedAtMs = remote.updatedAtMs,
+                    lat = remote.location.lat,
+                    lon = remote.location.lon,
+                    isApproximatedPosition = true,
+                    isPinpointed = uncertM <= PINPOINT_POINT_RADIUS_M,
+                    isDrone = agency == KokohoAgency.DRONE || badges.any { it.facetKey.startsWith("uas:", true) },
+                    hardwareIdentifier = badges.firstOrNull()?.facetKey,
+                    sightingCount = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1),
+                    capabilities = caps
+                )
+                val witness = KokohoSignatures.getWitnessReport(context, rawThreat.uuid, approvedOnly = false)
+                val effectiveAgency = witness?.takeIf { it.reportKind == "LE" }?.agencyCode?.let { KokohoAgency.fromCode(it) } ?: rawThreat.agency
+                val highestTitle = KokohoSignatures.formatHighestOrderTitle(rawThreat.copy(agency = effectiveAgency), witness)
+                byUuid[rawThreat.uuid] = rawThreat.copy(agency = effectiveAgency, label = highestTitle)
+            }
+        }
+
+        for (wr in KokohoSignatures.getAllWitnessReports(context)) {
+            if (wr.reportKind != "LE" || wr.lat == null || wr.lon == null) continue
+            val wrUuid = KokohoSignatures.normalizeEntityId(wr.entityUuid ?: wr.targetKey)
+            if (wrUuid in byUuid || KokohoSignatures.isEntityWhitelisted(context, wrUuid)) continue
+            val wrAgency = KokohoAgency.fromCode(wr.agencyCode) ?: KokohoAgency.DHS_ICE
+            val pointEntity = EvaluatedThreat(
+                uuid = wrUuid,
+                trackUuid = wrUuid,
+                agency = wrAgency,
+                label = wrAgency.friendlyLabel,
+                posture = PostureColor.YELLOW,
+                overallConfidence = 92,
+                classificationConfidence = 94,
+                spatialConfidence = 90,
+                estimatedDistanceM = 120,
+                uncertaintyRadiusM = 35,
+                bearingDeg = null,
+                closingVelocityMps = null,
+                recurrenceSummary = wr.notes.ifBlank { "Witness Report (${wrAgency.friendlyLabel})" },
+                evidenceSources = listOf(
+                    EvidenceBadge("WITNESS_REPORT", "witness:$wrUuid", wr.notes.ifBlank { "Field Witness Report" }, 0.95, wr.updatedAtMs)
+                ),
+                updatedAtMs = wr.updatedAtMs,
+                lat = wr.lat,
+                lon = wr.lon,
+                isApproximatedPosition = true,
+                isPinpointed = true,
+                sightingCount = 1
+            )
+            val highestTitle = KokohoSignatures.formatHighestOrderTitle(pointEntity, wr)
+            byUuid[wrUuid] = pointEntity.copy(label = highestTitle)
+        }
+
+        return byUuid.values.sortedWith(
+            compareByDescending<EvaluatedThreat> { effNow - it.updatedAtMs <= KokohoSignatures.MONITOR_ACTIVE_WINDOW_MS }
+                .thenBy { it.agency.priorityRank }
+                .thenByDescending { it.updatedAtMs }
+        )
+    }
+
+    /** Finds an active, historical ledger, or synced Hub [EvaluatedThreat] by its UUID (accepts `"kokoho:<uuid>"` or `<uuid>`). */
     fun findThreatByUuid(context: Context, rawId: String, nowMs: Long? = null): EvaluatedThreat? {
         val id = KokohoSignatures.normalizeEntityId(rawId)
         val snap = evaluate(context, effectiveNowMs(nowMs))
@@ -2713,7 +2830,7 @@ object KokohoPostureEngine {
             val witness = KokohoSignatures.getWitnessReport(context, cached.uuid, approvedOnly = false)
             return cached.copy(label = KokohoSignatures.formatHighestOrderTitle(cached, witness))
         }
-        return null
+        return allSearchableThreats(context, nowMs).firstOrNull { it.uuid.equals(id, ignoreCase = true) }
     }
 
     /** Returns all active/map threats for a given [KokohoAgency]. */
