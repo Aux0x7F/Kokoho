@@ -618,14 +618,14 @@ class MapFragment : Fragment() {
         styleThemeButton()
     }
 
-    /** Floating rolling `30m` | `3h` | `24h` selector pills at the top of the Map tab. */
+    /** Floating rolling `30m` | `3h` | `24h` | `1wk` | `1mo` | `Heat` selector pills at the top of the Map tab. */
     private fun setupMapTimeWindowPills() {
         if (tripId != null) return
         val density = resources.displayMetrics.density
         val bar = android.widget.LinearLayout(act).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            val padH = (6 * density).toInt()
+            val padH = (5 * density).toInt()
             val padV = (4 * density).toInt()
             setPadding(padH, padV, padH, padV)
             background = android.graphics.drawable.GradientDrawable().apply {
@@ -659,9 +659,10 @@ class MapFragment : Fragment() {
         for (win in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS) {
             val pill = android.widget.TextView(act).apply {
                 text = win.label
-                textSize = 13f
+                textSize = 12.5f
+                isSingleLine = true
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
-                val ph = (13 * density).toInt()
+                val ph = (9.5f * density).toInt()
                 val pv = (5 * density).toInt()
                 setPadding(ph, pv, ph, pv)
                 setOnClickListener {
@@ -678,11 +679,21 @@ class MapFragment : Fragment() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                if (bar.childCount > 0) marginStart = (4 * density).toInt()
+                if (bar.childCount > 0) marginStart = (2 * density).toInt()
             })
         }
 
         stylePills(org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(act))
+
+        val scroller = android.widget.HorizontalScrollView(act).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            val hp = (8 * density).toInt()
+            setPadding(hp, 0, hp, 0)
+            elevation = 6f * density
+            addView(bar, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
 
         val lp = android.widget.FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -691,7 +702,7 @@ class MapFragment : Fragment() {
         ).apply {
             topMargin = (10 * density).toInt()
         }
-        binding.root.addView(bar, lp)
+        binding.root.addView(scroller, lp)
     }
 
     private fun hideLegacyMapChrome() {

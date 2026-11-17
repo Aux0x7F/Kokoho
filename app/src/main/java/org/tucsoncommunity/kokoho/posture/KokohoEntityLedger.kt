@@ -11,11 +11,11 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Durable 48-hour SQLite entity & constituent-device ledger (`Layer 3`).
+ * Durable all-time SQLite entity & constituent-device ledger (`Layer 3`).
  *
- * Ensures that local-only detections (when Share is OFF, the default) and dropped-point reports
- * survive across `30m`, `3h`, and `24h` rolling view windows as well as app restarts — never
- * evaporating after 3 minutes in volatile RAM and never resetting at midnight.
+ * Ensures that local-only detections (when Share is OFF, the default), synced historical matches,
+ * and dropped-point reports survive across `30m`, `3h`, `24h`, `1wk`, `1mo`, and `Heat` rolling
+ * view windows as well as app restarts — never evaporating after 48 hours and never resetting at midnight.
  *
  * Performance invariant:
  *  - [memoryMirror] serves all reads in O(1) RAM without touching disk after initial one-time open.
@@ -25,7 +25,7 @@ import kotlin.math.roundToInt
 object KokohoEntityLedger {
 
     private const val DB_FILE_NAME = "ledger.db"
-    const val RETENTION_MS = 48L * 3600_000L
+    const val MAX_LEDGER_ROWS = 50_000
 
     @Volatile
     private var dbHelper: android.database.sqlite.SQLiteOpenHelper? = null
@@ -129,14 +129,27 @@ object KokohoEntityLedger {
                     val uuid = c.getString(0) ?: continue
                     val summaryRaw = c.getString(8) ?: ""
                     val hwRaw = if (c.isNull(19)) "" else (c.getString(19) ?: "")
-                    // Evict legacy false-positive rows (KARR dealership car alarms QT/DR on 40:84:32, consumer IDW wearables, transit Veh ###-5g)
-                    if (hwRaw.startsWith("40:84:32:", ignoreCase = true) ||
-                        Regex("(?i)(?:\\b(?:QT|DR)\\s+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("$summaryRaw $hwRaw")
+                    // Evict legacy false-positive rows (KARR dealership car alarms QT/DR, consumer IDW wearables, transit Veh ###-5g, removed consumer OUIs)
+                    val hwClean = hwRaw.removePrefix("hw:mac:").uppercase()
+                    if (uuid.startsWith("3f7147ac", ignoreCase = true) ||
+                        hwClean.startsWith("40:84:32:") ||
+                        hwClean.startsWith("24:79:2A:") ||
+                        hwClean.startsWith("AC:82:47:") ||
+                        hwClean.startsWith("C8:B3:73:") ||
+                        hwClean.startsWith("00:11:AB:") ||
+                        hwClean.startsWith("D8:12:65:") ||
+                        hwClean.startsWith("60:E3:27:") ||
+                        Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("$summaryRaw $hwRaw")
                     ) {
                         stalePoisonUuids += uuid
                         continue
                     }
-                    val agency = KokohoAgency.fromCode(c.getString(1)) ?: KokohoAgency.DHS_INTEROP
+                    val rawAgency = KokohoAgency.fromCode(c.getString(1)) ?: KokohoAgency.DHS_INTEROP
+                    val agency = when {
+                        (hwClean.startsWith("00:30:44:74:") || hwClean.startsWith("06:30:44:74:")) -> KokohoAgency.SHERIFF
+                        hwClean.startsWith("00:30:44:22:8") -> KokohoAgency.FIRE
+                        else -> rawAgency
+                    }
                     val posture = runCatching { PostureColor.valueOf(c.getString(3)) }.getOrDefault(PostureColor.YELLOW)
                     val classConf = c.getInt(4)
                     val spatConf = c.getInt(5)
@@ -249,12 +262,104 @@ object KokohoEntityLedger {
                 database.insertWithOnConflict("local_entities", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
                 if (nowMs - lastPruneAtMs > 15 * 60_000L) {
                     lastPruneAtMs = nowMs
-                    val cutoff = nowMs - RETENTION_MS
-                    database.delete("local_entities", "updated_at_ms < ?", arrayOf(cutoff.toString()))
-                    memoryMirror.entries.removeIf { nowMs - it.value.updatedAtMs > RETENTION_MS }
-                    persistedStampByUuid.keys.removeIf { it !in memoryMirror.keys }
+                    pruneOverflowIfNeeded(database)
                 }
             }.onFailure { lastDebugError = "upsert: $it" }
+        }
+    }
+
+    fun upsertBatch(context: Context?, threats: Collection<EvaluatedThreat>, nowMs: Long = System.currentTimeMillis()) {
+        if (threats.isEmpty()) return
+        val appCtx = context?.applicationContext ?: context
+        if (appCtx != null && db == null) {
+            ensureDb(appCtx)
+        }
+        val toPersist = ArrayList<EvaluatedThreat>()
+        for (threat in threats) {
+            if (threat.isAircraft || threat.lat == null || threat.lon == null) continue
+            val prev = memoryMirror[threat.uuid]
+            val merged = if (prev != null && prev.updatedAtMs > threat.updatedAtMs) prev else threat
+            memoryMirror[threat.uuid] = merged
+            val stamp = stampOf(merged)
+            if (persistedStampByUuid[merged.uuid] != stamp) {
+                persistedStampByUuid[merged.uuid] = stamp
+                toPersist += merged
+            }
+        }
+        if (appCtx == null || toPersist.isEmpty()) return
+        ioExecutor.execute {
+            val database = ensureDb(appCtx) ?: return@execute
+            runCatching {
+                database.beginTransaction()
+                try {
+                    for (merged in toPersist) {
+                        val capsArr = JSONArray().apply { merged.capabilities.forEach { put(it) } }.toString()
+                        val evArr = JSONArray().apply {
+                            merged.evidenceSources.forEach { b ->
+                                put(
+                                    JSONObject()
+                                        .put("kind", b.kind)
+                                        .put("facetKey", b.facetKey)
+                                        .put("detail", b.detail)
+                                        .put("weight", b.weight)
+                                        .put("lastSeenMs", b.lastSeenMs)
+                                )
+                            }
+                        }.toString()
+                        val cv = android.content.ContentValues().apply {
+                            put("uuid", merged.uuid)
+                            put("agency_code", merged.agency.id)
+                            put("label", merged.label)
+                            put("posture", merged.posture.name)
+                            put("class_conf", merged.classificationConfidence)
+                            put("spatial_conf", merged.spatialConfidence)
+                            put("est_dist_m", merged.estimatedDistanceM)
+                            put("base_radius_m", merged.uncertaintyRadiusM)
+                            put("summary", merged.recurrenceSummary)
+                            put("first_seen_ms", merged.updatedAtMs)
+                            put("updated_at_ms", merged.updatedAtMs)
+                            if (merged.lat != null) put("lat", merged.lat) else putNull("lat")
+                            if (merged.lon != null) put("lon", merged.lon) else putNull("lon")
+                            put("is_approx", if (merged.isApproximatedPosition) 1 else 0)
+                            put("is_pinpointed", if (merged.isPinpointed) 1 else 0)
+                            put("is_aircraft", if (merged.isAircraft) 1 else 0)
+                            put("is_helicopter", if (merged.isHelicopter) 1 else 0)
+                            put("is_circling", if (merged.isCircling) 1 else 0)
+                            put("is_drone", if (merged.isDrone) 1 else 0)
+                            if (merged.altitudeFtAgl != null) put("alt_ft", merged.altitudeFtAgl) else putNull("alt_ft")
+                            if (merged.hardwareIdentifier != null) put("hardware_id", merged.hardwareIdentifier) else putNull("hardware_id")
+                            put("sighting_count", merged.sightingCount)
+                            put("capabilities_json", capsArr)
+                            put("evidence_json", evArr)
+                        }
+                        database.insertWithOnConflict("local_entities", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                    }
+                    database.setTransactionSuccessful()
+                } finally {
+                    database.endTransaction()
+                }
+                if (nowMs - lastPruneAtMs > 15 * 60_000L) {
+                    lastPruneAtMs = nowMs
+                    pruneOverflowIfNeeded(database)
+                }
+            }.onFailure { lastDebugError = "upsertBatch: $it" }
+        }
+    }
+
+    private fun pruneOverflowIfNeeded(database: SQLiteDatabase) {
+        if (memoryMirror.size <= MAX_LEDGER_ROWS) return
+        database.execSQL(
+            """
+            DELETE FROM local_entities
+            WHERE uuid NOT IN (
+                SELECT uuid FROM local_entities ORDER BY updated_at_ms DESC LIMIT $MAX_LEDGER_ROWS
+            )
+            """.trimIndent()
+        )
+        val sorted = memoryMirror.values.sortedByDescending { it.updatedAtMs }
+        for (old in sorted.drop(MAX_LEDGER_ROWS)) {
+            memoryMirror.remove(old.uuid)
+            persistedStampByUuid.remove(old.uuid)
         }
     }
 
@@ -295,14 +400,15 @@ object KokohoEntityLedger {
     }
 
     /** Drains queued async disk writes, wipes RAM mirror, and re-hydrates strictly from SQLite `local_entities`. */
-    @Synchronized
     fun simulateProcessRestartForTest(context: Context? = null) {
         runCatching { ioExecutor.submit {}.get(5, TimeUnit.SECONDS) }
-        memoryMirror.clear()
-        persistedStampByUuid.clear()
-        val opened = if (context != null) ensureDb(context) else db
-        if (opened != null && opened.isOpen) {
-            hydrateMemoryMirror(opened)
+        synchronized(this) {
+            memoryMirror.clear()
+            persistedStampByUuid.clear()
+            val opened = if (context != null) ensureDb(context) else db
+            if (opened != null && opened.isOpen) {
+                hydrateMemoryMirror(opened)
+            }
         }
     }
 

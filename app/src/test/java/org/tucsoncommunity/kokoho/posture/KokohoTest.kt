@@ -568,10 +568,10 @@ class KokohoTest {
         val ctx = controller.get()
         KokohoSignatures.ensureLoaded(ctx)
 
-        // 1. Default map window is 30m (current investigation) and 3 rolling duration pills are exposed (30m, 3h, 24h)
+        // 1. Default map window is 30m (current investigation) and all 6 rolling duration / heatmap pills are exposed
         assertEquals(KokohoSignatures.MapTimeWindow.MIN_30, KokohoSignatures.getMapTimeWindow(ctx))
         assertEquals(
-            listOf("30m", "3h", "24h"),
+            listOf("30m", "3h", "24h", "1wk", "1mo", "Heat"),
             KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS.map { it.label }
         )
         assertTrue(KokohoSignatures.zoomGravityMergeRadiusM(11.5) > KokohoSignatures.zoomGravityMergeRadiusM(15.2))
@@ -594,9 +594,9 @@ class KokohoTest {
         assertEquals("#38BDF8", KokohoAgency.SHERIFF.mapColorHex)
         assertEquals("#06B6D4", KokohoAgency.DRONE.mapColorHex)
 
-        // 4. Catalog schemaVersion == 5 & new MOBILE_INPUT uplink channels match
+        // 4. Catalog schemaVersion == 6 & new MOBILE_INPUT uplink channels match
         val assetJson = ctx.assets.open("kokoho_signatures.json").bufferedReader().use { it.readText() }
-        assertTrue(assetJson.contains("\"schemaVersion\": 5"))
+        assertTrue(assetJson.contains("\"schemaVersion\": 6"))
         assertEquals(KokohoAgency.DHS_CBP, KokohoSignatures.matchFrequency(162_662_500L)?.agencyEnum)
         assertEquals(KokohoAgency.DHS_ICE, KokohoSignatures.matchFrequency(163_162_500L)?.agencyEnum)
         assertEquals(KokohoAgency.DHS_HSI, KokohoSignatures.matchFrequency(165_662_500L)?.agencyEnum)
@@ -1441,12 +1441,20 @@ class KokohoTest {
         assertEquals(KokohoAgency.FIRE, KokohoSignatures.matchOui("00:30:44:22:8D:98", "TFDCP")?.agencyEnum)
         assertFalse(KokohoSignatures.isGenericUnmarkedFleetRouter("00:30:44:22:8D:88", "KNOX"))
 
-        // Commercial / FWA SSID exclusions in both KokohoSignatures and PatrolCluster
-        for (ssid in listOf("GoEnergy", "H&R Block IoT", "RAI-SIGNAGE", "AISMobile-04", "R920-a1b2", "Verizon-M3100-77")) {
+        // Commercial / FWA / Fixed-Branch SSID exclusions in both KokohoSignatures and PatrolCluster (while rugged mobile R920/R980 remain enabled!)
+        for (ssid in listOf("GoEnergy", "H&R Block IoT", "RAI-SIGNAGE", "AISMobile-04", "E100-a1b2", "Verizon-M3100-77")) {
             assertNull("Expected $ssid to be suppressed", KokohoSignatures.matchOuiOrSsid("00:30:44:33:44:55", ssid, "Cradlepoint"))
             assertNull("Expected $ssid to be excluded from PatrolCluster roles",
                 org.tucsoncommunity.kokoho.detect.PatrolCluster.roleOf(emptyList(), "Cradlepoint", ssid))
         }
+        assertNotNull(
+            "Cradlepoint R920 mobile patrol router must match POLICE/CBP",
+            KokohoSignatures.matchOuiOrSsid("00:30:44:6B:5F:79", "R920-f77-5g", "Cradlepoint")
+        )
+        assertNotNull(
+            "Cradlepoint R920 mobile patrol router must retain PatrolCluster vehicle router role",
+            org.tucsoncommunity.kokoho.detect.PatrolCluster.roleOf(emptyList(), "Cradlepoint", "R920-f77-5g")
+        )
 
         // Dual-band BSSIDs on ONE physical Peplink router (`:08` and `:0C` share group `D4:13:F8:0A:41:08`)
         // must NOT self-corroborate into a synthetic procurement block!

@@ -359,6 +359,283 @@ class KokohoV130FieldReplayAndHygieneTest {
     }
 
     @Test
+    fun v132WindowsHeatmapAttestedBlocksAndCruiserReplay() {
+        val actCtrl = Robolectric.buildActivity(AppCompatActivity::class.java).setup()
+        val act = actCtrl.get()
+        val ctx = act.applicationContext
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        DeviceRegistry.clear()
+        RadioLog.clear()
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+
+        // 1. All 6 UI windows exposed & legacy "ALL" migrates cleanly to HEAT
+        assertEquals(
+            listOf("30m", "3h", "24h", "1wk", "1mo", "Heat"),
+            KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS.map { it.label }
+        )
+        assertEquals(KokohoSignatures.MapTimeWindow.HEAT, KokohoSignatures.MapTimeWindow.fromId("ALL"))
+        assertEquals(KokohoSignatures.MapTimeWindow.WEEK_1, KokohoSignatures.MapTimeWindow.fromId("1W"))
+        assertEquals(KokohoSignatures.MapTimeWindow.MONTH_1, KokohoSignatures.MapTimeWindow.fromId("1M"))
+
+        // 2. Exact window fade curves: 1wk fades at -1d (6d..7d), 1mo fades at -1wk (23d..30d), Heat = N/A (1.0f all time)
+        val dayMs = 24L * 3600_000L
+        assertEquals(1.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.WEEK_1, 5L * dayMs), 0.01f)
+        assertEquals(1.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.WEEK_1, 6L * dayMs), 0.01f)
+        assertTrue(KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.WEEK_1, (6.5 * dayMs).toLong()) in 0.54f..0.62f)
+        assertEquals(0.16f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.WEEK_1, 7L * dayMs), 0.02f)
+        assertEquals(0.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.WEEK_1, 8L * dayMs), 0.01f)
+
+        assertEquals(1.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.MONTH_1, 22L * dayMs), 0.01f)
+        assertEquals(1.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.MONTH_1, 23L * dayMs), 0.01f)
+        assertTrue(KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.MONTH_1, (26.5 * dayMs).toLong()) in 0.54f..0.62f)
+        assertEquals(0.16f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.MONTH_1, 30L * dayMs), 0.02f)
+        assertEquals(0.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.MONTH_1, 31L * dayMs), 0.01f)
+
+        assertEquals(1.0f, KokohoSignatures.mapWindowOpacity(KokohoSignatures.MapTimeWindow.HEAT, 120L * dayMs), 0.01f)
+
+        // 3. Multi-week / multi-month durable persistence (no 48h ledger pruning or 24h cache eviction!)
+        val nowMs = 1_794_860_000_000L
+        fun mkLedgerEntity(uuid: String, ageDays: Long, lat: Double, lon: Double) = EvaluatedThreat(
+            uuid = uuid,
+            trackUuid = uuid,
+            agency = KokohoAgency.POLICE,
+            label = "Police",
+            posture = PostureColor.YELLOW,
+            overallConfidence = 90,
+            classificationConfidence = 92,
+            spatialConfidence = 88,
+            estimatedDistanceM = 450,
+            uncertaintyRadiusM = 110,
+            bearingDeg = null,
+            closingVelocityMps = null,
+            recurrenceSummary = "East Broadway Historical ($ageDays d)",
+            evidenceSources = listOf(EvidenceBadge("RF_P25", "rf:chan:807450000:ANY", "807.4500 MHz", 0.9, nowMs - ageDays * dayMs)),
+            updatedAtMs = nowMs - ageDays * dayMs,
+            lat = lat,
+            lon = lon,
+            isApproximatedPosition = true,
+            isPinpointed = false,
+            sightingCount = 8
+        )
+        KokohoEntityLedger.upsertBatch(
+            ctx,
+            listOf(
+                mkLedgerEntity("hist-5d-uuid-0000-000000000005", 5L, 32.2211, -110.8197),
+                mkLedgerEntity("hist-20d-uuid-000-000000000020", 20L, 32.2215, -110.8068),
+                mkLedgerEntity("hist-65d-uuid-000-000000000065", 65L, 32.2152, -110.8384)
+            ),
+            nowMs
+        )
+        KokohoPostureEngine.clearRamOnlyForTest()
+        KokohoEntityLedger.simulateProcessRestartForTest(ctx)
+
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.HOURS_24)
+        val snap24h = KokohoPostureEngine.evaluate(ctx, nowMs)
+        assertFalse(snap24h.mapThreats.any { it.uuid.startsWith("hist-") })
+
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.WEEK_1)
+        val snap1wk = KokohoPostureEngine.evaluate(ctx, nowMs)
+        assertTrue("5d entity must appear in 1wk window", snap1wk.mapThreats.any { it.uuid == "hist-5d-uuid-0000-000000000005" })
+        assertFalse("20d entity must not appear in 1wk window", snap1wk.mapThreats.any { it.uuid == "hist-20d-uuid-000-000000000020" })
+
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MONTH_1)
+        val snap1mo = KokohoPostureEngine.evaluate(ctx, nowMs)
+        assertTrue("5d entity must appear in 1mo window", snap1mo.mapThreats.any { it.uuid == "hist-5d-uuid-0000-000000000005" })
+        assertTrue("20d entity must appear in 1mo window", snap1mo.mapThreats.any { it.uuid == "hist-20d-uuid-000-000000000020" })
+        assertFalse("65d entity must not appear in 1mo window", snap1mo.mapThreats.any { it.uuid == "hist-65d-uuid-000-000000000065" })
+
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.HEAT)
+        val snapHeat = KokohoPostureEngine.evaluate(ctx, nowMs)
+        assertEquals(
+            "All 3 historical entities (5d, 20d, 65d) must appear in All-Time Heat window",
+            setOf("hist-5d-uuid-0000-000000000005", "hist-20d-uuid-000-000000000020", "hist-65d-uuid-000-000000000065"),
+            snapHeat.mapThreats.filter { it.uuid.startsWith("hist-") }.map { it.uuid }.toSet()
+        )
+
+        // 4. Real RfMap Heat Layer & Rendering Assertions (50% opacity smooth continuous MapLibre heatmap, ZERO hexagons!)
+        val addedLayers = mutableMapOf<String, org.json.JSONObject>()
+        val sourceData = mutableMapOf<String, String>()
+        val addedSources = mutableSetOf<String>()
+        val fakeEngine = object : org.tucsoncommunity.kokoho.ui.MapEngine {
+            override val provider = org.tucsoncommunity.kokoho.ui.MapEngine.Provider.OPENFREEMAP
+            override val view = android.view.View(act)
+            override val credit = ""
+            override val labelFont = listOf("Noto Sans Regular")
+            override fun onCreate(state: android.os.Bundle?) {}
+            override fun onStart() {}
+            override fun onResume() {}
+            override fun onPause() {}
+            override fun onStop() {}
+            override fun onLowMemory() {}
+            override fun onSaveInstanceState(out: android.os.Bundle) {}
+            override fun onDestroy() {}
+            override fun whenReady(ready: () -> Unit) { ready() }
+            override fun setStyle(dark: Boolean, loaded: (Boolean) -> Unit) { loaded(true) }
+            override val styleLoaded = true
+            override fun hasSource(id: String) = id in addedSources
+            override fun addImage(id: String, bitmap: android.graphics.Bitmap) {}
+            override fun addSource(id: String) { addedSources += id }
+            override fun setData(source: String, geoJson: String) { sourceData[source] = geoJson }
+            override fun addLayer(json: org.json.JSONObject) { addedLayers[json.getString("id")] = json }
+            override fun setPaint(layer: String, name: String, value: String) {}
+            override val camera = org.tucsoncommunity.kokoho.ui.MapEngine.Camera(32.2216, -110.8410, 12.0, 0.0, 0.0)
+            override fun jumpTo(lat: Double, lon: Double, zoom: Double?) {}
+            override fun zoomTo(zoom: Double) {}
+            override fun easeTo(lat: Double?, lon: Double?, zoom: Double?, bearing: Double?, tilt: Double?, flat: Boolean, ms: Long) {}
+            override fun fit(points: List<Pair<Double, Double>>, paddingPx: Int, bottomPx: Int) {}
+            override fun visibleBox() = org.tucsoncommunity.kokoho.ui.MapEngine.Box(32.35, -110.75, 32.10, -111.05)
+            override fun toLatLon(x: Float, y: Float) = 32.2216 to -110.8410
+            override fun setMinZoom(zoom: Double) {}
+            override var onCameraMove: (() -> Unit)? = null
+            override var onIdle: (() -> Unit)? = null
+            override var onClick: ((Float, Float) -> Unit)? = null
+            override var onLongClick: ((Double, Double) -> Unit)? = null
+            override var onUserGesture: (() -> Unit)? = null
+            override fun query(box: android.graphics.RectF, layers: List<Pair<String, String>>, result: (List<List<String>>) -> Unit) {
+                result(layers.map { emptyList() })
+            }
+            override fun setMarker(bitmap: android.graphics.Bitmap?) {}
+            override val draws3dMarker = false
+            override fun setMarker3d(model: File?, size: Float) {}
+            override fun startPuck() = true
+            override val puckOn = true
+            override fun pushFix(fix: android.location.Location) {}
+            override fun follow(mode: org.tucsoncommunity.kokoho.ui.MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) {}
+            override var onFollowDismissed: (() -> Unit)? = null
+            override fun placeBranding(topPx: Int, atEnd: Boolean) {}
+        }
+        val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
+        rfMap.loadStyle(dark = true) {}
+        val heatLayer = addedLayers["rf-kokoho-heat"]
+        assertNotNull("rf-kokoho-heat layer must be registered", heatLayer)
+        assertEquals("rf-kokoho-heat must be smooth MapLibre heatmap (not hexagonal fill)", "heatmap", heatLayer!!.getString("type"))
+        assertEquals(0.50, heatLayer.getJSONObject("paint").getDouble("heatmap-opacity"), 0.001)
+
+        val heatPins = rfMap.drawLive(emptyList(), snapHeat)
+        assertTrue("Heat mode must suppress individual entity pins", heatPins.isEmpty())
+        val heatGeoJson = org.json.JSONObject(sourceData["rf-kokoho-heat"]!!)
+        assertEquals("Heat mode must populate all 3 historical points into rf-kokoho-heat", 3, heatGeoJson.getJSONArray("features").length())
+        assertEquals(0, org.json.JSONObject(sourceData["rf-devices"]!!).getJSONArray("features").length())
+        assertEquals(0, org.json.JSONObject(sourceData["rf-precision"]!!).getJSONArray("features").length())
+
+        // Switch to 1wk and verify individual pins render and rf-kokoho-heat clears
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.WEEK_1)
+        val weekPins = rfMap.drawLive(emptyList(), snap1wk)
+        assertEquals(1, weekPins.size)
+        assertEquals(0, org.json.JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
+
+        // 5. East Broadway Cruiser Qualification & Attested NIC Blocks & False-Positive Elimination:
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        DeviceRegistry.clear()
+        RadioLog.clear()
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+
+        val eastGeo = DeviceRegistry.GeoSample(nowMs, 32.21520, -110.83840)
+        val idWifi = DeviceIntel.Identity("WiFi access point", emptyList())
+
+        // 5a. Cradlepoint R920-f77-5g (`00:30:44:6B:5F:79` @ -91 dBm 5GHz) MUST qualify as POLICE!
+        DeviceRegistry.report(
+            Advert(
+                mac = "00:30:44:6B:5F:79",
+                source = Advert.Source.WIFI,
+                rssi = -91,
+                name = "R920-f77-5g",
+                wifi = Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false, upSince = nowMs - 3600_000L),
+                timestamp = nowMs
+            ),
+            emptyList(), idWifi, "CradlePoint, Inc", null, eastGeo, nowMs, here = eastGeo
+        )
+        // 5b. Standalone Panasonic Connect Toughbook MDT (`B8:20:8E:21:B2:05` @ -78 dBm) MUST qualify as POLICE with Patrol MDT capability!
+        val mdtGeo = DeviceRegistry.GeoSample(nowMs, 32.20785, -110.85015)
+        DeviceRegistry.report(
+            Advert(
+                mac = "B8:20:8E:21:B2:05",
+                source = Advert.Source.WIFI,
+                rssi = -78,
+                name = null,
+                wifi = Advert.WifiInfo(5240, "[WPA2-PSK-CCMP]", null, emptyList(), client = true),
+                timestamp = nowMs
+            ),
+            emptyList(), idWifi, "Panasonic Connect Co., Ltd.", null, mdtGeo, nowMs, here = mdtGeo
+        )
+        // 5c. Attested PCSO sub-block `00:30:44:74:AD:53` (`IBR1700-d52`) MUST stay >= 90% Confirmed SHERIFF!
+        val pcsoGeo = DeviceRegistry.GeoSample(nowMs, 32.1950, -110.8900)
+        DeviceRegistry.report(
+            Advert(
+                mac = "00:30:44:74:AD:53",
+                source = Advert.Source.WIFI,
+                rssi = -84,
+                name = "IBR1700-d52",
+                wifi = Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                timestamp = nowMs
+            ),
+            emptyList(), idWifi, "CradlePoint, Inc", null, pcsoGeo, nowMs, here = pcsoGeo
+        )
+        // 5d. Consumer OUI collisions (`24:79:2A` Ruckus, `AC:82:47` Intel, `C8:B3:73` Linksys, `60:E3:27` TP-Link)
+        //     and commercial fleet routers (`10:56:CA:D1` GoEnergy, `00:0D:67:8B` Comcast, `88:4F:59:8E` cotwifi) MUST produce 0 false positives!
+        for ((badMac, badSsid, badVendor) in listOf(
+            Triple("24:79:2A:62:A8:28", "AC_GUEST", "Ruckus Wireless"),
+            Triple("AC:82:47:11:22:33", "", "Intel Corporate"),
+            Triple("C8:B3:73:44:55:66", "Linksys04455", "Cisco-Linksys"),
+            Triple("60:E3:27:ED:54:48", "TP-LINK_5448", "TP-Link Technologies"),
+            Triple("10:56:CA:D1:16:A8", "GoEnergy-4862", "Peplink International"),
+            Triple("00:0D:67:8B:4F:81", "OutOfService", "Ericsson"),
+            Triple("88:4F:59:8E:12:34", "cotwifi", "Cisco Systems")
+        )) {
+            DeviceRegistry.report(
+                Advert(
+                    mac = badMac,
+                    source = Advert.Source.WIFI,
+                    rssi = -65,
+                    name = badSsid,
+                    wifi = Advert.WifiInfo(2437, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                    timestamp = nowMs
+                ),
+                emptyList(), idWifi, badVendor, null, eastGeo, nowMs, here = eastGeo
+            )
+        }
+
+        val cruiserSnap = KokohoPostureEngine.evaluate(ctx, nowMs)
+        assertEquals("Exactly the 3 legitimate units (R920 POLICE, Toughbook POLICE, IBR1700-d52 SHERIFF) must qualify, got ${cruiserSnap.mapThreats}", 3, cruiserSnap.mapThreats.size)
+        assertTrue(cruiserSnap.mapThreats.any { it.agency == KokohoAgency.POLICE && it.hardwareIdentifier?.startsWith("00:30:44:6B:5F") == true })
+        assertTrue(cruiserSnap.mapThreats.any { it.agency == KokohoAgency.POLICE && it.capabilities.contains("Patrol MDT") })
+        val pcsoUnit = cruiserSnap.mapThreats.first { it.agency == KokohoAgency.SHERIFF }
+        assertTrue("Attested 00:30:44:74 sub-block must keep >= 90% classification confidence", pcsoUnit.classificationConfidence >= 90)
+
+        // 5e. 851.0125 MHz @ 28 dB SNR (East Broadway & Pantano f288efdd) qualifies, < 28 dB (22 dB) is suppressed;
+        //     807.4500 MHz @ 33 dB & 808.1750 MHz @ 32 dB qualify; private citizen A25082 (`VAN DE WALL ALLAN G`) is excluded!
+        assertNull(KokohoSignatures.matchFrequency(851_012_500L, snrDb = 22))
+        assertEquals(KokohoAgency.POLICE, KokohoSignatures.matchFrequency(851_012_500L, snrDb = 28)?.agencyEnum)
+        assertEquals(KokohoAgency.POLICE, KokohoSignatures.matchPublicSafetyMobileUplink(807_450_000L, 33, setOf(KokohoAgency.POLICE))?.agencyEnum)
+        assertEquals(KokohoAgency.POLICE, KokohoSignatures.matchPublicSafetyMobileUplink(808_175_000L, 32, setOf(KokohoAgency.POLICE))?.agencyEnum)
+        assertNull(
+            "FAA Individual private citizen aircraft A25082 (VAN DE WALL ALLAN G) must not be misclassified as DHS_AMO when turning",
+            KokohoSignatures.classifyAircraftAgency(
+                owner = "VAN DE WALL ALLAN G",
+                registration = "N2485X",
+                callsign = "N2485X",
+                hitLabel = null,
+                type = "C182",
+                hex = "A25082",
+                speedKt = 110.0,
+                isCircling = true
+            )
+        )
+
+        actCtrl.pause().stop().destroy()
+        KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+        KokohoEntityLedger.clearAll(ctx)
+        KokohoPostureEngine.clearLocalState()
+        DeviceRegistry.clear()
+        RadioLog.clear()
+    }
+
+    @Test
     fun channelSplitAndHygiene() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         KokohoSignatures.ensureLoaded(ctx)

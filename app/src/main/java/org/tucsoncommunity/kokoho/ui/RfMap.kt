@@ -264,19 +264,19 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("line-color" to "#FFFFFF", "line-width" to 11.0)),
             layer("$NAV_ROUTES-line", "line", NAV_ROUTES, filter = a("==", get("sel"), true), layout = routeLine,
                 paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0)),
-            // 50% transparent heatmap overlay (ground hotspots + generally landed aircraft zones).
+            // 50% opacity all-time smooth radial heatmap (non-hexagonal) for `Heat` mode.
             layer(HEAT, "heatmap", paint = o(
                 "heatmap-weight" to a("coalesce", get("weight"), 1.0),
-                "heatmap-intensity" to 1.05,
-                "heatmap-radius" to a("interpolate", a("linear"), a("zoom"), 9, 18.0, 12, 30.0, 15, 44.0),
+                "heatmap-intensity" to 1.15,
+                "heatmap-radius" to a("interpolate", a("linear"), a("zoom"), 8, 16.0, 11, 28.0, 14, 42.0, 16, 54.0),
                 "heatmap-opacity" to 0.50,
                 "heatmap-color" to a(
                     "interpolate", a("linear"), a("heatmap-density"),
                     0.0, "rgba(0,0,0,0)",
-                    0.2, "rgba(59,130,246,0.55)",
-                    0.45, "rgba(168,85,247,0.72)",
-                    0.7, "rgba(249,115,22,0.85)",
-                    1.0, "rgba(239,68,68,0.95)"
+                    0.18, "rgba(59,130,246,0.85)",
+                    0.42, "rgba(168,85,247,0.95)",
+                    0.68, "rgba(249,115,22,1.0)",
+                    1.0, "rgba(239,68,68,1.0)"
                 )
             )),
             // Flagged signal radius / centroid bubbles (50% transparent fill so the basemap reads cleanly through).
@@ -528,6 +528,34 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val fallbackLat = ScanForegroundService.lastFix?.latitude ?: map.camera.lat.takeIf { kotlin.math.abs(it) > 1e-4 } ?: 32.2226
         val fallbackLon = ScanForegroundService.lastFix?.longitude ?: map.camera.lon.takeIf { kotlin.math.abs(it) > 1e-4 } ?: -110.9747
         val timeWindow = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
+
+        if (timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
+            val heatFeatures = snap.mapThreats.mapNotNull { t ->
+                if (t.isAircraft) return@mapNotNull null
+                if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(t.hardwareIdentifier, t.title)) return@mapNotNull null
+                val lat = t.lat ?: return@mapNotNull null
+                val lon = t.lon ?: return@mapNotNull null
+                val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
+                val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
+                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight)
+            }
+            set(HEAT, heatFeatures)
+            drawPins(emptyList())
+            wazeShown = emptyMap()
+            set(WAZE, emptyList())
+            set(WIGLE, emptyList())
+            set(ASKED, emptyList())
+            droneThreatsByUuid = emptyMap()
+            drones = emptyMap()
+            set(DRONES, emptyList())
+            set(DRONE_OPS, emptyList())
+            set(DRONE_LINES, emptyList())
+            airThreatsByUuid = emptyMap()
+            set(AIRCRAFT, emptyList())
+            set(FLIGHT_TRACKS, emptyList())
+            drawLocations()
+            return emptyList()
+        }
 
         val groundThreats = snap.mapThreats.filter {
             !it.isAircraft &&
@@ -815,11 +843,12 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
 
         // Thin Chaikin-smoothed flight tracks:
         //  - 30m / 3h windows: ONLY currently in-flight aircraft
-        //  - 24h / 1wk windows: all flights within the active window
+        //  - 24h / 1wk / 1mo windows: all flights within the active window
         val trackFeatures = mutableListOf<JSONObject>()
         val cachedTracks = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedFlightTracks()
         if (timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HOURS_24 ||
-            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.WEEK_1
+            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.WEEK_1 ||
+            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.MONTH_1
         ) {
             val enabledAirAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAircraftAgencies(activity)
             val liveEntities = airThreats.map { it.uuid }.toSet()

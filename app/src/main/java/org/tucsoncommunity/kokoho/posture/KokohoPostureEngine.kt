@@ -455,13 +455,17 @@ object KokohoPostureEngine {
             if (t.aircraftHex?.uppercase() in groundedHexes) return true
             return ageMs > min(mapVisibilityMs, LIVE_AIRCRAFT_MAX_AGE_MS)
         }
+        // Located ground/drone detections remain visible for the full active rolling map window
+        // (`30m`, `3h`, `24h`, `1wk`, `1mo`, `Heat`), never evicted prematurely at 3m or 24h.
+        if (t.lat != null && t.lon != null) {
+            return false
+        }
         val rfOnly = t.evidenceSources.isNotEmpty() &&
             t.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" }
         if (rfOnly && !t.isApproximatedPosition) {
             return ageMs > min(mapVisibilityMs, LOCAL_RF_ONLY_CACHE_TTL_MS)
         }
-        val ttl = if (t.isApproximatedPosition) min(mapVisibilityMs, 24 * 3600_000L) else min(mapVisibilityMs, LOCAL_SENSOR_CACHE_TTL_MS)
-        return ageMs > ttl
+        return ageMs > min(mapVisibilityMs, LOCAL_SENSOR_CACHE_TTL_MS)
     }
 
     /**
@@ -1250,20 +1254,34 @@ object KokohoPostureEngine {
                 conf = max(conf, (learnedMac.reputationScore * 100).roundToInt().coerceIn(70, 96))
             }
             val isStaticBaseline = KokohoSignatures.isStaticBaselineRouter(context, normMac) && !isWatchedGroup
+            val upSince = snap.upSince ?: snap.advert?.wifi?.upSince
+            val isIgnitionFreshMobile = upSince != null &&
+                snap.lastSeen > upSince &&
+                (snap.lastSeen - upSince) <= 12L * 3600_000L &&
+                !KokohoSignatures.isOpenPublicWifiCapabilities(snap.advert?.wifi?.capabilities)
+            val isMobileRouterModel = KokohoSignatures.isMobileVehicleRouterModelSsid(snap.name)
             if (isStaticBaseline) {
                 conf = min(conf, 35)
-            } else if (KokohoSignatures.isLowConfidenceDefaultRouterSsid(snap.name)) {
-                conf = min(conf, 45)
             } else if (KokohoSignatures.isHighValueUnitSsid(snap.name)) {
                 conf = min(96, conf + 18)
+            } else if (!isGenericRouter) {
+                // Confidently attested NIC sub-block or explicit agency SSID: never cap down to default-router floor!
+                conf = max(conf, matchedPair.third)
+            } else if (isIgnitionFreshMobile) {
+                // Shift-fresh 802.11 TSF boot epoch (<= 12h) on WPA2/WPA3 fleet router qualifies as Likely mobile unit
+                conf = max(min(conf, 68), 66)
+            } else if (KokohoSignatures.isLowConfidenceDefaultRouterSsid(snap.name)) {
+                conf = min(conf, 54)
             } else if (isGenericRouter && learnedMac == null) {
-                // Uncorroborated generic fleet router (e.g., commercial/trooper Cradlepoint): stay soft <= 58% YELLOW until corroborated
+                // Uncorroborated generic fleet router: stay soft <= 58% YELLOW until corroborated
                 conf = min(conf, 58)
             }
             val is5Ghz = (snap.advert?.wifi?.frequencyMhz ?: 0) >= 5000
-            val strongEnough = snap.rssi >= -86 ||
+            val minRssiGate = if (!isGenericRouter || isMobileRouterModel || isIgnitionFreshMobile) -95 else -86
+            val strongEnough = snap.rssi >= minRssiGate ||
+                snap.bestRssi >= minRssiGate ||
                 (snap.sightings >= 2 && snap.bestRssi >= -89) ||
-                (is5Ghz && snap.bestRssi >= -89)
+                (is5Ghz && snap.bestRssi >= -91)
             if (!strongEnough) return@mapNotNull null
             LocalOuiCandidate(
                 mac = normMac,
@@ -1524,6 +1542,7 @@ object KokohoPostureEngine {
         data class KitEntry(
             val capLabel: String,
             val isBodycam: Boolean,
+            val isPrinter: Boolean,
             val facetPrefix: String,
             val badge: EvidenceBadge,
             val lastSeen: Long,
@@ -1534,7 +1553,7 @@ object KokohoPostureEngine {
         )
         val kitEntries = mutableListOf<KitEntry>()
         for (snap in localDevices) {
-            if (snap.rssi < -88) continue
+            if (snap.rssi < -91 && snap.bestRssi < -91) continue
             if (KokohoSignatures.isFixedRoomOrBuildingWifiAp(snap)) continue
             val normMac = KokohoSignatures.normalizeMac(snap.mac)
             if (KokohoSignatures.isAxonNetworksConsumerRouter(normMac, snap.name, snap.vendor)) continue
@@ -1544,7 +1563,9 @@ object KokohoPostureEngine {
                 KokohoSignatures.isZebraCitationPrinter(normMac, snap.name, snap.vendor)
             val isPortableRadio = bleKind == KokohoSignatures.BleTacticalKind.MOTOROLA_RADIO ||
                 (!isPrinter && Regex("(?i)\\b(MOTOROLA\\s+SOLUTIONS|APX|XL-?200P|XL-?185P)\\b").containsMatchIn("${snap.name.orEmpty()} ${snap.vendor.orEmpty()}"))
-            val isBodycam = !isPrinter && !isPortableRadio && (
+            val isPatrolMdt = !isPrinter && !isPortableRadio &&
+                KokohoSignatures.isPatrolMdtDevice(normMac, snap.name, snap.vendor)
+            val isBodycam = !isPrinter && !isPortableRadio && !isPatrolMdt && (
                 bleKind == KokohoSignatures.BleTacticalKind.AXON_BODYCAM ||
                     normMac.startsWith("00:25:DF") ||
                     normMac.startsWith("D8:1F:65") ||
@@ -1563,18 +1584,21 @@ object KokohoPostureEngine {
                 isBodycam -> "hw:kit:bwc"
                 isPrinter -> "hw:kit:printer"
                 isPortableRadio -> "hw:kit:radio"
+                isPatrolMdt -> "hw:kit:mdt"
                 else -> "hw:kit:acc"
             }
             val capLabel = when {
                 isBodycam -> "Bodycam"
                 isPrinter -> "Citation Printer"
                 isPortableRadio -> "Portable Radio"
+                isPatrolMdt -> "Patrol MDT"
                 else -> "Tactical Kit"
             }
             val kindTag = when {
                 isBodycam -> "COMPANION_BODY_CAM"
                 isPrinter -> "COMPANION_PRINTER"
                 isPortableRadio -> "COMPANION_RADIO"
+                isPatrolMdt -> "COMPANION_MDT"
                 else -> "COMPANION_KIT"
             }
             val defaultName = bleKind?.defaultSummary ?: capLabel
@@ -1589,6 +1613,7 @@ object KokohoPostureEngine {
             kitEntries += KitEntry(
                 capLabel = capLabel,
                 isBodycam = isBodycam,
+                isPrinter = isPrinter,
                 facetPrefix = facetPrefix,
                 badge = badge,
                 lastSeen = snap.lastSeen,
@@ -1603,6 +1628,7 @@ object KokohoPostureEngine {
             kitEntries += KitEntry(
                 capLabel = "Cell Anomaly",
                 isBodycam = false,
+                isPrinter = false,
                 facetPrefix = "cell:anom",
                 badge = EvidenceBadge(
                     kind = "CELL_ANOMALY",
@@ -1737,7 +1763,7 @@ object KokohoPostureEngine {
             for (entry in unattachedKits) {
                 val kitMac = entry.normMac ?: continue
                 val kitSnap = entry.snap ?: continue
-                if (!entry.isBodycam) {
+                if (entry.isPrinter) {
                     // Unnamed Wi-Fi Zebra OUI devices (`C8:1C:FE`, `94:FB:29`, etc.) with no explicit printer/DIRECT SSID
                     // are retail/warehouse barcode terminals, never standalone patrol units.
                     if (kitSnap.source == org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI &&
@@ -1753,6 +1779,8 @@ object KokohoPostureEngine {
                     nameUp.contains("SHERIFF") || nameUp.contains("PCSO") || nameUp.contains("PCSD") -> KokohoAgency.SHERIFF
                     nameUp.contains("TPD") || nameUp.contains("POLICE") -> KokohoAgency.POLICE
                     primaryPresence != null && primaryPresence in enabled -> primaryPresence
+                    entry.facetPrefix == "hw:kit:mdt" && KokohoAgency.POLICE in enabled -> KokohoAgency.POLICE
+                    entry.facetPrefix == "hw:kit:mdt" && KokohoAgency.SHERIFF in enabled -> KokohoAgency.SHERIFF
                     isAgnostic && KokohoAgency.POLICE in enabled && KokohoAgency.DHS_INTEROP !in KokohoSignatures.getEnabledAgencies(context) -> KokohoAgency.POLICE
                     isAgnostic && KokohoAgency.DHS_INTEROP in enabled -> KokohoAgency.DHS_INTEROP
                     KokohoAgency.POLICE in enabled -> KokohoAgency.POLICE
@@ -2370,14 +2398,19 @@ object KokohoPostureEngine {
             }
         }
 
-        // 6a. Persist fresh LOCAL located entities into the durable 48h SQLite ledger and hydrate rolling-window entities
+        // 6a. Persist fresh LOCAL located entities into the durable all-time SQLite ledger and hydrate rolling-window entities
         for (fresh in evaluated.values) {
             if (!fresh.isAircraft && fresh.lat != null && fresh.lon != null && localThreatCache.containsKey(fresh.uuid)) {
                 KokohoEntityLedger.upsert(context, fresh, nowMs)
             }
         }
         for (persisted in KokohoEntityLedger.getWithinRollingWindow(context, nowMs, mapVisibilityMs)) {
-            if (persisted.uuid !in evaluated && persisted.agency in enabled) {
+            val persistedAllowed = if (persisted.isDrone) {
+                KokohoSignatures.isDroneDetectionEnabled(context) || KokohoAgency.DRONE in mapVisible
+            } else {
+                persisted.agency in enabled
+            }
+            if (persisted.uuid !in evaluated && persistedAllowed) {
                 localThreatCache.putIfAbsent(persisted.uuid, persisted)
             }
         }
@@ -2691,17 +2724,22 @@ object KokohoPostureEngine {
         return snap.mapThreats.filter { it.agency == agency }
     }
 
-    /** Formats staleness age concisely: e.g. `just now`, `25s ago`, `2m ago`, `1h 15m ago`. */
+    /** Formats staleness age concisely: e.g. `just now`, `25s ago`, `2m ago`, `1h 15m ago`, `5d ago`. */
     fun formatStalenessAge(ageMs: Long): String {
         val sec = max(0L, ageMs / 1000L)
         return when {
             sec < 10L -> "just now"
             sec < 60L -> "${sec}s ago"
             sec < 3600L -> "${sec / 60L}m ago"
-            else -> {
+            sec < 2L * 86_400L -> {
                 val h = sec / 3600L
                 val m = (sec % 3600L) / 60L
                 if (m > 0) "${h}h ${m}m ago" else "${h}h ago"
+            }
+            else -> {
+                val d = sec / 86_400L
+                val h = (sec % 86_400L) / 3600L
+                if (d < 7L && h > 0L) "${d}d ${h}h ago" else "${d}d ago"
             }
         }
     }

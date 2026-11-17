@@ -642,23 +642,26 @@ object KokohoSignatures {
         prefs.edit { putStringSet(KEY_WATCHED_ENTITIES, next) }
     }
 
-    // ---- Map Time Window ("30m", "3h", "24h", "1wk", "All Time"), Gravity Clustering & Color Mixing ----
+    // ---- Map Time Window ("30m", "3h", "24h", "1wk", "1mo", "Heat"), Gravity Clustering & Color Mixing ----
 
     enum class MapTimeWindow(val id: String, val label: String, val windowMs: Long) {
         MIN_30("30M", "30m", 30 * 60_000L),
         HOURS_3("3H", "3h", 3 * 60 * 60_000L),
         HOURS_24("24H", "24h", 24 * 60 * 60_000L),
         WEEK_1("1W", "1wk", 7L * 24 * 60 * 60_000L),
-        ALL_TIME("ALL", "All Time", 3650L * 24 * 60 * 60_000L);
+        MONTH_1("1M", "1mo", 30L * 24 * 60 * 60_000L),
+        HEAT("HEAT", "Heat", 36_500L * 24 * 60 * 60_000L);
 
         companion object {
-            /** Rolling duration windows exposed in the Map UI (`30m`, `3h`, `24h`). */
-            val ROLLING_UI_WINDOWS = listOf(MIN_30, HOURS_3, HOURS_24)
+            /** Rolling duration windows exposed in the Map UI (`30m`, `3h`, `24h`, `1wk`, `1mo`, `Heat`). */
+            val ROLLING_UI_WINDOWS = listOf(MIN_30, HOURS_3, HOURS_24, WEEK_1, MONTH_1, HEAT)
 
-            fun fromId(id: String?): MapTimeWindow =
-                entries.firstOrNull { it.id.equals(id, ignoreCase = true) }?.let {
-                    if (it == WEEK_1 || it == ALL_TIME) HOURS_24 else it
-                } ?: MIN_30
+            fun fromId(id: String?): MapTimeWindow {
+                if (id.isNullOrBlank()) return MIN_30
+                val up = id.trim().uppercase()
+                if (up == "ALL" || up == "ALL_TIME") return HEAT
+                return entries.firstOrNull { it.id.equals(up, ignoreCase = true) || it.label.equals(up, ignoreCase = true) } ?: MIN_30
+            }
         }
     }
 
@@ -781,10 +784,13 @@ object KokohoSignatures {
     }
 
     /**
-     * Window-specific rolling opacity curve (`30m` vs `3h` vs `24h`):
+     * Window-specific rolling opacity curve (`30m` | `3h` | `24h` | `1wk` | `1mo` | `Heat`):
      *  - `30m`: fades continuously across `0..30m` (`1.00 -> 0.16`).
-     *  - `3h`: stays full (`1.00`) across `0..150m` (`2h 30m`), fading over the last `30m` (`150m..180m`).
-     *  - `24h`: stays full (`1.00`) across `0..23h`, fading over the last `1h` (`23h..24h`).
+     *  - `3h`: stays full (`1.00`) across `0..150m` (`2h 30m`), fading over `-30m` (`150m..180m`).
+     *  - `24h`: stays full (`1.00`) across `0..23h`, fading over `-1h` (`23h..24h`).
+     *  - `1wk`: stays full (`1.00`) across `0..6d`, fading at `-1d` (`6d..7d`).
+     *  - `1mo`: stays full (`1.00`) across `0..23d`, fading at `-1wk` (`23d..30d`).
+     *  - `Heat`: `N/A` fade (`1.00` across all-time; rendered as 50% opacity smooth non-hexagonal heatmap).
      */
     fun mapWindowOpacity(window: MapTimeWindow, ageMs: Long): Float {
         val age = ageMs.coerceAtLeast(0L)
@@ -804,7 +810,7 @@ object KokohoSignatures {
                     (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
                 }
             }
-            MapTimeWindow.HOURS_24, MapTimeWindow.WEEK_1, MapTimeWindow.ALL_TIME -> {
+            MapTimeWindow.HOURS_24 -> {
                 val fadeStart = 23L * 60 * 60_000L
                 val fadeSpan = 60 * 60_000f
                 if (age <= fadeStart) 1.0f
@@ -813,6 +819,27 @@ object KokohoSignatures {
                     (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
                 }
             }
+            MapTimeWindow.WEEK_1 -> {
+                val dayMs = 24L * 60 * 60_000L
+                val fadeStart = 6L * dayMs
+                val fadeSpan = dayMs.toFloat()
+                if (age <= fadeStart) 1.0f
+                else {
+                    val frac = ((age - fadeStart).toFloat() / fadeSpan).coerceIn(0f, 1f)
+                    (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+                }
+            }
+            MapTimeWindow.MONTH_1 -> {
+                val dayMs = 24L * 60 * 60_000L
+                val fadeStart = 23L * dayMs
+                val fadeSpan = (7L * dayMs).toFloat()
+                if (age <= fadeStart) 1.0f
+                else {
+                    val frac = ((age - fadeStart).toFloat() / fadeSpan).coerceIn(0f, 1f)
+                    (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+                }
+            }
+            MapTimeWindow.HEAT -> 1.0f
         }
     }
 
@@ -1029,6 +1056,7 @@ object KokohoSignatures {
         //  - Immediately resolve verified LE / DHS / Covert FBI-DHS Shell / PIA aircraft (`LE`, `GOV`) even when offline!
         if (!explicitLeOrCivic && ref != null) {
             if (ref.isExcludedNonThreat) return null
+            if (ref.registrantKind == 'I' && ref.disposition == "CIV") return null
             if (ref.isExplicitLeOrGov && ref.agencyHint != null) return ref.agencyHint
         }
 
@@ -1068,7 +1096,7 @@ object KokohoSignatures {
         }
     }
 
-    /** Dual-use national calling repeater-output / direct-simplex frequencies (`8CALL90/D`, `7CALL50/D`) that require >= 40 dB SNR to reject distant hilltop repeaters. */
+    /** Dual-use national calling repeater-output / direct-simplex frequencies (`8CALL90/D`, `7CALL50/D`) that require >= 28 dB SNR to reject weak distant repeaters. */
     private val DUAL_USE_CALLING_FREQS_HZ = longArrayOf(851_012_500L, 769_243_750L)
 
     fun isDualUseRepeaterSimplexHz(hz: Long): Boolean =
@@ -1077,7 +1105,7 @@ object KokohoSignatures {
     /**
      * Matches an RF frequency in Hz (and optional P25 NAC) against the curated signature catalog.
      * By default (`includeRepeaters = false`), solidly excludes `REPEATER` downlinks and `CONTROL_CHANNEL` trunks,
-     * and enforces `snrDb >= 40` on dual-use repeater/simplex calling channels (`851.0125 MHz`) when `snrDb` is supplied.
+     * and enforces `snrDb >= 28` on dual-use repeater/simplex calling channels (`851.0125 MHz`) when `snrDb` is supplied.
      */
     fun matchFrequency(
         hz: Long,
@@ -1086,7 +1114,7 @@ object KokohoSignatures {
         includeRepeaters: Boolean = false,
         snrDb: Int? = null
     ): RfChannelSig? {
-        if (!includeRepeaters && snrDb != null && snrDb < 40 && isDualUseRepeaterSimplexHz(hz)) {
+        if (!includeRepeaters && snrDb != null && snrDb < 28 && isDualUseRepeaterSimplexHz(hz)) {
             return null
         }
         val candidates = rfChannels.filter {
@@ -1175,7 +1203,7 @@ object KokohoSignatures {
         enabledAgencies: Set<KokohoAgency>? = null,
         primaryPresenceAgency: KokohoAgency? = null
     ): RfChannelSig? {
-        if (snrDb < 30) return null
+        if (snrDb < 27) return null
         val inBand = (hz in 799_000_000L..805_000_000L) || (hz in 806_000_000L..813_900_000L)
         if (!inBand) return null
         val exactAny = rfChannels.firstOrNull { abs(it.hz - hz) <= 6_250L }
@@ -1261,6 +1289,17 @@ object KokohoSignatures {
     private val IGNORED_INFRA_MAC_PREFIXES = listOf(
         "00:30:44:55:", // City of Tucson "rmat" Regional Metropolitan Arterial Traffic signal cabinets
         "06:30:44:55:", // AMR / GMR ambulance ePCR ("GMREPCR") & arterial traffic cabinet virtual APs
+        "10:56:CA:D1:", // GoEnergy commercial gas station fixed Peplink POS routers
+        "10:56:CA:D4:", // GoEnergy commercial gas station fixed Peplink POS routers
+        "10:56:CA:E5:", // GoEnergy commercial gas station fixed Peplink POS routers
+        "10:56:CA:F5:", // GoEnergy commercial gas station fixed Peplink POS routers
+        "10:56:CA:F6:", // GoEnergy commercial gas station fixed Peplink POS routers
+        "00:0D:67:8B:", // Comcast Xfinity aerial strand-mounted Wi-Fi APs ("OutOfService" / "XFINITY")
+        "88:4F:59:8E:", // City of Tucson fixed municipal building Cisco APs ("cotwifi" / "cotpublic")
+        "88:4F:59:BB:", // City of Tucson fixed municipal building Cisco APs ("cotwifi" / "cotpublic")
+        "88:9C:AD:B9:", // City of Tucson fixed municipal building Cisco APs ("cotwifi" / "cotpublic")
+        "88:9C:AD:BD:", // City of Tucson fixed municipal building Cisco APs ("cotwifi" / "cotpublic")
+        "AC:2A:A1:9D:", // City of Tucson fixed municipal building Cisco APs ("cotpublic" / "cot-iot")
         "04:F0:21:",    // Compex Systems highway light-pole / intersection V2X backhaul modules
         "00:40:29:",    // Compex Systems fixed wireless backhaul modules
         "00:80:48:",    // Compex Incorporated fixed wireless backhaul modules
@@ -1271,30 +1310,71 @@ object KokohoSignatures {
         "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*)\\s*$"
     )
 
+    /** Fixed indoor branch/failover router SSIDs (NEVER R920/R980/R1900/IBR900/IBR1700, which are ruggedized IN-VEHICLE patrol routers!). */
     private val FIXED_BRANCH_ROUTER_MODEL_SSID_REGEX = Regex(
-        "(?i)^\\s*(E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|AISMobile.*|MimoSeries.*)\\s*$"
+        "(?i)^\\s*(E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|AISMobile.*|MimoSeries.*)\\s*$"
     )
 
     /** KARR Auto Security (Directed Electronics) aftermarket dealership lot-management/car-alarm BLE modules (`QT <8hex>` / `DR <8hex>`). */
     private val KARR_DEALER_BLE_ALARM_REGEX = Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
 
     private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*)\\s*$"
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*|OutOfService|XFINITY|xfinitywifi|CableWiFi)\\s*$"
     )
 
-    private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TUCSON_?FIRE|NWFD|GRFD|GVFD).*)$")
-    private val DEFAULT_ROUTER_MODEL_SSID_REGEX = Regex("(?i)^\\s*IBR1700-[0-9A-Za-z_-]+\\s*$")
+    private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TFD\\d+|TUCSON_?FIRE|NWFD.*|GRFD.*|GVFD.*|AVFD.*|OVFD.*|RMFD.*|PCFD.*|SVFD.*|RVFD.*|MTFD.*|PTFD.*))$")
+    private val MOBILE_VEHICLE_ROUTER_SSID_REGEX = Regex("(?i)^\\s*(R1900|R920|R980|IBR900|IBR1700)-[0-9A-Za-z_-]+\\s*$")
+    private val DEFAULT_ROUTER_MODEL_SSID_REGEX = Regex("(?i)^\\s*(IBR900|IBR1700|R920|R980|R1900)-[0-9A-Za-z_-]+\\s*$")
     private val FLEET_UNIT_SSID_REGEX = Regex("(?i)^\\s*(Unit|Car|SQD|K9|TAHOE|RAM|SUP)[\\s_-]*\\d+.*$")
     private val MULTI_RADIO_ROUTER_OUIs = setOf(
-        "00:30:44", "00:E0:1C", "24:79:2A", "AC:82:47", "C8:B3:73", // Cradlepoint / Ericsson
-        "D4:13:F8", "10:56:CA", "00:11:6E", "6C:A3:D3",             // Peplink / Pepwave
+        "00:30:44", "00:E0:1C",                                     // Cradlepoint / Ericsson Enterprise Wireless
+        "D4:13:F8", "10:56:CA", "00:11:6E", "6C:A3:D3", "00:1A:DD", "A8:C0:EA", // Peplink / Pepwave
         "00:14:3E", "00:A0:D5", "28:A3:31", "50:13:9D", "64:CE:6E", // Sierra Wireless AirLink
-        "84:DB:2F", "CC:93:4A", "D8:12:65", "60:E3:27",             // Sierra Wireless / Semtech
+        "84:DB:2F", "CC:93:4A", "00:16:C0",                         // Sierra Wireless / Semtech
         "00:15:FF", "18:EE:86", "28:80:A2", "78:0C:71", "E0:86:14", // Inseego / Novatel MiFi & Vehicle
         "00:40:9D", "00:1E:42", "00:18:0A", "E4:3E:D7"              // Digi International / Teltonika / Meraki
     )
-    private val GENERIC_FLEET_ROUTER_OUIs = MULTI_RADIO_ROUTER_OUIs + setOf("00:11:AB")
+    private val GENERIC_FLEET_ROUTER_OUIs = MULTI_RADIO_ROUTER_OUIs
     private val EXPLICIT_FEDERAL_SSID_REGEX = Regex("(?i)\\b(CBP|BP[_-]?\\d*|USBP|ICE|ERO|HSI|FPS|DHS|FED)\\b")
+
+    /** Confidently field-attested NIC sub-blocks (> 24-bit) derived from multi-session Tucson telemetry. */
+    private val ATTESTED_AGENCY_SUBBLOCKS = listOf(
+        "00:30:44:74:",
+        "00:30:44:6B:5F:",
+        "9C:05:D6:37:6D:",
+        "D8:B3:70:69:07:",
+        "8C:1F:64:DF:0",
+        "00:30:44:22:8",
+        "00:30:44:22:9",
+        "00:30:44:A2:E8:",
+        "00:30:44:1D:46:",
+        "40:ED:98:3",
+        "D4:13:F8:52:4B:",
+        "D4:13:F8:86:A2:",
+        "D4:13:F8:61:29:",
+        "D4:13:F8:0A:41:",
+        "E4:55:A8:05:D2:",
+        "E4:55:A8:05:F6:",
+        "E2:55:A8:05:D2:",
+        "E2:55:A8:05:F6:",
+        "E4:55:A8:51:EF:",
+        "E4:55:A8:52:2C:",
+        "E6:55:B8:52:2C:",
+        "F6:55:A8:52:2C:",
+        "F6:55:B8:52:2C:",
+        "00:30:44:B3:E7:",
+        "00:30:44:7B:F7:",
+        "00:30:44:9C:36:"
+    )
+
+    fun isAttestedAgencySubblock(mac: String): Boolean {
+        val rawNorm = normalizeMac(mac)
+        val canon = canonicalHardwareOuiMac(rawNorm)
+        return ATTESTED_AGENCY_SUBBLOCKS.any { rawNorm.startsWith(it) || canon.startsWith(it) }
+    }
+
+    fun isMobileVehicleRouterModelSsid(ssid: String?): Boolean =
+        !ssid.isNullOrBlank() && MOBILE_VEHICLE_ROUTER_SSID_REGEX.matches(ssid.trim())
 
     /**
      * Maps locally-administered virtual BSSIDs (e.g. `06:30:44:74:AB:83` `PCSD-Vehicle` or
@@ -1421,17 +1501,11 @@ object KokohoSignatures {
 
     /**
      * Returns true when [mac] matches a multi-agency cellular router OUI (Cradlepoint/Sierra/Peplink/Digi/Meraki)
-     * without an explicit federal/agency SSID or explicit agency NIC sub-block (e.g. `00:30:44:74` PCSD-Vehicle).
+     * without an explicit federal/agency SSID or explicit field-attested agency NIC sub-block (e.g. `00:30:44:74` PCSD-Vehicle).
      */
     fun isGenericUnmarkedFleetRouter(mac: String, ssid: String?): Boolean {
+        if (isAttestedAgencySubblock(mac)) return false
         val canon = canonicalHardwareOuiMac(mac)
-        if (canon.startsWith("00:30:44:74:") ||
-            canon.startsWith("00:30:44:22:8") ||
-            canon.startsWith("00:30:44:22:9") ||
-            canon.startsWith("00:30:44:A2:E8:")
-        ) {
-            return false
-        }
         val prefix = canon.take(8)
         if (prefix !in GENERIC_FLEET_ROUTER_OUIs) return false
         val clean = ssid?.trim().orEmpty()
@@ -1520,13 +1594,24 @@ object KokohoSignatures {
     /** Matches a Wi-Fi / BLE MAC address against curated fleet router / tactical / drone OUI prefixes & IEEE 28/36-bit sub-blocks. */
     fun matchOui(mac: String, ssidOrName: String? = null): FleetOuiSig? {
         if (isIgnoredInfrastructureOrRetail(mac, ssidOrName)) return null
-        val norm = canonicalHardwareOuiMac(mac)
+        val rawNorm = normalizeMac(mac)
+        val norm = canonicalHardwareOuiMac(rawNorm)
+        // Check explicit curated >24-bit sub-blocks first (longest-prefix match) so tactical 28/36/40-bit blocks
+        // (e.g. Grayshift 70:B3:D5:71:F, Cyberkar 8C:1F:64:DF:0, HSI Meraki E2:55:A8:05:D2) are never vetoed by shared 24-bit roots!
+        val specificCurated = fleetOuis
+            .filter { it.prefix.length > 8 && (rawNorm.startsWith(it.prefix.uppercase()) || norm.startsWith(it.prefix.uppercase())) }
+            .maxByOrNull { it.prefix.length }
+        if (specificCurated != null) return specificCurated
+
         val sub = KokohoReferenceTables.lookupMacSubblock(norm)
         // Exclude non-tactical IEEE 28/36-bit sub-blocks sharing a 24-bit IEEE root (e.g. 70:B3:D5 / 8C:1F:64 / 00:50:C2)
         if (sub != null && (sub.role == "CIVIL_SUBBLOCK" || sub.role == "CONSUMER_ISP" || sub.role == "INFRA_BACKHAUL" || sub.role == "FLOCK_ALPR")) {
             return null
         }
-        fleetOuis.firstOrNull { norm.startsWith(it.prefix.uppercase()) }?.let { return it }
+        fleetOuis
+            .filter { rawNorm.startsWith(it.prefix.uppercase()) || norm.startsWith(it.prefix.uppercase()) }
+            .maxByOrNull { it.prefix.length }
+            ?.let { return it }
         if (sub != null && sub.agency != null && sub.role != "BODY_CAM" && sub.role != "LMR_RADIO") {
             return FleetOuiSig(
                 prefix = sub.prefixHex.chunked(2).joinToString(":"),
@@ -1685,10 +1770,26 @@ object KokohoSignatures {
                     val list: List<LearnedMacIntel> = Gson().fromJson(mRaw, mType) ?: emptyList()
                     for (m in list) {
                         val upMac = m.mac.uppercase()
-                        if (upMac.startsWith("40:84:32:") || KARR_DEALER_BLE_ALARM_REGEX.containsMatchIn(m.label) || KARR_DEALER_BLE_ALARM_REGEX.matches(m.ssidHint)) {
+                        if (upMac.startsWith("40:84:32:") ||
+                            upMac.startsWith("24:79:2A:") ||
+                            upMac.startsWith("AC:82:47:") ||
+                            upMac.startsWith("C8:B3:73:") ||
+                            upMac.startsWith("00:11:AB:") ||
+                            upMac.startsWith("D8:12:65:") ||
+                            upMac.startsWith("60:E3:27:") ||
+                            KARR_DEALER_BLE_ALARM_REGEX.containsMatchIn(m.label) ||
+                            KARR_DEALER_BLE_ALARM_REGEX.matches(m.ssidHint)
+                        ) {
                             continue
                         }
-                        learnedMacCache[upMac] = m
+                        val fixed = when {
+                            (upMac.startsWith("00:30:44:74:") || upMac.startsWith("06:30:44:74:")) && m.agencyId != "SHERIFF" ->
+                                m.copy(agencyId = "SHERIFF", label = "Pima County Sheriff — PCSD-Vehicle (IBR1700)")
+                            upMac.startsWith("00:30:44:22:8") && m.agencyId != "FIRE" ->
+                                m.copy(agencyId = "FIRE", label = "Fire")
+                            else -> m
+                        }
+                        learnedMacCache[upMac] = fixed
                     }
                 }
                 val bRaw = prefs.getString(KEY_LEARNED_BLOCKS_JSON, null)
@@ -1862,15 +1963,25 @@ object KokohoSignatures {
     }
 
     /**
-     * Excludes "Axon Networks Inc." (`00:58:28`), a consumer fiber-ISP Wi-Fi 7 home router ODM
+     * Excludes "Axon Networks Inc." (`00:58:28`, `00:C0:D4`, `84:70:03`), a consumer fiber-ISP Wi-Fi 7 home router ODM
      * (Quantum Fiber / CenturyLink residential gateways), which is unrelated to Axon Enterprise (`00:25:DF`).
      */
     fun isAxonNetworksConsumerRouter(mac: String, nameOrSsid: String?, vendor: String?): Boolean {
         val norm = normalizeMac(mac)
-        if (norm.startsWith("00:58:28")) return true
+        if (norm.startsWith("00:58:28") || norm.startsWith("00:C0:D4") || norm.startsWith("84:70:03")) return true
         if ((vendor ?: "").contains("Axon Networks", ignoreCase = true)) return true
         if ((nameOrSsid ?: "").contains("Axon Networks", ignoreCase = true)) return true
         return false
+    }
+
+    private val PATROL_MDT_OUIs = setOf("4C:36:4E", "B8:20:8E", "BC:3E:0B", "8C:1F:64:DF:0")
+    private val PATROL_MDT_REGEX = Regex("(?i)\\b(TOUGHBOOK|PANASONIC\\s+CONNECT|GETAC|CYBERKAR)\\b")
+
+    fun isPatrolMdtDevice(mac: String, nameOrSsid: String?, vendor: String?): Boolean {
+        val norm = normalizeMac(mac)
+        if (PATROL_MDT_OUIs.any { norm.startsWith(it) }) return true
+        val combined = "${nameOrSsid.orEmpty()} ${vendor.orEmpty()}"
+        return PATROL_MDT_REGEX.containsMatchIn(combined)
     }
 
     private val COMPANION_KIT_REGEX = Regex(
@@ -2039,12 +2150,18 @@ object KokohoSignatures {
         if (facets.any { it.startsWith("hw:kit:radio:", ignoreCase = true) }) {
             caps.add("Portable Radio")
         }
+        if (facets.any { it.startsWith("hw:kit:mdt:", ignoreCase = true) }) {
+            caps.add("Patrol MDT")
+        }
         val combined = (facets + details).joinToString(" ").uppercase()
         val sanitizedBodycam = combined
             .replace("AXON NETWORKS", "")
             .replace("00:58:28", "")
+            .replace("00:C0:D4", "")
+            .replace("84:70:03", "")
             .replace("HW:KIT:PRINTER:", "")
             .replace("HW:KIT:RADIO:", "")
+            .replace("HW:KIT:MDT:", "")
         if ("Bodycam" !in caps && ("00:25:DF" in sanitizedBodycam || "D8:1F:65" in sanitizedBodycam || "FC:01:9E" in sanitizedBodycam || "00:1D:96" in sanitizedBodycam || "00:23:BD" in sanitizedBodycam || "BWCDEVICE" in sanitizedBodycam || "BODY_CAM" in sanitizedBodycam || "AXON" in sanitizedBodycam || "TASER" in sanitizedBodycam || "BODYCAM" in sanitizedBodycam || "WATCHGUARD" in sanitizedBodycam || "BODYWORN" in sanitizedBodycam)) {
             caps.add("Bodycam")
         }
@@ -2056,6 +2173,9 @@ object KokohoSignatures {
         }
         if ("Portable Radio" !in caps && ("MOTOROLA SOLUTIONS" in combined || "APX" in combined || "XL-200P" in combined)) {
             caps.add("Portable Radio")
+        }
+        if ("Patrol MDT" !in caps && ("TOUGHBOOK" in combined || "PANASONIC CONNECT" in combined || "B8:20:8E" in combined || "4C:36:4E" in combined || "BC:3E:0B" in combined || "CYBERKAR" in combined)) {
+            caps.add("Patrol MDT")
         }
         if (facets.any { it.startsWith("cell:anom:", ignoreCase = true) } || "CELL_ANOMALY" in combined || "00:50:C2:36:0" in combined || "DRTBOX" in combined) {
             caps.add("Cell Anomaly")
@@ -2109,7 +2229,8 @@ object KokohoSignatures {
                 if (summary.contains("Axon", ignoreCase = true) || summary.contains("TASER", ignoreCase = true)) "Axon Bodycam" else "${threat.agency.friendlyLabel} Bodycam"
             "Citation Printer" in threat.capabilities && threat.evidenceSources.size == 1 -> "Citation Printer"
             "Portable Radio" in threat.capabilities && threat.evidenceSources.size == 1 -> "Motorola APX Radio"
-            summary.contains("Fleet Router", ignoreCase = true) || summary.contains("IBR", ignoreCase = true) || summary.contains("Cradlepoint", ignoreCase = true) || summary.contains("Sierra", ignoreCase = true) || summary.contains("Peplink", ignoreCase = true) ->
+            "Patrol MDT" in threat.capabilities && threat.evidenceSources.size == 1 -> "${threat.agency.friendlyLabel} Patrol MDT"
+            summary.contains("Fleet Router", ignoreCase = true) || summary.contains("IBR", ignoreCase = true) || summary.contains("R920", ignoreCase = true) || summary.contains("R1900", ignoreCase = true) || summary.contains("Cradlepoint", ignoreCase = true) || summary.contains("Sierra", ignoreCase = true) || summary.contains("Peplink", ignoreCase = true) ->
                 if (tier == "Suspected") "Fleet Router" else "${threat.agency.friendlyLabel} Fleet Router"
             threat.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" } ->
                 "${threat.agency.friendlyLabel} Tactical RF"

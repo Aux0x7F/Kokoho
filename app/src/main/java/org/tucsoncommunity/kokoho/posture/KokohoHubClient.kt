@@ -411,7 +411,7 @@ object KokohoHubClient {
         }
     }
 
-    /** Synchronizes persisted derived entities from `/v1/trends` so 24h and All Time map modes have full history. */
+    /** Synchronizes persisted derived entities from `/v1/trends` so `1wk`, `1mo`, and `Heat` map modes have full history. */
     fun syncHistoricalEntities(context: Context, onComplete: (() -> Unit)? = null) {
         val app = context.applicationContext
         if (!KokohoSignatures.isAuxnetEnabled(app)) {
@@ -421,8 +421,7 @@ object KokohoHubClient {
         scope.launch {
             runCatching {
                 val base = hubUrl(app)
-                val rollingSinceMs = (System.currentTimeMillis() - 48L * 3_600_000L).coerceAtLeast(0L)
-                val conn = (URL("$base/v1/trends?since_ms=$rollingSinceMs&limit=500").openConnection() as HttpURLConnection).apply {
+                val conn = (URL("$base/v1/trends?since_ms=0&limit=2500").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 8_000
                     readTimeout = 10_000
@@ -480,8 +479,26 @@ object KokohoHubClient {
                             }
                         }
                         val nowMs = System.currentTimeMillis()
+                        val ledgerHydrated = ArrayList<EvaluatedThreat>()
                         for (e in snap?.entities.orEmpty()) {
                             if (e.entityUuid.isBlank()) continue
+                            if (e.entityUuid.startsWith("3f7147ac", ignoreCase = true)) {
+                                objects.remove(e.entityUuid)
+                                continue
+                            }
+                            val pkClean = e.primaryFacetKey.trim().removePrefix("hw:mac:").uppercase()
+                            if (pkClean.startsWith("40:84:32:") ||
+                                pkClean.startsWith("24:79:2A:") ||
+                                pkClean.startsWith("AC:82:47:") ||
+                                pkClean.startsWith("C8:B3:73:") ||
+                                pkClean.startsWith("00:11:AB:") ||
+                                pkClean.startsWith("D8:12:65:") ||
+                                pkClean.startsWith("60:E3:27:") ||
+                                Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("${e.label} ${e.primaryFacetKey}")
+                            ) {
+                                objects.remove(e.entityUuid)
+                                continue
+                            }
                             if (KokohoSignatures.isFlockCamera(e.primaryFacetKey, e.label)) continue
                             if (KokohoSignatures.isAnomalousUnattributedAirRecord(
                                     primaryKey = e.primaryFacetKey,
@@ -493,7 +510,12 @@ object KokohoHubClient {
                                 objects.remove(e.entityUuid)
                                 continue
                             }
-                            val isAir = e.category.equals("DHS_AMO", ignoreCase = true) ||
+                            val resolvedCategory = when {
+                                pkClean.startsWith("00:30:44:74:") || pkClean.startsWith("06:30:44:74:") -> "SHERIFF"
+                                pkClean.startsWith("00:30:44:22:8") -> "FIRE"
+                                else -> e.category
+                            }
+                            val isAir = resolvedCategory.equals("DHS_AMO", ignoreCase = true) ||
                                 e.primaryFacetKey.startsWith("ICAO:", ignoreCase = true) ||
                                 e.primaryFacetKey.startsWith("adsb:", ignoreCase = true)
                             // Only treat airborne trends entities as active aircraft objects while currently in flight (<= 5 min).
@@ -536,8 +558,8 @@ object KokohoHubClient {
                                     propagationClass = propClass
                                 ),
                                 classification = RemoteClassification(
-                                    masterGroup = if (e.category.startsWith("DHS")) "DHS" else "OTHER",
-                                    category = e.category,
+                                    masterGroup = if (resolvedCategory.startsWith("DHS")) "DHS" else "OTHER",
+                                    category = resolvedCategory,
                                     label = e.label,
                                     recurrenceSummary = e.label,
                                     evidenceSources = evidenceList
@@ -545,6 +567,53 @@ object KokohoHubClient {
                                 sightingCount = e.sightingCount.coerceAtLeast(1),
                                 corroborationCount = e.corroborationCount.coerceAtLeast(1)
                             )
+                            if (!isAir) {
+                                val ag = KokohoAgency.fromCode(resolvedCategory)
+                                if (ag != null) {
+                                    val cInt = (confVal * 100.0).toInt().coerceIn(50, 96)
+                                    val uncertM = e.uncertaintyRadiusM.toInt().coerceAtLeast(20)
+                                    val badges = evidenceList.map {
+                                        EvidenceBadge(
+                                            kind = it.kind,
+                                            facetKey = it.facetKey,
+                                            detail = it.detail,
+                                            weight = it.weight,
+                                            lastSeenMs = it.lastSeenMs
+                                        )
+                                    }
+                                    ledgerHydrated += EvaluatedThreat(
+                                        uuid = e.entityUuid,
+                                        trackUuid = e.entityUuid,
+                                        agency = ag,
+                                        label = ag.friendlyLabel,
+                                        posture = PostureColor.YELLOW,
+                                        overallConfidence = cInt,
+                                        classificationConfidence = cInt,
+                                        spatialConfidence = cInt,
+                                        estimatedDistanceM = 9_999,
+                                        uncertaintyRadiusM = uncertM,
+                                        bearingDeg = null,
+                                        closingVelocityMps = null,
+                                        recurrenceSummary = e.label,
+                                        evidenceSources = badges,
+                                        updatedAtMs = e.lastSeenMs,
+                                        lat = e.estimatedLat,
+                                        lon = e.estimatedLon,
+                                        isApproximatedPosition = e.corroborationCount >= 2 || e.sightingCount >= 2 || uncertM <= 180,
+                                        isPinpointed = uncertM <= 15,
+                                        isDrone = ag == KokohoAgency.DRONE || e.primaryFacetKey.startsWith("uas:", ignoreCase = true),
+                                        hardwareIdentifier = e.primaryFacetKey.ifBlank { null },
+                                        sightingCount = maxOf(e.sightingCount, e.corroborationCount).coerceAtLeast(1),
+                                        capabilities = KokohoSignatures.inferCapabilitiesFromEvidence(
+                                            badges.map { it.facetKey },
+                                            badges.map { it.detail } + e.label
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        if (ledgerHydrated.isNotEmpty()) {
+                            KokohoEntityLedger.upsertBatch(app, ledgerHydrated, nowMs)
                         }
                     }
                 } finally {
