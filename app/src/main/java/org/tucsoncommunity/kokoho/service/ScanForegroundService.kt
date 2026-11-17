@@ -199,6 +199,103 @@ class ScanForegroundService : Service() {
         @androidx.annotation.VisibleForTesting
         fun setLastFixForTest(l: Location?) { lastFix = l }
 
+        /**
+         * Monotonic/wall-clock aligned GPS scan-latency compensation: places delayed Wi-Fi/BLE
+         * receptions (e.g. cached Android Wi-Fi ScanResults up to 30 s old while moving 35 m/s)
+         * at the exact GPS coordinate where the packet arrived rather than the car's current spot.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun projectAlongBearing(
+            lat: Double,
+            lon: Double,
+            speedMps: Double,
+            bearingDeg: Double,
+            seconds: Double
+        ): Pair<Double, Double> {
+            if (speedMps < 1.0 || seconds <= 0.0) return lat to lon
+            val d = speedMps * seconds
+            val rad = Math.toRadians(bearingDeg)
+            val dLat = (d * kotlin.math.cos(rad)) / 110_540.0
+            val lonScale = (111_320.0 * kotlin.math.cos(Math.toRadians(lat))).coerceAtLeast(1.0)
+            val dLon = (d * kotlin.math.sin(rad)) / lonScale
+            return (lat + dLat) to (lon + dLon)
+        }
+
+        @androidx.annotation.VisibleForTesting
+        internal fun interpolatePositionAt(
+            targetWallMs: Long,
+            snapshot: List<Pair<Long, Location>>,
+            fallback: Location,
+            sysNow: Long = System.currentTimeMillis()
+        ): DeviceRegistry.GeoSample {
+            if (snapshot.isNotEmpty()) {
+                val first = snapshot.first()
+                val last = snapshot.last()
+                if (targetWallMs <= first.first) {
+                    val backSec = ((first.first - targetWallMs) / 1000.0).coerceIn(0.0, 30.0)
+                    val fLoc = first.second
+                    val (lat, lon) = if (backSec > 0.25 && fLoc.hasSpeed() && fLoc.hasBearing()) {
+                        projectAlongBearing(
+                            fLoc.latitude,
+                            fLoc.longitude,
+                            fLoc.speed.toDouble(),
+                            (fLoc.bearing.toDouble() + 180.0) % 360.0,
+                            backSec
+                        )
+                    } else {
+                        fLoc.latitude to fLoc.longitude
+                    }
+                    return DeviceRegistry.GeoSample(targetWallMs, lat, lon)
+                }
+                if (targetWallMs >= last.first) {
+                    val fwdSec = ((targetWallMs - last.first) / 1000.0).coerceIn(0.0, 4.0)
+                    val lLoc = last.second
+                    val (lat, lon) = if (fwdSec > 0.1 && lLoc.hasSpeed() && lLoc.hasBearing()) {
+                        projectAlongBearing(
+                            lLoc.latitude,
+                            lLoc.longitude,
+                            lLoc.speed.toDouble(),
+                            lLoc.bearing.toDouble(),
+                            fwdSec
+                        )
+                    } else {
+                        lLoc.latitude to lLoc.longitude
+                    }
+                    return DeviceRegistry.GeoSample(targetWallMs, lat, lon)
+                }
+                for (idx in 0 until snapshot.size - 1) {
+                    val a = snapshot[idx]
+                    val b = snapshot[idx + 1]
+                    if (targetWallMs in a.first..b.first) {
+                        val span = (b.first - a.first).coerceAtLeast(1L).toDouble()
+                        val frac = ((targetWallMs - a.first).toDouble() / span).coerceIn(0.0, 1.0)
+                        val lat = a.second.latitude + (b.second.latitude - a.second.latitude) * frac
+                        val lon = a.second.longitude + (b.second.longitude - a.second.longitude) * frac
+                        return DeviceRegistry.GeoSample(targetWallMs, lat, lon)
+                    }
+                }
+            }
+            val fixWallMs = if (fallback.elapsedRealtimeNanos > 0L) {
+                sysNow - ((android.os.SystemClock.elapsedRealtimeNanos() - fallback.elapsedRealtimeNanos) / 1_000_000L)
+            } else {
+                fallback.time.takeIf { it > 0L } ?: sysNow
+            }
+            val deltaSec = ((targetWallMs - fixWallMs) / 1000.0).coerceIn(-30.0, 4.0)
+            val (lat, lon) = if (kotlin.math.abs(deltaSec) > 0.15 && fallback.hasSpeed() && fallback.hasBearing()) {
+                val heading = if (deltaSec >= 0.0) fallback.bearing.toDouble() else (fallback.bearing.toDouble() + 180.0) % 360.0
+                projectAlongBearing(
+                    fallback.latitude,
+                    fallback.longitude,
+                    fallback.speed.toDouble(),
+                    heading,
+                    kotlin.math.abs(deltaSec)
+                )
+            } else {
+                fallback.latitude to fallback.longitude
+            }
+            return DeviceRegistry.GeoSample(targetWallMs, lat, lon)
+        }
+
         /** Last watchdog restart (time, which scanner), for the status line. */
         @Volatile
         var lastWatchdogRestart: Pair<Long, String>? = null
@@ -269,6 +366,8 @@ class ScanForegroundService : Service() {
     private var lastHistoryFlush = 0L
 
     @Volatile private var lastLocation: Location? = null
+    /** Monotonic-aligned GPS fix ring buffer (~120 s) so delayed Wi-Fi ScanResults are placed where the packet arrived. */
+    private val recentFixes = java.util.ArrayDeque<Pair<Long, Location>>()
     private var locationListening = false
     /** 0 = balanced, 1 = precise every 3 s, 2 = precise every second (pinpointing a flagged device). */
     private var locationMode = 0
@@ -323,7 +422,24 @@ class ScanForegroundService : Service() {
         }
         lastLocation = it
         lastFix = it
-        if (it.hasAccuracy()) { gpsAt = System.currentTimeMillis(); gpsAccuracyM = it.accuracy }
+        val sysNow = System.currentTimeMillis()
+        val fixAgeMs = if (it.elapsedRealtimeNanos > 0L) {
+            ((android.os.SystemClock.elapsedRealtimeNanos() - it.elapsedRealtimeNanos) / 1_000_000L).coerceIn(0L, 60_000L)
+        } else {
+            (sysNow - it.time).coerceIn(0L, 60_000L)
+        }
+        val fixWallMs = sysNow - fixAgeMs
+        if (!it.hasAccuracy() || it.accuracy <= PLACING_MAX_ACCURACY_M) {
+            synchronized(recentFixes) {
+                if (recentFixes.isEmpty() || fixWallMs >= recentFixes.last.first) {
+                    recentFixes.addLast(fixWallMs to Location(it))
+                }
+                while (recentFixes.size > 120 || (recentFixes.isNotEmpty() && sysNow - recentFixes.first.first > 120_000L)) {
+                    recentFixes.removeFirst()
+                }
+            }
+        }
+        if (it.hasAccuracy()) { gpsAt = sysNow; gpsAccuracyM = it.accuracy }
         org.tucsoncommunity.kokoho.ui.MapGps.offer(it)
         TripRecorder.onLocation(it)
         checkKnownAlpr(it)
@@ -358,11 +474,22 @@ class ScanForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         NotificationHelper.createChannels(this)
-        OuiWatchlist.load(this)
-        serviceScope.launch {
-            val today = java.time.LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
-            runCatching { org.tucsoncommunity.kokoho.detect.FixedRouter.load(AppDatabase.getInstance(this@ScanForegroundService)
-                .knownDeviceDao().familiarRouters(org.tucsoncommunity.kokoho.detect.FixedRouter.MIN_SESSIONS, today)) }
+        serviceScope.launch(Dispatchers.IO) {
+            OuiWatchlist.load(this@ScanForegroundService)
+            val rolling24hAgo = System.currentTimeMillis() - 24L * 3_600_000L
+            val db = AppDatabase.getInstance(this@ScanForegroundService)
+            runCatching {
+                org.tucsoncommunity.kokoho.detect.FixedRouter.load(
+                    db.knownDeviceDao().familiarRouters(org.tucsoncommunity.kokoho.detect.FixedRouter.MIN_SESSIONS, rolling24hAgo)
+                )
+            }
+            // Maintain bounded 48-hour unfiltered evidence ring in SQLite
+            runCatching {
+                db.openHelper.writableDatabase.execSQL(
+                    "DELETE FROM known_devices WHERE favorite = 0 AND alias IS NULL AND note IS NULL AND lastSeen < ?",
+                    arrayOf<Any>(System.currentTimeMillis() - 48L * 3_600_000L)
+                )
+            }
         }
 
         pipelineThread = HandlerThread("rf-pipeline").apply { start() }
@@ -480,15 +607,21 @@ class ScanForegroundService : Service() {
         org.tucsoncommunity.kokoho.sdr.SdrRadio.location = { (lastLocation ?: lastFix)?.let { it.latitude to it.longitude } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onAircraft = { planes, unlocated -> onlineWatch.localAircraft(planes, unlocated) }
         if (sdrModes.isNotEmpty() || radioOn) {
-            // Settings > RTL-SDR radio: bands, excluded ranges, watched frequencies, sensitivity (re-read on every refresh).
-            org.tucsoncommunity.kokoho.posture.KokohoSignatures.ensureLoaded(this)
-            val baseCfg = org.tucsoncommunity.kokoho.sdr.RadioSettings.config(this)
-            val kokohoTargets = org.tucsoncommunity.kokoho.posture.KokohoSignatures.watchedTargetsForEnabled(this)
-            org.tucsoncommunity.kokoho.sdr.SdrRadio.config = baseCfg.copy(
-                targets = (baseCfg.targets + kokohoTargets).distinctBy { it.freqHz }
-            )
-            org.tucsoncommunity.kokoho.sdr.FreqNames.load(this)
-            org.tucsoncommunity.kokoho.sdr.SdrRadio.start(this) { e -> pipeline.post { onRadio(e) } }
+            // Load multi-MB reference tables & watched frequencies off the Main UI Thread so launch never drops frames.
+            serviceScope.launch(Dispatchers.IO) {
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.ensureLoaded(this@ScanForegroundService)
+                val baseCfg = org.tucsoncommunity.kokoho.sdr.RadioSettings.config(this@ScanForegroundService)
+                val kokohoTargets = org.tucsoncommunity.kokoho.posture.KokohoSignatures.watchedTargetsForEnabled(this@ScanForegroundService)
+                org.tucsoncommunity.kokoho.sdr.SdrRadio.config = baseCfg.copy(
+                    targets = (baseCfg.targets + kokohoTargets).distinctBy { it.freqHz }
+                )
+                org.tucsoncommunity.kokoho.sdr.FreqNames.load(this@ScanForegroundService)
+                android.os.Handler(Looper.getMainLooper()).post {
+                    if (isRunning) {
+                        org.tucsoncommunity.kokoho.sdr.SdrRadio.start(this@ScanForegroundService) { e -> pipeline.post { onRadio(e) } }
+                    }
+                }
+            }
         }
         else org.tucsoncommunity.kokoho.sdr.SdrRadio.stop(this)
         org.tucsoncommunity.kokoho.posture.KokohoHubClient.start(this)
@@ -554,15 +687,14 @@ class ScanForegroundService : Service() {
     ) == PackageManager.PERMISSION_GRANTED
 
     /**
-     * Where you are now: the last fix moved on by your speed and course for the second or two
-     * since it came, so readings taken between fixes aren't placed behind you.
+     * Resolves where the phone actually was at [targetWallMs] (the packet's reception timestamp):
+     * - For delayed Wi-Fi ScanResults (up to 30 s old), interpolates across [recentFixes] or projects
+     *   backward along the vehicle course instead of tagging side-street APs at the current highway spot.
+     * - For live packets arriving slightly after the latest GPS fix, dead-reckons forward by at most 4 s.
      */
-    private fun placeNow(l: Location, now: Long): DeviceRegistry.GeoSample {
-        val ageS = (android.os.SystemClock.elapsedRealtimeNanos() - l.elapsedRealtimeNanos) / 1e9
-        val (lat, lon) = if (l.hasSpeed() && l.hasBearing())
-            org.tucsoncommunity.kokoho.detect.Locator.ahead(l.latitude, l.longitude, l.speed.toDouble(), l.bearing.toDouble(), ageS)
-        else l.latitude to l.longitude
-        return DeviceRegistry.GeoSample(now, lat, lon)
+    private fun placeAt(targetWallMs: Long, fallback: Location): DeviceRegistry.GeoSample {
+        val snapshot = synchronized(recentFixes) { recentFixes.toList() }
+        return interpolatePositionAt(targetWallMs, snapshot, fallback)
     }
 
     /**
@@ -704,11 +836,11 @@ class ScanForegroundService : Service() {
     fun updateLocationUpdates() {
         val locating = Prefs.pinpointFlagged(this) && System.currentTimeMillis() < locatingUntil
         val wanted = hasFineLocation() &&
-            (Prefs.gpsTaggingEnabled(this) || Prefs.followerAlerts(this) || TripRecorder.isRecording || knownAlprActive() ||
+            (ownOn() || Prefs.gpsTaggingEnabled(this) || Prefs.followerAlerts(this) || TripRecorder.isRecording || knownAlprActive() ||
                 mapVisible || onlineActive() || locating)
-        // Frequent fixes while recording a trace or watching for known cameras
+        // Frequent fixes while scanning on Monitor, recording a trace, or watching for known cameras
         // (at highway speed a 20 s interval could skip right past one).
-        val fast = TripRecorder.isRecording || knownAlprActive() || mapVisible || locating
+        val fast = ownOn() || TripRecorder.isRecording || knownAlprActive() || mapVisible || locating
         val mode = when { locating -> 2; fast -> 1; else -> 0 }
         val lm = getSystemService(LOCATION_SERVICE) as LocationManager
         if (locationListening && (!wanted || mode != locationMode)) {
@@ -838,17 +970,24 @@ class ScanForegroundService : Service() {
                 ?.let { remoteId = RemoteId.decodeWifiIe(it.second, DeviceRegistry.remoteIdOf(mac)) }
         }
 
-        // Drop consumer Wi-Fi APs, iPhones, AirPods, TVs, and non-matching BLE clutter before classification/DB (#21)
+        // Layer 1 Unfiltered Evidence Ring vs Layer 2 Alert Candidate Gate:
+        // Capture all Wi-Fi APs/clients and structured BLE devices into the bounded 48h `DeviceRegistry` / `known_devices`
+        // evidence ring (excluding only unidentifiable Apple/Samsung consumer RPA clutter without tactical UUIDs),
+        // while keeping alert/follow processing strictly gated on `isRelevantCandidate`.
         val fastVendor = if (a.randomBle) null else VendorDb.macVendor(mac)
+        val (_, effectiveVendor) = advertVendors(a, fastVendor)
         val isTrackerPayload = isBleTrackerAdvert(a)
-        if (!org.tucsoncommunity.kokoho.posture.KokohoSignatures.isRelevantBleOrWifiCandidate(
-                mac = mac,
-                nameOrSsid = a.name,
-                vendor = fastVendor,
-                hasRemoteId = remoteId != null,
-                isBleTrackerPayload = isTrackerPayload
-            )
-        ) {
+        val isBleTactical = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchesBleTacticalPayload(a)
+        val isRelevantCandidate = isBleTactical || org.tucsoncommunity.kokoho.posture.KokohoSignatures.isRelevantBleOrWifiCandidate(
+            mac = mac,
+            nameOrSsid = a.name,
+            vendor = effectiveVendor,
+            hasRemoteId = remoteId != null,
+            isBleTrackerPayload = isTrackerPayload,
+            advert = a
+        )
+        val keepInEvidenceRing = isRelevantCandidate || a.isWifi || !a.randomBle || !a.name.isNullOrBlank() || a.serviceUuids.isNotEmpty()
+        if (!keepInEvidenceRing) {
             return
         }
 
@@ -873,10 +1012,20 @@ class ScanForegroundService : Service() {
         // (often 100 m+ off) would put the dot far from where the device really was.
         val lora = org.tucsoncommunity.kokoho.esp.isLoRaNode(mac, a.name)
         // A LoRa node can be kilometres away: never placed where this phone (or the Sentinel that heard it) was.
-        val loc = if (lora) null else if (via != null) peerAt else lastLocation?.takeIf { usableForPlacing(it) }
-        // Heard by another Sentinel: placed where that Sentinel was.
-        val geo = if (via != null) loc?.let { DeviceRegistry.GeoSample(now, it.latitude, it.longitude) } else loc?.let { placeNow(it, now) }
-        val here = lastLocation?.let { DeviceRegistry.GeoSample(now, it.latitude, it.longitude) }
+        val bestLoc = lastLocation ?: lastFix
+        val loc = if (lora) null else if (via != null) peerAt else bestLoc?.takeIf { usableForPlacing(it) }
+        // Heard by another Sentinel: placed where that Sentinel was; heard locally: placed where the phone was at `now` (`a.timestamp`).
+        val geo = if (via != null) loc?.let { DeviceRegistry.GeoSample(now, it.latitude, it.longitude) } else loc?.let { placeAt(now, it) }
+        val placedLoc: Location? = if (via != null || geo == null) {
+            loc
+        } else {
+            (if (loc != null) Location(loc) else Location("interpolated")).apply {
+                latitude = geo.lat
+                longitude = geo.lon
+                time = now
+            }
+        }
+        val here = bestLoc?.let { DeviceRegistry.GeoSample(System.currentTimeMillis(), it.latitude, it.longitude) }
         val isFirst = DeviceRegistry.report(a, c.hits, c.identity, c.vendor, remoteId, geo, now, broadcast, here, lora, via != null)
         if (isFirst) serviceScope.launch { loadHistory(mac) }
         // Over the mesh too (Meshtastic node): not the user's own whitelisted devices.
@@ -885,38 +1034,16 @@ class ScanForegroundService : Service() {
             TripRecorder.onDevice(
                 mac, a.rssi, a.source.name,
                 if (WhitelistCache.contains(mac)) null else c.hits.firstOrNull(),
-                a.name, c.vendor, c.identity.type, loc, now,
+                a.name, c.vendor, c.identity.type, placedLoc, now,
                 org.tucsoncommunity.kokoho.usb.ProbeIntel.of(mac)?.probed.orEmpty()
             )
         }
 
         if (via == null) remoteId?.let { info -> if (loc != null) maybeAlertDroneOverhead(a, info, loc, now) }
-        if (via == null && loc != null && !WhitelistCache.contains(mac)) {
-            val ouiMatch = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchOuiOrSsid(mac, a.name, c.vendor)
-            if (ouiMatch != null &&
-                ouiMatch.first in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this) &&
-                (a.rssi >= -76 || ouiMatch.first == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE || remoteId != null)
-            ) {
-                val cleanHex = mac.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
-                val primaryFacet = if (!a.randomBle && cleanHex.length >= 12) "hw:mac:$cleanHex" else "hw:oui:${cleanHex.take(6)}"
-                val extraFacets = if (cleanHex.length >= 6) listOf("hw:oui:${cleanHex.take(6)}") else emptyList()
-                val modality = if (ouiMatch.first == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE || remoteId != null) "REMOTE_ID" else "WIFI_BLE_OUI"
-                val reportLat = remoteId?.latitude?.takeIf { remoteId.hasPosition } ?: loc.latitude
-                val reportLon = remoteId?.longitude?.takeIf { remoteId.hasPosition } ?: loc.longitude
-                org.tucsoncommunity.kokoho.posture.KokohoHubClient.publishSensorReportIfEnabled(
-                    context = this,
-                    lat = reportLat,
-                    lon = reportLon,
-                    snrDb = (a.rssi + 95).coerceAtLeast(3).toDouble(),
-                    modality = modality,
-                    primaryFacet = primaryFacet,
-                    additionalFacets = extraFacets,
-                    agency = ouiMatch.first,
-                    label = ouiMatch.second,
-                    propagationClass = "SHORT_RANGE_OUI"
-                )
-            }
+        if (via == null && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isSharingActive(this)) {
+            maybeEvaluatePostureForSharing(now)
         }
+        if (!isRelevantCandidate) return
 
         val best = c.hits.firstOrNull() ?: return
         // Ignored trackers (their address changes, so they can't be whitelisted); this is
@@ -929,7 +1056,7 @@ class ScanForegroundService : Service() {
         if (WhitelistCache.contains(mac)) return
         if (!org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(mac, c.hits, Prefs.alertThreshold(this, best.category))) noteLocating(mac)
 
-        maybeLog(a, best, c.vendor, loc, now, via)
+        maybeLog(a, best, c.vendor, placedLoc, now, via)
         if (!quiet) maybeAlert(a, best, c.hits, now, via)
         // Following is about this phone: a device near another Sentinel isn't following it.
         if (via != null) return
@@ -938,7 +1065,7 @@ class ScanForegroundService : Service() {
         val followMs = Prefs.followMinMinutes(this) * 60_000L
         val followM = Prefs.followMinMeters(this).toDouble()
         // Followers that stay in range, and ones that keep turning up at places along your way.
-        if (loc != null && !best.listOnly) placeFollow.heard(mac, DeviceRegistry.linkedFrom(mac), now, loc.latitude, loc.longitude)
+        if (placedLoc != null && !best.listOnly) placeFollow.heard(mac, DeviceRegistry.linkedFrom(mac), now, placedLoc.latitude, placedLoc.longitude)
         // A tag that can't say it's with its owner (Tile, SmartTag, Chipolo...) and never leaves a phone's
         // side is that phone owner's, like an AirTag near its iPhone: no follow alert while that holds.
         val withOwner = loc != null && best.category == Category.TRACKER && !SignatureEngine.reportsOwnerState(best) &&
@@ -1325,16 +1452,34 @@ class ScanForegroundService : Service() {
         }
     }
 
+    /** Resolves manufacturer/service-UUID vendors (even for randomized BLE adverts such as Axon BWC/Signal). */
+    private fun advertVendors(a: Advert, macVendor: String?): Pair<List<String>, String?> {
+        val companyVendors = a.manufacturerData.keys.mapNotNull { id ->
+            when (id) {
+                0x067C -> "Axon Enterprise"
+                else -> VendorDb.company(id)
+            }
+        }
+        val serviceVendors = a.serviceUuids.mapNotNull { uuid ->
+            when (Advert.shortOf(uuid)) {
+                0xFE6C -> "Axon Enterprise"
+                else -> null
+            }
+        }
+        val extraVendors = (companyVendors + serviceVendors).distinct()
+        return extraVendors to (macVendor ?: extraVendors.firstOrNull())
+    }
+
     private fun classify(a: Advert, now: Long, extra: List<Hit> = emptyList()): Classified {
         val macVendor = if (a.randomBle) null else VendorDb.macVendor(a.mac)
         val identity = DeviceIntel.identify(a, macVendor)
-        val companyVendors = a.manufacturerData.keys.mapNotNull { VendorDb.company(it) }
-        val vendor = macVendor ?: companyVendors.firstOrNull()
+        val (companyVendors, vendor) = advertVendors(a, macVendor)
         // Per-packet rules, the watchlist, matches carried over from a rotated address and the
         // patrol-vehicle cluster, then fused into one calibrated score.
         // A network whose name has one of your ignored words (Settings › Ignored network names): listed, never flagged.
-        val ignored = a.source == Advert.Source.WIFI && a.wifi?.client != true &&
-            a.name?.let { SignatureEngine.ignoredSsid(it, Prefs.ignoredSsidAll(this)) } == true
+        val ignored = (a.source == Advert.Source.WIFI && a.wifi?.client != true &&
+            a.name?.let { SignatureEngine.ignoredSsid(it, Prefs.ignoredSsidAll(this)) } == true) ||
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.isNonFlockIgnoredInfraOrRetail(a.mac, a.name, vendor)
         val raw = if (ignored) emptyList() else SignatureEngine.classify(a) +
             OuiWatchlist.hits(a.mac, a.name, listOfNotNull(macVendor) + companyVendors) +
             OuiWatchlist.advertHits(a) +
@@ -1399,6 +1544,14 @@ class ScanForegroundService : Service() {
         // Someone else's tracker nearby is normal; trackers only alert when they follow you.
         if (best.category == Category.TRACKER) return
         if (best.listOnly || best.confidence < Prefs.alertThreshold(this, best.category)) return
+        // Traffic cabinets, fixed routers (>48h TSF uptime), and open guest Wi-Fi VAPs: collected and logged, never alerted.
+        if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isIgnoredInfrastructureOrRetail(a.mac, a.name)) return
+        val wifi = a.wifi
+        if (wifi != null && !wifi.client && !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isExplicitAgencyOrTacticalSsid(a.name)) {
+            val upSince = wifi.upSince
+            if (upSince != null && now > upSince && (now - upSince) > org.tucsoncommunity.kokoho.posture.KokohoSignatures.MAX_MOBILE_BEACON_UPTIME_MS) return
+            if (!a.name.isNullOrBlank() && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isOpenPublicWifiCapabilities(wifi.capabilities)) return
+        }
         // A shop's router you pass every day: listed and logged, no alert.
         if (org.tucsoncommunity.kokoho.detect.FixedRouter.quiet(a.mac, hits, Prefs.alertThreshold(this, best.category))) return
         // Acknowledged from the list: listed and logged, no alert.
@@ -1508,7 +1661,8 @@ class ScanForegroundService : Service() {
         // Settings › Sentinel Link: devices only a linked Sentinel heard are saved only when that's on.
         val saveLinked = Prefs.saveLinked(this)
         val seen = DeviceRegistry.summaries(since).filter {
-            (it.hits.isNotEmpty() || it.remoteId != null || org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchOuiOrSsid(it.mac, it.name, it.vendor) != null) &&
+            (it.hits.isNotEmpty() || it.remoteId != null ||
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.isRelevantBleOrWifiCandidate(it.mac, it.name, it.vendor, it.remoteId != null, false)) &&
                 (saveLinked || !org.tucsoncommunity.kokoho.esp.HeardBy.peer.recent(it.mac) || org.tucsoncommunity.kokoho.esp.HeardBy.ownRecent(it.mac))
         }
         if (seen.isEmpty()) return null
@@ -1763,59 +1917,76 @@ class ScanForegroundService : Service() {
     private fun onRadio(e: org.tucsoncommunity.kokoho.sdr.RadioWatch.Event, via: String? = null, quiet: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        val enabledAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this)
+        val catalogAny = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz, includeRepeaters = true)
+        if (catalogAny != null && catalogAny.agencyEnum in enabledAgencies && catalogAny.role.equals("REPEATER", ignoreCase = true)) {
+            org.tucsoncommunity.kokoho.sdr.RadioLog.recordRepeaterBurst(now)
+        }
         // Solidly exclude unknown commercial/municipal VHF/UHF and repeater downlinks (#2, #17, Question 2, Review #2)
-        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz) ?: return
+        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz)
+            ?: org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchPublicSafetyMobileUplink(
+                e.freqHz, e.snrDb, enabledAgencies = enabledAgencies
+            )
+        if (via == null) {
+            org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordRawRadioPeak(
+                context = this,
+                freqHz = e.freqHz,
+                snrDb = e.snrDb,
+                confidence = e.confidence,
+                bandLabel = e.band.label,
+                isRepeat = e.repeat,
+                isTdma = e.tdma,
+                matchedAgency = (kokohoFreq ?: catalogAny)?.agency,
+                matchedAlpha = (kokohoFreq ?: catalogAny)?.alpha,
+                location = lastLocation ?: lastFix,
+                nowMs = now
+            )
+        }
+        if (kokohoFreq == null) return
+        val resolvedAgency = kokohoFreq.agencyEnum
         if (!kokohoFreq.isAlertableDirectOrMobile) return
-        if (kokohoFreq.agencyEnum !in org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(this)) return
+        if (resolvedAgency !in enabledAgencies) return
 
         if (via == null && sharing()) linkOutbox?.addRadio(LinkCodec.Radio(e.freqHz, e.snrDb, e.band.label, e.band.startHz, e.band.endHz,
             e.band.kind.name, e.confidence, e.target?.label, e.repeat, e.tdma, now))
 
         val name = "${kokohoFreq.alpha} (${kokohoFreq.description})"
-        if (via == null) {
-            (lastLocation ?: lastFix)?.let { fix ->
-                val nacFacet = kokohoFreq.nac ?: "ANY"
-                val propClass = when (kokohoFreq.role.uppercase()) {
-                    "AIR_ASSET" -> "AIR_TO_GROUND"
-                    else -> "GROUND_DIRECT"
-                }
-                org.tucsoncommunity.kokoho.posture.KokohoHubClient.publishSensorReportIfEnabled(
-                    context = this,
-                    lat = fix.latitude,
-                    lon = fix.longitude,
-                    snrDb = e.snrDb.toDouble(),
-                    modality = "RF_P25",
-                    primaryFacet = "rf:chan:${e.freqHz}:$nacFacet",
-                    additionalFacets = emptyList(),
-                    agency = kokohoFreq.agencyEnum,
-                    label = "${kokohoFreq.alpha} — ${kokohoFreq.description}",
-                    propagationClass = propClass
-                )
-            }
+        if (via == null && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isSharingActive(this)) {
+            maybeEvaluatePostureForSharing(now)
         }
         val threshold = Prefs.alertThreshold(this, Category.RADIO)
-        val trend = org.tucsoncommunity.kokoho.sdr.RadioLog.observe(e, name, Prefs.radioTrendDb(this), now)
+        val radioGeo = if (via != null) null else (lastLocation ?: lastFix)?.takeIf { usableForPlacing(it) }?.let { placeAt(now, it) }
+        val trend = org.tucsoncommunity.kokoho.sdr.RadioLog.observe(e, name, Prefs.radioTrendDb(this), now, radioGeo?.lat, radioGeo?.lon)
         if (trend != null && e.confidence >= threshold && via == null) {
             AlertPlayer.callout(this, "Radio ${spokenMhz(e.freqHz)} " +
                 if (trend == org.tucsoncommunity.kokoho.sdr.RadioLog.Trend.CLOSER) "getting closer" else "moving away")
         }
         if (e.repeat) {
-            NotificationHelper.updateServiceNotification(this)
             return
         }
         val near = when { e.snrDb >= 40 -> "very close"; e.snrDb >= 30 -> "close" else -> "nearby" }
-        val detail = "${kokohoFreq.agencyEnum.friendlyLabel}: ${kokohoFreq.alpha} (${kokohoFreq.description}) on ${e.mhz} MHz, ${e.snrDb} dB SNR ($near)."
-        val label = "${kokohoFreq.agencyEnum.friendlyLabel}: ${kokohoFreq.alpha}" + (via?.let { " · via $it" } ?: "")
+        val detail = "${resolvedAgency.friendlyLabel}: ${kokohoFreq.alpha} (${kokohoFreq.description}) on ${e.mhz} MHz, ${e.snrDb} dB SNR ($near)."
+        val label = "${resolvedAgency.friendlyLabel}: ${kokohoFreq.alpha}" + (via?.let { " · via $it" } ?: "")
         val hit = Hit(Category.RADIO, label, e.confidence, detail, "SDR direct/mobile tactical signature")
-        val spoken = if (Prefs.radioSpeakFreq(this)) "Radio ${spokenMhz(e.freqHz)}, $name" else "${kokohoFreq.agencyEnum.friendlyLabel} radio nearby"
+        val spoken = if (Prefs.radioSpeakFreq(this)) "Radio ${spokenMhz(e.freqHz)}, $name" else "${resolvedAgency.friendlyLabel} radio nearby"
         radioDetection(hit, "RADIO " + e.mhz + " MHz", e.snrDb, now, "radio:" + e.freqHz, spoken, e.confidence >= threshold && !quiet, via)
+    }
+
+    @Volatile private var lastPostureShareEvalAt = 0L
+
+    private fun maybeEvaluatePostureForSharing(now: Long) {
+        if (now - lastPostureShareEvalAt < 15_000L) return
+        lastPostureShareEvalAt = now
+        serviceScope.launch {
+            runCatching { org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this@ScanForegroundService, now) }
+        }
     }
 
     /** A radio [hit] into the detection history (tagged with where you are), and alerted when [alert]. [talkgroup]: a P25
      *  alert, which also follows Settings › RTL-SDR radio › Talkgroup alerts. */
     private fun radioDetection(hit: Hit, mac: String, rssi: Int, now: Long, key: String, spoken: String, alert: Boolean,
                                via: String? = null, talkgroup: Boolean = false) {
-        val loc = lastLocation
+        val loc = lastLocation ?: lastFix
         if (via == null || Prefs.saveLinked(this))
             logDetection(mac, "SDR", hit, now, loc?.latitude, loc?.longitude, rssi = rssi, heardBy = via?.let { "via $it" })
         // Dismissed from the list (swiped left): logged, no alert.

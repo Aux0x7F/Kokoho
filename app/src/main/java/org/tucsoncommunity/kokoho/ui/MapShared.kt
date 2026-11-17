@@ -21,7 +21,10 @@ internal data class MapPin(
     val radiusM: Double? = null,
     val whereNote: String = "Position = where your phone was when this device's signal was strongest (approximate).",
     val showDot: Boolean = true,
-    val opacity: Double = 1.0
+    val opacity: Double = 1.0,
+    val iconKind: MapIcons.BadgeIconKind = MapIcons.BadgeIconKind.CAR,
+    val agencyId: String = "DHS_CBP",
+    val groupMembers: List<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyList()
 )
 
 internal object MapPins {
@@ -75,12 +78,60 @@ internal object MapDialogs {
     }
 
     fun showPin(a: AppCompatActivity, p: MapPin) {
+        if (p.groupMembers.size > 1) {
+            showGroupAgentsModal(a, p.groupMembers)
+            return
+        }
         MaterialAlertDialogBuilder(a)
             .setTitle(p.label)
             .setMessage(p.details + "\n\n" + p.whereNote)
             .setPositiveButton("Details") { _, _ -> DeviceActions.openDetails(a, p.mac) }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    /**
+     * High-contrast WCAG AAA list modal of probable agents in a tapped cluster/group.
+     * Invokes [onPick] if provided (e.g. to select on map and open contextual footer), else opens Details directly.
+     */
+    fun showGroupAgentsModal(
+        a: AppCompatActivity,
+        members: List<org.tucsoncommunity.kokoho.posture.EvaluatedThreat>,
+        onPick: ((org.tucsoncommunity.kokoho.posture.EvaluatedThreat) -> Unit)? = null
+    ) {
+        val distinct = members.distinctBy { it.uuid }
+            .sortedWith(
+                compareBy<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> { it.agency.priorityRank }
+                    .thenBy { it.nearestEdgeDistanceM }
+            )
+        if (distinct.isEmpty()) return
+        if (distinct.size == 1) {
+            val only = distinct.first()
+            if (onPick != null) onPick(only) else DeviceActions.openDetails(a, "kokoho:${only.uuid}")
+            return
+        }
+        val nowMs = System.currentTimeMillis()
+        KokohoJourneyUi.showModal(
+            activity = a,
+            title = "Detections Here (${distinct.size})",
+            subtitle = "Select an entity"
+        ) { body, dismiss ->
+            for (t in distinct) {
+                val radStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatAccuracyRadius(a, t.uncertaintyRadiusM)
+                val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+                val hits = t.sightingCount.coerceAtLeast(1)
+                val row = KokohoJourneyUi.buildActionRow(
+                    ctx = a,
+                    title = t.title.ifBlank { t.friendlyLabel },
+                    subtitle = "${t.agency.friendlyLabel} · $radStr · ${hits}x · $ageStr",
+                    onClick = {
+                        dismiss()
+                        if (onPick != null) onPick(t) else DeviceActions.openDetails(a, "kokoho:${t.uuid}")
+                    }
+                )
+                body.addView(row)
+            }
+        }
     }
 
     fun showWaze(a: AppCompatActivity, w: org.tucsoncommunity.kokoho.online.WazePolice.Shown) {

@@ -1,0 +1,969 @@
+# ident	kind	lat	lon	elev_ft	max_rwy_ft	is_hosp	name
+00AZ	small_airport	34.3056	-112.165	3810	1700	0	Cordes Airport
+01AZ	heliport	34.60741	-111.8609	3300	210	0	Yat Heliport
+01MU	heliport	32.19675	-110.77514	2873	54	0	NWMC - Houghton Heliport
+02NM	small_airport	32.09071	-108.87073	4240	4247	0	FFR Animas Landing Strip
+03AZ	small_airport	31.43097	-110.08809	4275	3600	0	Thompson International Aviation Airport
+03UT	small_airport	37.11438	-109.99014	5315	5000	0	AZ Minerals Corporation Airport
+04UT	small_airport	37.00669	-110.7947	6160	3700	0	Navajo Mountain Airport
+05AZ	heliport	32.68345	-114.63435	200	40	1	Yuma Regional Medical Center Heliport
+06AZ	heliport	33.28844	-111.75224	1280	80	1	Mercy Gilbert Medical Center Heliport
+08AZ	heliport	33.41767	-111.83884	1240	42	0	Mesa Police Heliport
+09AZ	small_airport	31.92485	-110.04001	4970	2350	0	Stronghold Airport
+09NV	heliport	35.97969	-115.15018	2374	40	1	West Henderson Hospital Heliport
+0AZ0	heliport	33.48119	-112.03976	1161	40	1	Arizona Heart Hospital Heliport
+0AZ2	small_airport	33.77817	-113.64062	1930	3500	0	Western Sky Airport
+0AZ4	small_airport	32.9823	-112.287	1505	2900	0	Flying Bucket Ranch Airport
+0AZ5	small_airport	33.86594	-112.60326	2080	2600	0	Castle Well Airport
+0AZ6	heliport	33.48296	-112.0793	1213	40	1	St Joseph's Hospital Heliport
+0NM7	small_airport	33.5279	-108.541	8143	7500	0	Negrito Airstrip
+10AZ	small_airport	33.3664	-112.618	860	3407	0	Pierce Airport
+10UT	heliport	37.17278	-113.43444	3300	100	0	Gilbert Development Corp Heliport
+11AZ	small_airport	31.68359	-110.29005	4250	3850	0	Whetstone Airport
+12AZ	small_airport	33.8539	-112.653	1840	2400	0	Ranta Strip
+13AZ	small_airport	33.535	-112.85347	1213	1100	0	Waltenberry Field Ultralightport
+13Q	small_airport	34.00423	-108.67992	7681	5200	0	Jewett Mesa Airport
+14AZ	small_airport	31.90949	-111.12029	4025	4300	0	Ruby Star Airpark
+16AZ	small_airport	34.5089	-112.68	4366	2900	0	Yav'pe Ma'ta Airport
+17AZ	heliport	33.31411	-111.68742	1350	42	1	East Valley ER & Hospital Helipad
+18AZ	small_airport	33.81854	-111.89833	2568	4029	0	Sky Ranch At Carefree Airport
+19AZ	small_airport	34.60449	-111.8648	3370	3300	0	Montezuma Airport
+1AZ0	small_airport	33.1119	-112.269	1261	4500	0	Bishop Airfield
+1AZ1	heliport	33.51529	-112.25569	1060	100	0	Boulais Heliport
+1AZ2	small_airport	34.42924	-112.75441	3817	0	0	Kirkland Valley Airport
+1AZ3	heliport	32.83001	-109.56433	3000	120	0	Arizona State Prison Safford Heliport
+1AZ6	small_airport	31.55682	-110.10738	4180	1350	0	Skyline Air Ranch Airport
+1AZ7	heliport	33.44791	-112.2266	1140	25	0	SRP Tolleson Center Heliport
+1AZ8	small_airport	35.2958	-114.373	3750	3000	0	Willow Springs Ranch Airport
+1L4	small_airport	35.30555	-114.88236	2605	4140	0	Kidwell Airport
+1NV2	heliport	36.1248	-114.909	1380	100	0	Lake Las Vegas Heliport
+1Z1	small_airport	36.25798	-113.23106	4100	4000	0	Grand Canyon Bar Ten Airstrip
+20CA	heliport	33.60366	-114.64459	261	150	0	Clayton Heliport
+20E	heliport	33.45686	-112.02668	1117	100	1	Valleywise Health Medical Center Heliport
+21AZ	small_airport	34.35088	-109.96405	6066	4000	0	White Mountain Lake Airport
+22AZ	heliport	35.11136	-114.5543	925	86	1	Western Arizona Regional Medical Center Heliport
+22UT	small_airport	37.02584	-111.62916	2500	0	0	Larkspur Airstrip
+23AZ	small_airport	34.0195	-112.826	2455	4500	0	Moreton Airpark
+24AZ	small_airport	34.1581	-110.935	5688	3950	0	Pleasant Valley Airstrip
+24UT	heliport	37.17774	-113.33219	3248	40	1	Intermountain Health Hurricane Heliport
+25AZ	small_airport	31.8099	-109.05862	4173	2640	0	Mystery Well Ranch Airport
+26AZ	small_airport	34.012	-113.203	2192	2000	0	Flying Dare's Ranch Airport
+27AZ	small_airport	33.91928	-113.16779	2206	3906	0	Eagle Roost Airpark
+28AZ	small_airport	33.9228	-113.181	2208	3500	0	Sampley's Airport
+2AN2	heliport	33.02729	-112.08513	1073	42	0	Ak-Chin Heliport
+2AZ1	small_airport	33.76035	-113.61475	1866	2200	0	Indian Hills Airpark
+2AZ2	heliport	33.56868	-112.22805	1135	100	0	Sunstate-Glendale Helistop
+2AZ4	small_airport	33.0537	-112.146	1215	2600	0	Millar Airport
+2AZ9	small_airport	31.60612	-109.65426	4200	4300	0	Ethnos Air Airport
+2CA9	heliport	32.97903	-114.26746	850	3000	0	Castle Dome Army Heliport
+2NV3	heliport	36.83792	-114.05043	1978	30	0	Vista Del Monte Lot 55 Heliport
+32AZ	heliport	33.67011	-111.92231	1675	60	1	Scottsdale Healthcare Thompson Peak Hospital Heliport
+33AZ	small_airport	34.79316	-112.97447	5950	4000	0	Yolo Ranch Airport
+37AZ	small_airport	32.9356	-111.485	1464	2800	0	Sarita Airport
+39AZ	heliport	33.7843	-112.13003	1640	40	1	Sonoran Crossing Medical Center Heliport
+3AZ0	heliport	35.2083	-111.64316	7016	40	1	Flagstaff Medical Center Heliport
+3AZ1	heliport	33.3723	-111.837	1231	38	0	Pixley-Richards Gilbert Heliport
+3AZ3	heliport	36.91714	-111.46376	4300	50	1	Page Hospital Emergency Medical Heliport
+3AZ4	heliport	33.66591	-112.11532	1380	55	1	John C Lincoln Deer Valley Hospital Heliport
+3AZ5	small_airport	35.5722	-113.292	5317	4790	0	Hualapai Airport
+3AZ6	heliport	33.65933	-112.3735	1255	50	1	Banner Del E Webb Medical Center Heliport
+3AZ7	heliport	33.40464	-111.97019	1297	20	0	The Buttes in Tempe Heliport
+3AZ8	small_airport	32.76685	-109.65325	3080	3300	0	High Mesa Airpark
+3NV1	heliport	36.11253	-115.12421	1967	0	1	Desert Springs Hospital Heliport
+40AZ	small_airport	33.0789	-112.129	1240	2000	0	Boulais Ranch Airport
+41AZ	small_airport	32.9916	-112.02364	1210	2950	0	Ak Chin Community Airfield
+42AZ	heliport	34.03971	-110.48691	4967	40	0	WMAT EMS Heliport
+43AZ	heliport	33.40067	-113.22986	1184	50	0	MTAS 1 Heliport
+44A	small_airport	32.5184	-114.698	163	2800	0	Rolle Airfield
+44AZ	small_airport	36.9319	-111.97	5868	2640	0	Sandhill Ranch Airport
+48AZ	small_airport	34.65067	-111.78831	3575	2300	0	Rimrock Airport
+49AZ	small_airport	36.73325	-109.61716	4999	0	0	Rock Point Airport
+4AZ1	heliport	33.7533	-112.416	1521	30	0	Moulder Heliport
+4AZ3	heliport	33.67003	-111.14177	2165	20	0	Tonto Ranger Station Heliport
+4AZ4	heliport	31.60143	-110.06888	4253	20	0	Fort Omotse Heliport
+4AZ5	heliport	33.84512	-112.26982	1582	30	0	New Waddell Dam Heliport
+4AZ6	small_airport	34.9981	-113.462	3760	1500	0	Parsons Field
+4AZ8	small_airport	32.29422	-111.34484	2120	1650	0	The Ultralight Strip Ultralightport
+4AZ9	small_airport	32.1131	-109.762	4197	2640	0	Leroy Airport
+50AZ	small_airport	36.0597	-110.588	5946	2500	0	Rocky Ridge Airport
+51AZ	heliport	34.59183	-112.33076	5100	60	1	Yavapai Regional Medical Center East Heliport
+52AZ	small_airport	35.38077	-113.30104	5585	4800	0	X Bar 1 Ranch Upper Headquarters Airport
+52NV	heliport	35.99892	-114.81317	2073	40	0	Boulder City Heliport
+54AZ	small_airport	32.60247	-114.66748	177	3000	0	Somerton Airport
+55AZ	small_airport	32.87402	-111.9594	1309	2400	0	Potters Field
+56AZ	small_airport	33.48242	-113.00173	1193	2900	0	Mauldin Airstrip
+56CL	small_airport	33.59173	-114.60566	263	2400	0	Morris Ag Air SW Airport
+57AZ	small_airport	32.44663	-111.0029	2940	4670	0	La Cholla Airpark
+58AZ	small_airport	34.09361	-110.93278	5115	3068	0	Chapman Ranch Airstrip
+59AZ	small_airport	34.73622	-112.44971	4772	1500	0	Robin STOLport
+5AZ0	heliport	33.62533	-111.92161	1508	30	0	Lyon Aviation Rooftop Heliport
+5AZ2	heliport	33.4069	-112.072	1085	12	0	Southern Command Police Station Heliport
+5AZ3	small_airport	33.20867	-111.61722	1450	5124	0	Pegasus Airpark
+5AZ4	heliport	32.24193	-110.94627	2468	50	1	University Medical Center Hospital Heliport
+5AZ5	heliport	32.17402	-110.73575	3102	90	0	Saguaro Heliport
+5AZ6	small_airport	32.925	-112.25944	80	2700	0	Motown Airport
+5AZ7	small_airport	32.84718	-111.95079	1300	2100	0	Carranza Farm Airstrip
+5AZ8	heliport	34.8556	-111.823	4456	80	1	Sedona Medical Campus Heliport
+5AZ9	small_airport	33.0329	-109.9865	2750	3000	0	Regeneration Airport
+5CL7	small_airport	34.3081	-114.187	860	2200	0	Gene Wash Reservoir Airport
+60AZ	small_airport	33.8381	-113.454	1962	1900	0	Wood's Airstrip
+61AZ	small_airport	34.3697	-109.697	6546	1578	0	White Mountain Ultralightport
+64AZ	heliport	33.44886	-112.08104	1120	24	0	KSAZ-TV Heliport
+65AZ	heliport	32.22829	-110.99939	2345	40	1	Carondelet St Mary's Hospital Helistop
+66AZ	heliport	33.3923	-111.877	1199	40	1	Banner Desert Medical Center Heliport
+68AZ	small_airport	35.4751	-113.769	3450	3000	0	Music Mountain Air Ranch Airport
+69AZ	heliport	33.38108	-111.82892	1257	50	0	Maricopa County Sheriff's Office Heliport
+6AZ0	heliport	33.6245	-111.92133	1455	68	0	Lyon Aviation South Ramp Heliport
+6AZ2	small_airport	34.6168	-110.628	6172	5000	0	Wisky Ranch/Chevlon Airport
+6AZ6	heliport	31.41769	-109.88251	5001	40	1	Copper Queen Hospital Heliport
+6AZ7	heliport	33.5028	-112.786	1115	175	0	Toon Tail Heliport
+6AZ8	small_airport	31.93775	-111.11895	3800	2650	0	Flying Diamond Airport
+70AZ	heliport	32.06559	-110.85441	2580	20	0	Regional Public Safety Training Academy Heliport
+71AZ	heliport	34.51	-114.344	665	60	0	Spawr Heliport
+72AZ	heliport	34.7082	-112.334	5000	50	0	Adams Place Heliport
+72CL	small_airport	34.1342	-115.119	890	3200	0	Iron Mountain Pumping Plant Airport
+73AZ	small_airport	35.20166	-113.3618	5115	4800	0	Dunton Ranch Airport
+74AZ	small_airport	31.61961	-110.04736	4353	4800	0	Rancho San Marcos Airport
+75AZ	heliport	34.75443	-112.11961	5212	50	1	Emergency Medical Evacuation Heliport
+76AZ	heliport	33.4608	-112.352	990	40	1	West Valley Medical Center Heliport
+77AZ	heliport	33.60833	-112.1796	1328	45	1	Banner Thunderbird Medical Center Heliport
+79AZ	small_airport	32.30627	-111.28405	2110	4025	0	Sentiel Airport
+7AZ0	heliport	33.62501	-111.92197	1455	155	0	Aviation Ramp Area Heliport
+7AZ4	small_airport	31.93861	-109.58833	4475	0	0	Rancho Relaxo Airport
+80CL	heliport	33.60488	-114.60231	297	150	0	Blythe Service Center Heliport
+81AZ	heliport	33.6325	-111.9066	1500	0	0	Hangar 5 Heliport
+82AZ	small_airport	31.74519	-110.95209	3551	4500	0	Ridgeline Airpark
+85NM	heliport	31.9145	-108.534	4506	43	1	Playas Medical Building Heliport
+85V	small_airport	35.70094	-109.51738	6662	4500	0	Ganado Airport
+87AZ	heliport	33.63187	-111.9043	1509	0	0	Key Essentials Heliport
+88AZ	small_airport	33.64091	-111.05692	2329	3800	0	Grapevine Airstrip
+8AZ5	small_airport	31.89243	-109.05407	4200	2500	0	Lizzy Lizard Airport
+93AZ	small_airport	32.22468	-110.00739	4463	3800	0	Inde Motorsports Ranch Airport
+94AZ	heliport	35.71119	-109.54901	6360	48	1	Sage Memorial Hospital Heliport
+96NM	heliport	36.80405	-108.69077	5050	30	1	Northern Navajo Medical Center Heliport
+99AZ	small_airport	33.39565	-113.22289	1224	5100	0	ADC Airport
+99NV	heliport	36.81012	-114.11691	1656	0	1	Mesa View Regional Hospital Heliport
+9CL4	small_airport	35.28718	-115.19439	4620	3000	0	Hart Mine Airport
+AA13	heliport	31.95624	-110.98549	2831	40	1	Northwest Hospital/Sahuarita Heliport
+AN01	small_airport	32.8167	-110.317	3500	2500	0	Av Ranch Airport
+AR31	heliport	33.6139	-112.273	1140	30	0	C. Andrew Laird Heliport
+AZ00	small_airport	32.80679	-113.50388	475	1000	0	Morton Field Ultralight Flightpark
+AZ01	small_airport	33.84773	-113.57106	1980	2200	0	Outback Ranch Airstrip
+AZ02	heliport	33.45418	-111.98375	1185	50	0	Gateway East KNXV-TV Heliport
+AZ03	small_airport	36.7341	-111.75305	4217	3820	0	Cliff Dwellers Lodge Airport
+AZ05	small_airport	33.11254	-112.66273	763	2750	0	Lakeside Airpark
+AZ07	heliport	33.44272	-112.14914	1050	20	0	Phoenix Area Heliport
+AZ08	heliport	33.60387	-112.28254	1163	50	1	Banner Boswell Memorial Hospital Heliport
+AZ12	heliport	36.1083	-113.213	1705	100	0	183 Mile Heliport
+AZ13	small_airport	33.01725	-112.27942	1410	2000	0	Schu Ranch Airport
+AZ14	small_airport	32.0247	-109.957	4520	1950	0	Ammon Airport
+AZ15	heliport	36.1916	-113.092	1720	30	0	Lava Falls Heliport
+AZ16	heliport	32.2645	-109.83788	4174	40	1	Northern Cochise Community Hospital Heliport
+AZ17	small_airport	31.5022	-109.391	4680	1000	0	Circle H Ranch Airport
+AZ18	heliport	35.975	-112.131	6600	300	0	Madison Aviation Heliport
+AZ20	heliport	33.59187	-111.97805	1370	300	0	Westcor Home Office Heliport
+AZ21	small_airport	31.74459	-110.24789	4100	4000	0	Four Pillars Airport
+AZ22	heliport	34.7334	-112.03	3450	80	1	Marcus J Lawrence Medical Center Heliport
+AZ24	heliport	33.5248	-112.102	1174	60	1	Phoenix Baptist Hospital Heliport
+AZ25	small_airport	32.55705	-114.67895	126	0	0	Tri-Rotor Ag Services Airport
+AZ26	small_airport	31.36888	-110.12747	4242	3120	0	Evelyn Field
+AZ27	small_airport	34.90985	-112.53272	4421	4200	0	Big Springs Ranch Airport
+AZ28	small_airport	33.8215	-112.573	1915	2600	0	Thunder Ridge Airpark
+AZ29	heliport	33.4756	-112.224	1055	150	0	Westridge Mall Heliport
+AZ30	heliport	33.4853	-112.075	1100	400	0	United Bank Plaza Heliport
+AZ31	small_airport	32.9967	-112.272	1456	3960	0	Serene Field
+AZ32	small_airport	33.8475	-112.588	2060	4700	0	Roesner Ranch Airport
+AZ33	heliport	33.42562	-112.02968	1140	30	0	Knoell Main Office Heliport
+AZ34	small_airport	34.69317	-114.09635	1630	1320	0	Massey Farm Airport
+AZ35	heliport	35.99594	-113.78233	1220	50	0	Grand Canyon West 2 Heliport
+AZ36	heliport	36.0299	-113.82741	4790	50	0	Grand Canyon West 1 Heliport
+AZ37	heliport	32.2517	-110.879	2485	100	1	Tucson Medical Center Heliport
+AZ38	heliport	33.25825	-111.51864	1550	1500	0	Rittenhouse Army Heliport
+AZ39	heliport	33.4632	-111.729	1385	900	0	Turf Heliport
+AZ40	small_airport	33.78571	-113.63674	1930	1200	0	Sheepy Hollow Ranch Airfield
+AZ41	heliport	33.4834	-112.07	1850	30	0	Abacus Tower Heliport
+AZ43	small_airport	33.05396	-112.17354	1245	2650	0	Hidden Valley Airport
+AZ44	heliport	32.82169	-109.73601	2955	210	1	Mount Graham Regional Medical Center Heliport
+AZ45	small_airport	32.7292	-110.296	4800	4500	0	China Peak Observatory Airport
+AZ46	small_airport	34.76483	-112.54645	5025	2200	0	Morgan Ranch Airstrip
+AZ47	heliport	34.13703	-114.28492	450	40	1	La Paz Regional Hospital Heliport
+AZ48	heliport	33.46497	-112.05778	1148	129	1	Banner University Medical Center Helipad
+AZ50	small_airport	35.71547	-114.47844	2419	3900	0	Triangle Airpark
+AZ51	heliport	33.8187	-111.633	1610	30	0	Bartlett Dam Heliport
+AZ52	heliport	33.982	-111.717	2020	30	0	Horseshoe Dam Heliport
+AZ53	heliport	33.5906	-111.344	1891	20	0	Horse Mesa Dam Heliport 2
+AZ54	heliport	33.5634	-111.53596	1530	20	0	Stewart Mountain Dam Heliport
+AZ55	heliport	33.5825	-111.357	1890	20	0	Horse Mesa Dam Heliport 1
+AZ56	heliport	33.5534	-111.445	1640	20	0	Mormon Flat Dam Heliport
+AZ57	small_airport	34.93158	-112.51536	4482	5250	0	Pilots Rest Airport
+AZ58	heliport	33.66954	-111.16382	1895	70	0	Roosevelt Dam Heliport
+AZ59	heliport	33.44128	-111.94696	1180	20	0	Cross Cut Heliport
+AZ61	small_airport	32.90179	-112.23786	1616	2640	0	G M Ranch Airport
+AZ62	heliport	33.5778	-112.121	1245	50	0	Inn Place Hotel Heliport
+AZ63	small_airport	32.52803	-111.19597	2290	2800	0	Twin Hawks Airpark
+AZ64	small_airport	33.9523	-112.687	2225	2500	0	Rio Vista Hills Airport
+AZ65	heliport	33.38915	-112.86165	940	20	0	Palo Verde Nuclear Generating Station Heliport
+AZ66	heliport	33.42448	-111.82083	1243	60	1	Mesa Hospital Medical Center Heliport
+AZ67	small_airport	32.427	-111.39	2100	5120	0	El Tiro Gliderport
+AZ70	heliport	34.6272	-112.309	4800	40	0	Versatile Heliport
+AZ73	heliport	33.41311	-111.94095	1160	40	1	Tempe St. Luke's Hospital Heliport
+AZ74	heliport	33.65877	-111.95772	1567	0	1	Mayo Clinic Arizona Heliport
+AZ75	heliport	34.2034	-110.018	6500	64	1	Navapache Regional Medical Center Heliport
+AZ76	heliport	33.29812	-111.87353	1195	60	1	Chandler Regional Hospital Heliport
+AZ78	small_airport	33.00382	-112.27624	1420	2000	0	Arizona Bay Airport
+AZ79	small_airport	33.53023	-112.21638	1112	375	0	Airscrew Performance Flightpark Ultralightport
+AZ80	heliport	34.4811	-114.339	600	100	1	Havasu Samaritan Regional Hospital Heliport
+AZ81	heliport	33.4731	-111.727	1385	120	0	Boeing Heliport
+AZ82	small_airport	34.3993	-110.52955	6657	3420	0	Mogollon Airpark
+AZ83	heliport	33.4359	-112.08	1071	36	1	Phoenix Memorial Hospital Heliport
+AZ85	small_airport	33.53356	-112.96019	1248	3075	0	Tonopah Airport
+AZ86	small_airport	34.6842	-112.292	4978	2500	0	A C Goodwin Memorial Field Gliderport
+AZ87	heliport	33.22732	-111.85442	1203	80	0	Jeppesen Ranch Heliport
+AZ88	heliport	33.7031	-112.07	1507	0	0	Granite Reef Heliport
+AZ89	heliport	31.5514	-110.27	4548	60	1	Sierra Vista Community Hospital Heliport
+AZ90	small_airport	33.34989	-112.12295	1225	2436	0	Hangar Haciendas Airpark
+AZ91	heliport	33.8028	-111.918	2360	60	0	The Boulders Heliport
+AZ92	heliport	33.4114	-111.687	1425	40	1	Valley Lutheran Hospital Heliport
+AZ93	heliport	33.7431	-112.768	1660	60	0	Toyota Arizona Proving Ground Heliport
+AZ94	heliport	33.5214	-112.02	1240	80	0	Biltmore Golf Course Heliport
+AZ95	heliport	33.63928	-111.99652	1461	40	1	Abrazo Scottsdale Hospital Emergency Department Heliport
+AZ96	heliport	33.48792	-111.92238	1375	40	1	HonorHealth Scottsdale Osborn Medical Center Heliport
+AZ97	small_airport	35.35013	-113.68952	3710	4250	0	X Bar 1 Ranch Lower Airport
+AZ98	heliport	33.5695	-112.07116	1285	40	0	John C. Lincoln Helistop
+AZ99	heliport	33.4792	-112.042	1175	40	1	Phoenix Children's Hospital Heliport
+C54	heliport	34.31572	-108.30989	7205	65	0	Catron County Heliport
+CL29	small_airport	34.835	-114.957	2079	3000	0	Camino Airstrip
+CN98	small_airport	33.24556	-114.71028	309	2500	0	Walters Camp Airport
+E37	small_airport	32.84632	-109.87946	3114	2950	0	Flying J Ranch Airport
+E68	small_airport	33.0853	-112.161	1273	3740	0	Estrella Sailport Gliderport
+E81	small_airport	33.28139	-111.12894	2646	3250	0	Superior Municipal Airport
+E94	small_airport	33.35322	-108.8672	5428	3700	0	Glenwood Airport
+K0E8	small_airport	35.7177	-108.202	6696	5820	0	Crownpoint Airport
+K0L9	small_airport	36.3111	-114.464	1535	3400	0	Echo Bay Airport
+K0V7	small_airport	36.71644	-110.22844	5688	7140	0	Kayenta Airport
+K1G4	small_airport	35.98579	-113.81707	4825	5000	0	Grand Canyon West Airport
+K1L3	small_airport	35.4444	-114.909	3410	5040	0	Searchlight Airport
+K1L8	small_airport	37.1389	-113.306	3347	3410	0	General Dick Stout Field
+K40G	small_airport	35.6506	-112.148	5999	4199	0	Valle Airport
+K49X	small_airport	34.5288	-114.432	631	5000	0	Chemehuevi Valley Airport
+K5V5	small_airport	36.6978	-108.701	5270	5214	0	Shiprock Airstrip
+K61B	medium_airport	35.94716	-114.8588	2201	5103	0	Boulder City Municipal Airport
+K67L	medium_airport	36.83311	-114.05593	1978	5100	0	Mesquite Airport
+K94E	small_airport	32.7594	-108.20962	6126	5400	0	Whiskey Creek Airport
+KA09	small_airport	34.88753	-114.61664	485	4800	0	Eagle Airpark
+KA20	small_airport	35.00594	-114.56508	725	3700	0	Sun Valley Airport
+KA39	small_airport	32.99081	-111.91853	1300	4751	0	Ak-Chin Regional Airport
+KAVQ	small_airport	32.40906	-111.2162	2031	6901	0	Marana Regional Airport
+KAZC	small_airport	36.95919	-113.01317	4874	6300	0	Colorado City Municipal Airport
+KBLH	medium_airport	33.6192	-114.717	399	6543	0	Blythe Airport
+KBXK	small_airport	33.4224	-112.68632	1033	5500	0	Buckeye Municipal Airport
+KCFT	small_airport	32.95704	-109.2114	3798	4978	0	Greenlee County Airport
+KCGZ	small_airport	32.9549	-111.767	1464	5200	0	Casa Grande Municipal Airport
+KCHD	small_airport	33.2691	-111.811	1243	4870	0	Chandler Municipal Airport
+KCMR	small_airport	35.30555	-112.19439	6680	6003	0	H.A. Clark Memorial Field
+KD68	small_airport	34.1311	-109.31025	7055	8422	0	Springerville Municipal Airport
+KDGL	small_airport	31.3426	-109.506	4173	5760	0	Douglas Municipal Airport
+KDMA	medium_airport	32.1665	-110.883	2704	13643	0	Davis Monthan Air Force Base
+KDUG	medium_airport	31.46414	-109.60456	4154	7503	0	Bisbee Douglas International Airport
+KDVT	small_airport	33.6883	-112.083	1478	8196	0	Phoenix Deer Valley Airport
+KE24	small_airport	33.81018	-109.98655	5153	6288	0	Whiteriver Airport
+KE25	small_airport	33.97017	-112.79604	2377	6101	0	Wickenburg Municipal Airport
+KE51	small_airport	34.5928	-113.17199	4183	4575	0	Bagdad Airport
+KE60	small_airport	32.807	-111.587	1513	3901	0	Eloy Municipal Airport
+KE63	small_airport	32.9581	-112.678	789	5200	0	Gila Bend Municipal Airport
+KE67	small_airport	33.0476	-110.909	1833	3400	0	Kearny Airport
+KE77	small_airport	32.6365	-110.647	3274	4207	0	San Manuel Airport
+KE78	small_airport	31.9329	-111.894	2409	5830	0	Sells Airport
+KE91	small_airport	36.1109	-109.575	5547	6902	0	Chinle Municipal Airport
+KE95	small_airport	31.9994	-110.35822	3829	4002	0	Benson Municipal Airport/Paul Kerchum Field
+KEE0	small_airport	32.6862	-111.5471	1555	0	0	Eloy Farms Airstrip
+KEED	medium_airport	34.7663	-114.623	983	5005	0	Needles Airport
+KFFZ	small_airport	33.4608	-111.728	1394	5100	0	Falcon Field
+KFHU	medium_airport	31.58738	-110.34822	4719	12001	0	Sierra Vista Municipal Airport / Libby Army Air Field
+KFLG	medium_airport	35.13976	-111.66983	7014	8800	0	Flagstaff Pulliam Airport
+KFMN	medium_airport	36.7412	-108.23	5506	6704	0	Four Corners Regional Airport
+KGAX	small_airport	32.88467	-112.81654	2500	0	0	Williams Auxiliary Air Field 6
+KGBN	small_airport	32.8875	-112.72	883	8503	0	Gila Bend Air Force Auxiliary Airport
+KGCN	medium_airport	35.9524	-112.147	6609	8999	0	Grand Canyon National Park Airport
+KGEU	small_airport	33.5269	-112.295	1071	7150	0	Glendale Municipal Airport
+KGUP	medium_airport	35.51165	-108.78817	6472	7312	0	Gallup Municipal Airport
+KGYR	small_airport	33.4225	-112.376	968	8500	0	Phoenix Goodyear Airport
+KHII	medium_airport	34.57051	-114.35774	783	8000	0	Lake Havasu City Airport
+KHND	small_airport	35.9728	-115.134	2492	6501	0	Henderson Executive Airport
+KIFP	medium_airport	35.15473	-114.55932	701	8501	0	Laughlin Bullhead International Airport
+KIGM	medium_airport	35.2595	-113.938	3449	6827	0	Kingman Airport
+KINW	medium_airport	35.0219	-110.723	4941	7499	0	Winslow Lindbergh Regional Airport
+KIWA	medium_airport	33.3078	-111.655	1382	10401	0	Mesa Gateway Airport
+KKNB	small_airport	37.0111	-112.531	4868	6200	0	Kanab Municipal Airport
+KL41	small_airport	36.8125	-111.647	3603	3715	0	Marble Canyon Airport
+KLAS	large_airport	36.08336	-115.15182	2181	14835	0	Harry Reid International Airport
+KLGF	small_airport	32.86079	-114.39615	433	6142	0	Laguna Army Airfield
+KLSB	small_airport	32.3335	-108.692	4289	5224	0	Lordsburg Municipal Airport
+KLSV	medium_airport	36.2362	-115.034	1870	10120	0	Nellis Air Force Base
+KLUF	medium_airport	33.535	-112.383	1085	10000	0	Luke Air Force Base
+KMZJ	small_airport	32.5106	-111.328	1893	6849	0	Pinal Airpark
+KNYL	medium_airport	32.65094	-114.60938	213	13300	0	Yuma International Airport / Marine Corps Air Station Yuma
+KOLS	medium_airport	31.4177	-110.848	3955	7200	0	Nogales International Airport
+KP01	small_airport	32.45292	-112.86152	1458	3800	0	Eric Marcus Municipal Airport
+KP03	small_airport	31.3711	-109.69	4124	5551	0	Cochise College Airport
+KP04	small_airport	31.364	-109.883	4780	5929	0	Bisbee Municipal Airport
+KP08	small_airport	32.9359	-111.427	1574	5564	0	Coolidge Municipal Airport
+KP10	small_airport	35.7917	-110.423	5573	4200	0	Polacca Airport
+KP13	small_airport	33.3531	-110.667	3261	6500	0	San Carlos Apache Airport
+KP14	small_airport	34.9407	-110.138	5262	6698	0	Holbrook Municipal Airport
+KP19	small_airport	33.29883	-111.9158	1177	4417	0	Stellar Airpark
+KP20	small_airport	34.14891	-114.26836	452	6250	0	Avi Suquilla Airport
+KP23	small_airport	35.335	-112.887	5235	4800	0	Seligman Airport
+KP29	small_airport	31.67106	-110.02204	4743	4430	0	Tombstone Municipal Airport
+KP33	small_airport	32.2454	-109.895	4187	6100	0	Cochise County Airport
+KP52	small_airport	34.73	-112.035	3550	4250	0	Cottonwood Airport
+KPAN	small_airport	34.2568	-111.339	5157	5504	0	Payson Airport
+KPCA	heliport	32.66279	-111.48797	1675	1500	0	Picacho Stagefield Heliport
+KPGA	medium_airport	36.92423	-111.44772	4316	5950	0	Page Municipal Airport
+KPHX	large_airport	33.4353	-112.0059	1135	11489	0	Phoenix Sky Harbor International Airport
+KPRC	medium_airport	34.6535	-112.41988	5045	7619	0	Prescott Regional Airport - Ernest A. Love Field
+KRQE	small_airport	35.6521	-109.067	6742	7000	0	Window Rock Airport
+KRYN	small_airport	32.1422	-111.175	2417	5500	0	Ryan Field
+KSAD	small_airport	32.8548	-109.635	3179	6007	0	Safford Regional Airport
+KSDL	small_airport	33.6229	-111.911	1510	8249	0	Scottsdale Airport
+KSEZ	small_airport	34.8486	-111.788	4830	5132	0	Sedona Airport
+KSGU	medium_airport	37.03639	-113.51031	2941	9300	0	St George Regional Airport
+KSJN	small_airport	34.5186	-109.379	5737	5322	0	St Johns Industrial Air Park
+KSOW	medium_airport	34.26406	-110.00709	6415	7202	0	Show Low Regional Airport
+KT03	small_airport	36.09115	-111.38286	4513	6230	0	Tuba City Airport
+KT16	small_airport	33.6942	-108.849	6360	4800	0	Reserve Airport
+KTUS	large_airport	32.115	-110.93805	2643	10996	0	Tucson International Airport
+KTYL	small_airport	34.4528	-110.115	5823	7001	0	Taylor Airport
+KU08	small_airport	36.568	-114.443	1358	4800	0	Perkins Field
+KU30	small_airport	36.0205	-114.335	1549	3500	0	Temple Bar Airport
+KVGT	medium_airport	36.20907	-115.19398	2205	5005	0	North Las Vegas Airport
+KXNI	small_airport	35.06068	-108.9376	6370	6000	0	Andrew Othole Memorial Airport
+L25	small_airport	36.0936	-114.046	2941	2900	0	Pearce Ferry Airport
+L37	small_airport	35.52717	-113.24764	5386	5100	0	Grand Canyon Caverns Airport
+MM32	small_airport	29.9296	-112.656	148	6598	0	Puerto Libertad North Airport
+MM65	small_airport	31.2523	-109.608	4213	4950	0	La Calera Airport
+MM69	small_airport	30.67425	-110.93217	2542	4741	0	Tasícuri-Magdalena de Kino / Rodolfo Soto Bartell Airport
+MM75	small_airport	31.2429	-109.625	4000	3488	0	Agua Prieta Southwest Airport
+MM80	small_airport	30.4809	-109.644	4707	8170	0	Rancho La Milpita Airport
+MMCA	small_airport	31.06615	-110.09788	4921	5520	0	Cananea National Airport
+MMCN	medium_airport	27.3926	-109.833	243	7546	0	Ciudad Obregón International Airport
+MMGM	medium_airport	27.969	-110.925	59	7710	0	General José María Yáñez International Airport
+MMHO	large_airport	29.09281	-111.05302	627	7546	0	General Ignacio L. Pesqueira International Airport
+MMNG	medium_airport	31.22576	-110.97693	3990	5905	0	Nogales International Airport
+MMPE	small_airport	31.35199	-113.30518	71	8202	0	Mar de Cortés International Airport
+MMSF	small_airport	30.93006	-114.80846	148	4921	0	San Felipe International Airport
+MX-0001	small_airport	28.3547	-108.925	5038	5160	0	Yécora Airport
+MX-0008	small_airport	28.8601	-111.977	30	0	0	Bahía de Kino Airport
+MX-0013	small_airport	29.03115	-109.25265	1759	6300	0	Sahuaripa Airport
+MX-0045	small_airport	27.447	-110.02	87	0	0	Club Aereo Del Yaqui Airport
+MX-0052	small_airport	32.5318	-114.9898	79	0	0	Campeche Airport
+MX-0053	small_airport	30.6644	-112.2875	750	0	0	Santa Fe Airport
+MX-0056	small_airport	32.4159	-115.171	48	0	0	Pista Nuevo Leon Baja II
+MX-0063	small_airport	32.4993	-115.146	65	0	0	San Luis Airport
+MX-0068	small_airport	31.1508	-111.9748	2000	0	0	El Janeño Airstrip
+MX-0071	small_airport	30.5782	-112.9485	52	0	0	Los Olivos Airstrip
+MX-0074	small_airport	30.7009	-112.2293	870	0	0	Manjarrez de Caborca Airport
+MX-0103	small_airport	26.976	-109.5389	80	0	0	Agropecuaria Amparan Airstrip
+MX-0144	small_airport	32.25716	-115.17569	38	0	0	Melgoza Airport
+MX-0149	small_airport	32.54366	-114.9283	68	0	0	Aerofumigaciones Castro Airport
+MX-0153	small_airport	30.84809	-112.92075	139	0	0	La Rivera Airport
+MX-0158	small_airport	29.28228	-110.80762	978	0	0	Las Brechas Airport
+MX-0214	small_airport	32.62521	-114.88506	95	0	0	Morelos Airstrip
+MX-0277	small_airport	31.0276	-109.204	3500	0	0	Rancho Los Chirriones Airport
+MX-0279	small_airport	31.39144	-113.5371	53	0	0	Ultraligeros del Desierto Airport
+MX-0286	small_airport	30.8507	-112.8148	217	0	0	La Angostura Airport
+MX-0300	small_airport	29.8252	-111.2448	2400	0	0	Rancho Grande Airport
+MX-0322	small_airport	32.30083	-114.975	230	0	0	Bonfil Airport
+MX-0324	small_airport	32.40994	-115.04908	66	0	0	López Airstrip
+MX-0339	small_airport	28.72577	-109.81758	1801	0	0	Aguaje del Monte Airport
+MX-0352	small_airport	27.9881	-111.03889	98	0	0	Leo Airport
+MX-0358	small_airport	30.95128	-109.75383	4363	0	0	Mesa de Fronteras Airport
+MX-0370	small_airport	27.45528	-110.01972	85	0	0	La Huerta Airport
+MX-0384	small_airport	27.40639	-110.23389	102	0	0	San Agustin Airport
+MX-0386	small_airport	27.37042	-109.90806	138	0	0	San Isidro Labrador Airport
+MX-0402	small_airport	27.42056	-110.1	125	0	0	Fumigaciones Aereas Cervantes Airport
+MX-0447	small_airport	26.89636	-109.52503	49	0	0	Del Mayo Airport
+MX-0492	small_airport	31.32251	-110.59013	3937	0	0	Rancho San Antonio Airstrip
+MX-0513	small_airport	27.3694	-109.9384	98	0	0	Santa Cecilia Airport
+MX-0533	small_airport	32.27676	-114.96568	56	0	0	Coahuila Strip
+MX-0549	small_airport	27.31295	-109.8816	138	0	0	Santa Anita del Yaqui Airport
+MX-0550	small_airport	27.47667	-109.97972	95	0	0	Santa Barbara I Airport
+MX-0596	seaplane_base	31.311	-113.55233	0	0	0	Paredes Seaplane Base
+MX-0624	small_airport	28.80718	-108.92902	4003	0	0	Tarachi Airport
+MX-0695	small_airport	30.65331	-108.79036	5095	0	0	Rancho Carretas Airstrip
+MX-0697	small_airport	30.86484	-108.75178	4721	0	0	Rancho Santa Anita Airport
+MX-0706	small_airport	28.72503	-108.88692	5577	0	0	Mina La India Airport
+MX-0733	small_airport	28.08986	-110.53418	233	0	0	Campo Sonora Airstrip
+MX-0737	small_airport	30.20629	-108.95065	3701	0	0	Huachinera Airport
+MX-0753	small_airport	32.42039	-115.16033	49	0	0	Pista Brekamaje
+MX-0771	small_airport	30.77543	-108.68951	4790	0	0	Rancho Agua Blanca Airstrip
+MX-0773	small_airport	30.72737	-109.05746	2953	0	0	Rancho Oaxaca Airport
+MX-0775	small_airport	32.53233	-115.15652	66	0	0	Pista Queretaro
+MX-0776	small_airport	32.59267	-115.00611	82	0	0	Lazaro Cardenas Airfield
+MX-0782	small_airport	28.95257	-111.25373	295	0	0	El Socorro Airport
+MX-0789	small_airport	32.55492	-114.99658	89	0	0	Troncón Airstrip
+MX-0792	small_airport	32.1205	-115.1699	36	0	0	Aeródromo Leona Vicario
+MX-0807	small_airport	30.60983	-111.40056	2001	0	0	La Loma Airport
+MX-0817	small_airport	29.00635	-111.06181	548	0	0	La Yesca de Hermosillo Airport
+MX-0821	small_airport	31.16887	-112.80562	505	0	0	Ejido Juan Álvarez Airport
+MX-0838	small_airport	32.49088	-115.18434	49	0	0	El Álamo Airport
+MX-0873	small_airport	29.85965	-109.32199	1868	0	0	Granados Airstrip
+MX-0874	small_airport	29.68082	-108.98217	2710	0	0	Nácori Chico Airport
+MX-0875	small_airport	29.82038	-109.14212	2342	0	0	Bacadéhuachi Airport
+MX-0882	small_airport	27.37478	-109.93743	119	0	0	Familia Baldenebro Jaimes Airport
+MX-0905	small_airport	28.01337	-110.65922	194	0	0	Campo San Pablo Airstrip
+MX-0917	small_airport	30.60194	-112.98109	66	0	0	Bahía Airstrip
+MX-0918	small_airport	32.61395	-115.0835	36	0	0	Yucatan Airstrip
+MX-0924	small_airport	27.4055	-109.96308	95	0	0	Tigre Airport
+MX-0926	small_airport	28.06607	-110.62371	157	0	0	Úrsulo Galván Airstrip
+MX-0935	small_airport	27.35215	-109.96595	85	0	0	San Joaquin Aitport
+MX-0941	small_airport	32.57664	-114.98339	66	0	0	Bonito Valle Airport
+MX-0951	small_airport	28.91669	-111.35712	312	0	0	8 de Mayo Airstrip
+MX-0978	small_airport	27.47133	-110.08191	72	0	0	Santa Patricia Airport
+MX-1002	small_airport	28.63939	-108.77305	4551	0	0	Estrella Airport
+MX-1004	small_airport	28.21929	-110.58766	367	0	0	El Arenoso Airport
+MX-1022	small_airport	27.22605	-110.00111	42	0	0	Teras Airport
+MX-1032	small_airport	32.39389	-114.86516	98	0	0	Islita Airport
+MX-1040	small_airport	32.27852	-115.11576	52	0	0	Aguascalientes Airport
+MX-1054	small_airport	29.53314	-108.99295	2625	0	0	Huepaverachi Airport
+MX-1080	small_airport	27.39133	-110.01725	79	0	0	Solidaridad Airport
+MX-1082	small_airport	27.31318	-110.01868	66	0	0	Pueblo Yaqui Airport
+MX-1096	small_airport	32.51873	-114.91124	59	0	0	Mezquital Strip
+MX-1134	small_airport	28.1235	-110.68095	184	0	0	San Martin Airport
+MX-1136	small_airport	27.40543	-109.9595	87	0	0	Aeroservicios La Victoria Airport
+MX-1144	small_airport	32.2367	-115.01025	39	0	0	La Aurora Airport
+MX-1157	small_airport	32.53636	-115.08125	33	0	0	Pista Iñiguez II
+MX-1164	small_airport	27.08186	-109.845	33	0	0	Villa Juárez Airport
+MX-1188	small_airport	31.32609	-109.9389	2500	0	0	Naco Municipal Airport
+MX-1189	small_airport	31.31153	-109.95716	2500	0	0	Cuarto de Milla Strip
+MX-1193	small_airport	30.77827	-108.67521	2500	0	0	Rancho Agua Blanca 2 Airstrip
+MX-1194	small_airport	30.78403	-108.68564	2500	0	0	Rancho Agua Blanca 3 Airstrip
+MX-1213	small_airport	29.72428	-110.90385	1542	0	0	La Guacamaya Airport
+MX-1218	small_airport	32.16591	-115.03998	30	0	0	Zacatecas Airstrip
+MX-1220	small_airport	30.47439	-108.95331	3396	0	0	Bavispe Airport
+MX-1221	small_airport	30.59327	-108.94556	3281	0	0	La Mora Airport
+MX-1240	small_airport	30.64629	-109.97553	2500	0	0	Bacoachi Airstrip
+MX-1241	small_airport	30.983	-109.70786	2500	0	0	Baltasar Airstrip
+MX-1242	small_airport	30.61437	-110.23413	2500	0	0	Bacanuchi Airstrip
+MX-1245	small_airport	31.06689	-108.7446	2500	0	0	Las Bolas / La Huato Airstrip
+MX-1246	small_airport	31.02552	-108.62917	2500	0	0	Sierra de Enmedio / Venton Northwest Airstrip
+MX-1248	small_airport	31.2358	-108.6507	2500	0	0	Hacienda San Francisco Airstrip
+MX-1250	small_airport	31.1611	-109.2203	2500	0	0	Colonia Oquita Montenegro Airstrip
+MX-1253	small_airport	30.42416	-109.43484	2500	0	0	Rancho Nuevo Airstrip
+MX-1263	small_airport	30.85129	-112.41718	5512	0	0	El Rocio Airport
+MX-1264	small_airport	30.84259	-112.73714	269	0	0	El Pedernal Airport
+MX-1275	small_airport	26.7883	-109.61552	10	0	0	Huatabampo Base Airstrip
+MX-1276	small_airport	26.99892	-109.46725	98	0	0	Navojoa Base Airstrip
+MX-1283	small_airport	32.5898	-114.96092	2500	0	0	Fertilizantes DAF Airstrip
+MX-1284	small_airport	32.55138	-115.05227	2500	0	0	Aerofumigaciones Monterrey Airstrip
+MX-1290	small_airport	31.82887	-112.75749	1432	0	0	Desierto de Sonora Airport
+MX-1291	small_airport	29.52914	-109.51955	2012	0	0	Tepache Airport
+MX-1292	small_airport	29.90742	-109.30635	1801	0	0	Huásabas Airport
+MX-1295	small_airport	30.353	-109.8514	3236	0	0	Santa Rosa Airstrip
+MX-1297	small_airport	29.8356	-110.2239	2041	0	0	Aconchi Airport
+MX-1299	small_airport	29.9113	-110.2067	2117	0	0	Huépac Airport
+MX-1300	small_airport	30.0157	-110.2072	2323	0	0	Banámichi Airport
+MX-1301	small_airport	30.1606	-110.2505	2484	0	0	Sinoquipe Airport
+MX-1302	small_airport	30.3727	-110.1641	2852	0	0	Arizpe Airport
+MX-1303	small_airport	30.3939	-110.0504	3038	0	0	Buenavista Airport
+MX-1309	small_airport	29.92847	-110.61753	2260	0	0	Opodepe Airport
+MX-1323	small_airport	30.16865	-109.33064	2133	0	0	Villa Hidalgo Airstrip
+MX-1332	small_airport	30.2765	-108.92495	3543	0	0	El Bajío del Oso Airfield
+MX-1338	small_airport	28.98763	-111.06276	545	0	0	La Fortuna Airport
+MX-1347	heliport	30.48244	-109.64273	4757	0	0	Nacozari Helipad
+MX-1369	small_airport	32.59639	-114.94583	72	0	0	Torreon Airport
+MX-1371	small_airport	30.67055	-115.14067	2500	0	0	Agua Caliente Airstrip
+MX-1384	small_airport	29.29036	-109.75098	1207	0	0	San Pedro de La Cueva Airport
+MX-1426	small_airport	30.53022	-114.65558	2500	0	0	Campo Cristina Airstrip
+MX-1427	small_airport	32.25337	-115.17829	2500	0	0	Muller Airstrip
+MX-1438	heliport	31.306	-113.54736	2500	0	0	Puerto Peñasco Naval Heliport
+MX-1440	small_airport	29.50602	-112.40643	2500	0	0	Desemboque de los Seris Airstrip
+MX-1441	small_airport	29.62323	-112.36126	2500	0	0	Pozo Coyote Airstrip
+MX-1445	small_airport	29.01713	-112.20032	2500	0	0	Tiburón Aerodrome
+MX-1451	small_airport	26.5512	-109.2921	2500	0	0	Camahuiroa North Airstrip
+MX-1453	small_airport	26.52846	-109.27402	2500	0	0	Camahuiroa South Airstrip
+MX-1463	small_airport	27.40562	-109.95362	112	0	0	Nuestra Señora de Loreto Airport
+MX-1472	small_airport	31.40079	-112.70235	2500	0	0	La Cholla Gold Mine Airstrip
+MX-1474	small_airport	30.81833	-112.49668	2500	0	0	Juan García Cabral Airstrip
+MX-1475	small_airport	30.73226	-112.33228	2500	0	0	El Pinito Airstrip
+MX-1476	small_airport	30.72352	-112.20119	2500	0	0	Rafael Muñoz Espinoza Airstrip
+MX-1477	small_airport	30.73278	-111.7833	2500	0	0	Rancho Divino Niño Airstrip
+MX-1478	small_airport	31.11287	-111.3829	2500	0	0	Sáric Airport
+MX-1479	small_airport	30.99278	-110.48913	2500	0	0	Cuitaca Airstrip
+MX-1495	small_airport	30.79085	-112.43036	699	0	0	Los Sapos Airstrip
+MX-1504	small_airport	32.44684	-115.18706	49	0	0	Bonanza Airport
+MX-1526	small_airport	29.39955	-110.3841	2500	0	0	Rancho Santo Niño Airstrip
+MX-1527	small_airport	29.39994	-110.42039	2500	0	0	El Javian Airstrip
+MX-1574	small_airport	29.84318	-108.71673	2500	0	0	La Mesa Tres Ríos Airport
+MX-1575	small_airport	30.1239	-111.10211	2350	0	0	Comunidad San Miguel Airport
+MX-1576	small_airport	30.17889	-111.06958	2616	0	0	La Julia Airport
+MX-1577	small_airport	30.36774	-111.09463	2327	0	0	Estación Llano Airport
+MX-1578	small_airport	29.78324	-111.9382	2500	0	0	El Orégano Airport
+MX-1580	small_airport	29.55381	-108.91787	2500	0	0	Cerro La Guata Airport
+MX-1624	heliport	32.41513	-114.55286	193	0	0	San Luis Río Colorado Military Checkpoint Heliport
+MX-1655	small_airport	30.4546	-109.69585	4080	0	0	La Púrica Airport
+MX-1656	small_airport	30.88896	-109.59709	3848	0	0	Fronteras Airport
+MX-1689	small_airport	30.03584	-109.76288	2699	0	0	Cumpas Airport
+MX-1692	small_airport	30.69137	-112.0707	995	0	0	Pitiquito Airport
+MX-1748	small_airport	28.91211	-110.81203	853	0	0	La Gloria Airport
+MX-1760	small_airport	31.33658	-113.61543	16	0	0	Rocky Point Ultralight Flights
+MX-1761	small_airport	31.48073	-113.4009	177	0	0	Colonia Ortiz Garza Airport
+MX-1763	small_airport	32.51178	-114.85529	72	0	0	Janitzio Airstrip
+MX-1781	small_airport	27.01892	-109.58572	66	0	0	Reyna Diana Airport
+MX-1785	small_airport	30.55242	-111.14665	2255	0	0	La Providencia Airport
+MX-1795	small_airport	28.83771	-111.04846	669	0	0	Club de Aviones Ultraligeros de Hermosillo Airstrip
+MX-1840	small_airport	28.67722	-108.82572	5249	0	0	Matarachi Airport
+MX-1868	small_airport	30.4636	-110.53477	3560	0	0	Santo Domingo Airstrip
+MX-1898	heliport	31.9605	-114.7445	39	0	0	El Doctor Vehicle Inspection Station Heliport
+MX-1904	small_airport	32.33229	-115.19002	115	0	0	Ejido Oaxaca Airstrip
+MX-1905	small_airport	28.23913	-109.99477	745	0	0	El Rodriguez Airport
+MX-1927	small_airport	30.70349	-112.98299	66	0	0	Alfa Estrella Airport
+MX-1940	small_airport	32.10598	-114.98503	75	0	0	La Mesa Airport
+MX-1941	small_airport	32.16717	-115.0032	31	0	0	Ciudad Coahuila South Airport
+MX-1948	small_airport	30.88384	-108.20734	4530	0	0	Janos Airport
+MX-1949	small_airport	30.36254	-108.93616	3510	0	0	Bacerac Airport
+MX-1960	small_airport	30.59484	-109.86541	3916	0	0	La Gurruña Airport
+MX-1961	small_airport	30.39566	-109.94234	3965	0	0	Murucutachi Mine Airport
+MX-1962	small_airport	30.95234	-108.58943	4572	0	0	Las Virginias - Campo Diez Airport
+MX-1963	small_airport	30.92399	-108.62509	4590	0	0	Las Virginias - Campo Cinco Airport
+MX-1964	small_airport	30.83094	-108.71402	4694	0	0	El Revolcado Airport
+MX-1999	small_airport	29.63767	-108.98492	2615	0	0	El Sauz Airport
+MX-2038	small_airport	31.02708	-115.19687	1430	0	0	Colonia San Pedro Mártir Airport
+MX-2063	small_airport	30.27709	-112.8146	253	0	0	Puerto Lobos Airport
+MX-2097	small_airport	30.07732	-109.09356	4889	0	0	Aribabi Airport
+MX-2106	small_airport	27.849	-109.3788	1441	0	0	Rosario Airport
+MX-2165	small_airport	29.13515	-110.78744	899	0	0	San Bartolo Airport
+MX-2166	small_airport	30.04205	-111.22674	2400	0	0	El Carrizo Airport
+MX-2174	small_airport	27.76578	-109.29469	1199	0	0	Cedros Airport
+MX-2184	small_airport	29.44166	-110.75201	1250	0	0	Los Ángeles Airport
+MX-2200	small_airport	28.65092	-109.10348	2379	0	0	Guisamopa Airport
+MX-2201	small_airport	28.86587	-109.17176	1775	0	0	Bámori Airport
+MX-2202	small_airport	28.92326	-109.16945	1858	0	0	Arivechi Airport
+MX-2204	small_airport	29.09547	-110.07146	2064	0	0	El Rodeo Airport
+MX-2205	small_airport	29.09947	-110.0715	2067	0	0	Las Delicias Airport
+MX-2206	small_airport	28.897	-110.24174	1545	0	0	Cobachi Airport
+MX-2207	small_airport	28.85484	-110.29112	1453	0	0	El Mezquite Airport
+MX-2226	small_airport	29.10053	-110.81152	820	0	0	La Pradera Airport
+MX-2239	small_airport	32.5238	-114.89555	79	0	0	El Pozo Airport
+MX-2252	small_airport	29.61863	-111.77703	1421	0	0	Rancho Agua Blanca Airport
+MX-2254	small_airport	31.30537	-108.2954	4757	0	0	Las Palmas Airstrip
+MX-2259	small_airport	29.63135	-109.44742	2379	0	0	Divisaderos Airport
+MX-2302	small_airport	28.98139	-110.11927	1824	0	0	Kilometro 84 Airport
+MX-2322	small_airport	28.60452	-109.56764	7022	0	0	Tonichi Airport
+MX-2323	small_airport	28.61841	-109.11179	2405	0	0	Mesa El Rodeo Airport
+MX-2326	small_airport	28.34436	-109.61636	581	0	0	El Realito Airport
+MX-2327	small_airport	28.75658	-109.62699	745	0	0	Soyopa Airport
+MX-2329	small_airport	28.16222	-109.44028	791	0	0	Movas Airport
+MX-2330	small_airport	28.11397	-109.9078	433	0	0	El Porvenir Airport
+MX-2333	small_airport	28.28967	-109.60965	518	0	0	Rancho El Corral de Piedra Airport
+MX-2334	small_airport	28.35013	-109.576	620	0	0	Loma La Cuca Airport
+MX-2339	small_airport	27.21413	-108.88905	1099	0	0	Los Tanques Airport
+MX-2340	small_airport	28.11116	-109.32804	1273	0	0	Nuri Airport
+MX-2369	small_airport	28.86607	-109.7437	1426	0	0	Rancho El Gallo Güero Airport
+MX-2385	small_airport	28.79708	-109.16071	1955	0	0	Valle de Tacupeto Airport
+MX-2397	small_airport	28.95942	-109.3998	1677	0	0	Vicente Espinoza Airport
+MX-2398	small_airport	28.97795	-109.40722	1650	0	0	Bacanora Airport
+MX-2402	small_airport	27.47432	-107.59734	7575	0	0	Sugurachi Airport
+MX-2410	small_airport	28.43523	-110.63455	528	0	0	El Sudadero Airport
+MX-2434	small_airport	28.46607	-109.09921	3504	0	0	Santa Rosa de Lima Airport
+MX-2440	small_airport	26.43475	-109.05011	167	0	0	Torocobampo Airport
+MX-2508	small_airport	28.69866	-109.14344	2493	0	0	Mesa La Blanca Airport
+MX-2527	heliport	30.77204	-112.21241	1050	0	0	28th Cavalry Regiment Heliport
+MX-CEO	small_airport	27.4073	-109.928	114	0	0	El Crucero Airport
+MX-NVJ	small_airport	26.9922	-109.416	981	0	0	Navojoa Municipal Airport
+MX-UAC	small_airport	32.4453	-114.798	50	0	0	San Luis Río Colorado Airport
+MX-XAL	small_airport	27.039	-108.94902	1312	5000	0	Álamos Airport
+NM27	small_airport	36.4225	-108.861	5950	3500	0	Sanostee Airport
+NM36	small_airport	34.9028	-108.515	7220	0	0	Candy Kitchen Ranch Airport
+NM43	heliport	31.9944	-108.37032	4495	5000	0	Southwell Headquarters Heliport
+NM55	small_airport	33.36358	-108.86186	5460	2300	0	Whitewater Mesa Ranch Airport
+NM56	small_airport	35.1653	-108.459	6980	2870	0	Mystic Bluffs Airport
+NM62	heliport	36.7242	-108.218	5280	40	0	Sjrmc Heliport
+NM64	small_airport	31.45936	-108.85838	5155	1800	0	Diamond A Ranch Airport
+NM70	small_airport	31.94848	-109.04617	4157	6000	0	Rodeo Airport
+NM80	small_airport	34.3403	-108.515	6917	5000	0	Quemado Airport
+NM85	heliport	32.7981	-108.261	6097	54	0	Gila Regional Heliport
+NM86	small_airport	31.9368	-108.537	4519	4865	0	Playas Air Strip
+NM90	small_airport	31.90274	-109.02448	4107	6000	0	Amigos Del Cielo Airport
+NM91	small_airport	34.6223	-108.79	7474	4000	0	High Lonesome Airport
+NV01	heliport	36.29912	-114.40366	1217	100	0	Echo Bay Marina Heliport
+NV18	heliport	36.67328	-114.52464	1798	30	0	Logandale Fire/EMS Heliport
+NV25	heliport	36.03813	-114.98462	1890	70	1	St Rose de Lima Dominican Hospital Heliport
+NV34	heliport	36.15975	-115.16609	2096	50	1	University Medical Center Southern Nevada Heliport
+NV37	heliport	35.79536	-115.00761	1800	150	0	El Dorado Substation Heliport
+NV38	heliport	36.13066	-115.16173	2100	50	0	KLAS-TV Channel 8 Heliport
+NV40	heliport	35.95	-115.167	2460	60	0	Action Heliport
+NV48	heliport	36.13742	-115.16821	2122	80	0	Circus Circus Heliport
+NV53	heliport	36.16281	-115.16809	2055	60	1	Valley Hospital Medical Center Heliport
+NV61	heliport	36.21879	-115.13353	1981	60	0	Gilbert Development Corporation Heliport
+NV75	heliport	35.151	-114.59246	705	0	0	SCE Mohave Generating Station Heliport
+NV86	heliport	36.13262	-115.13551	2037	0	1	Sunrise Medical Center Heliport
+P18	heliport	33.472	-111.964	1250	600	0	Papago Army Heliport
+US-0019	small_airport	36.0103	-112.292	6204	0	0	The Ranch Airport
+US-0254	small_airport	32.5475	-114.51179	2500	0	0	Yuma Auxiliary Army Airfield 2
+US-0379	heliport	32.52227	-111.33429	1871	0	0	Silverbell Army Heliport
+US-0380	heliport	37.02389	-111.61683	4066	0	0	Amangiri Heliport
+US-0402	small_airport	33.86006	-113.92981	1090	1950	0	Jalapeno Ranch Airport
+US-0547	heliport	31.80735	-111.00955	2970	0	1	Santa Cruz Valley Regional Hospital Heliport
+US-0548	heliport	33.47903	-112.25678	1037	0	1	Banner Estrella Medical Center Heliport
+US-0549	heliport	34.10241	-110.96034	5190	0	1	Pleasant Valley Medical Center Heliport
+US-0555	small_airport	32.66081	-111.68149	1550	0	0	Sawtooth Airport
+US-0638	small_airport	32.78634	-113.9386	289	0	0	Dusty Wings Field
+US-0740	small_airport	35.02961	-112.6759	4410	2845	0	Big Chino Airstrip
+US-0756	heliport	36.2408	-115.16319	2096	0	1	Dignity Health St. Rose Dominican Hospital North Las Vegas C
+US-0820	small_airport	35.78887	-114.1321	2872	2700	0	Aileron Orchards Airport
+US-0874	heliport	35.08498	-108.78835	6454	0	0	Black Rock Heliport
+US-0936	small_airport	33.34055	-109.49446	4863	0	0	Double Circle Ranch Airport
+US-0962	small_airport	34.87094	-113.58673	2922	2034	0	Big Sandy Airport
+US-1144	small_airport	31.91764	-108.78072	4477	2870	0	Thurmond Airport
+US-1148	heliport	36.07229	-115.02965	1664	0	1	Henderson Hospital Heliport
+US-1212	heliport	35.49467	-114.89115	3767	0	0	Renegades Mines Partners LLC Heliport
+US-1253	heliport	35.9671	-114.84379	2394	0	1	Boulder City Hospital Heliport
+US-12765	heliport	33.45829	-112.5115	1093	53	1	Abrazo Buckeye Hospital Heliport
+US-1294	small_airport	32.72332	-113.9385	329	0	0	Curry Ridge Airport
+US-12941	heliport	34.40327	-111.36993	5490	54	0	Camo Geronimo Heliport
+US-12945	heliport	33.38417	-111.72362	1386	43	1	Banner Gateway Medical Center Helistop
+US-12946	heliport	33.63195	-111.90506	1507	0	0	16115 N. 81st. St. Heliport
+US-1304	heliport	36.01046	-114.78202	1761	0	0	Hoover Dam Lodge Heliport
+US-1305	small_airport	33.93017	-114.00049	2500	0	0	Bouse Airport
+US-13051	balloonport	32.08662	-110.94472	2500	0	0	World View Balloon Launch Site
+US-1306	small_airport	33.66185	-114.249	2500	0	0	Quartzsite Airport
+US-1309	small_airport	33.58057	-113.58721	2500	0	0	Salome Emergency Airfield
+US-1310	small_airport	33.63726	-113.34238	2500	0	0	75E Airport
+US-1312	heliport	32.27764	-112.73965	2500	0	0	US Border Patrol Ajo Station Helipad
+US-1326	small_airport	32.97303	-114.27266	2500	0	0	Castle Dome UAS Site Eight Airport
+US-1334	heliport	33.67728	-113.9578	2500	0	0	Brenda Emergency Heliport
+US-1400	small_airport	33.85674	-113.92928	2500	0	0	Schultz Air Ranch
+US-1427	small_airport	31.60324	-110.42968	2500	0	0	Eagle Runway
+US-1428	small_airport	31.6043	-110.4397	2500	0	0	Pioneer Runway
+US-1432	heliport	31.54252	-110.93422	2500	0	0	Morning Star Ranch Helipad
+US-1440	small_airport	34.16008	-111.72666	2500	0	0	Red Creek Airstrip
+US-1441	small_airport	36.32214	-113.78634	2500	0	0	Grand Gulch Airstrip
+US-1445	heliport	33.07358	-111.7599	2500	0	1	Hu Hu Kam Memorial Hospital Helipad
+US-1446	heliport	32.88179	-111.70912	2500	0	1	Banner Casa Grande Medical Center Helipad
+US-1447	heliport	32.17462	-110.93134	2500	0	1	University Medical Center South Heliport
+US-1448	heliport	32.31913	-111.01014	2500	0	1	Northwest Medical Center Helipad
+US-1449	heliport	32.17969	-110.96429	2500	0	1	Tucson VA Medical Center Helipad
+US-1450	heliport	31.96545	-110.30814	2500	0	1	Benson Hospital Helipad
+US-1452	heliport	31.90729	-109.16353	5059	0	0	HeloRescue Landing Pad
+US-1474	small_airport	36.51859	-113.86992	2500	0	0	Pakoon Airstrip
+US-1476	small_airport	36.67959	-113.62732	2500	0	0	Imlay Airstrip
+US-1481	heliport	34.93895	-110.29469	2500	0	0	Cholla Power Plant Helipad
+US-1482	small_airport	34.91331	-114.58008	2500	0	0	Willow Valley Airport
+US-1606	small_airport	33.32468	-112.75644	2500	0	0	Arlington Landing Field
+US-1607	heliport	33.44759	-111.97194	2500	0	0	Tovrea Castle Helipad
+US-1613	small_airport	33.35977	-113.12024	2500	0	0	Volcanic Well Landing Strip
+US-1629	small_airport	32.99272	-114.97248	2500	0	0	Glamis Landing Strip
+US-1646	small_airport	34.39476	-114.28082	2500	0	0	Havasu Palms Airstrip
+US-1648	small_airport	34.5827	-114.02779	2500	0	0	Sagebrush Trails Estates Airport
+US-1654	small_airport	32.4226	-111.2404	2500	0	0	Quality Aviation Airport
+US-1656	small_airport	32.37509	-111.36956	2500	0	0	Gasline Strip
+US-1672	heliport	37.05426	-112.53024	2500	0	1	Kane County Hospital Heliport
+US-1674	small_airport	32.70796	-110.87116	2500	0	0	Willow Springs Ranch Airport
+US-1683	heliport	33.57934	-109.3581	2500	0	0	KP Cienega Helispot
+US-1684	heliport	33.59908	-109.35093	2500	0	0	Cache Cienega Helispot
+US-1685	heliport	33.61652	-109.33438	2500	0	0	Butterfly Cienega Helispot
+US-1686	heliport	33.61624	-109.31203	2500	0	0	Willow Spring Helispot
+US-1687	heliport	33.60626	-109.30471	2500	0	0	South Fork Grant Creek Helispot
+US-1716	small_airport	33.87635	-112.6315	2500	0	0	Liberty Haven Airport
+US-1788	heliport	33.58136	-111.88519	1366	40	1	HonorHealth Scottsdale Shea Medical Center Heliport
+US-1790	heliport	33.84288	-111.92696	2500	0	0	Blue Sky Preserve Private Helipad
+US-1803	small_airport	32.5088	-114.46207	2500	0	0	Yuma Auxiliary Landing Field
+US-1815	small_airport	33.58442	-112.08094	2500	0	0	Sunnyslope Glider Landing Zone
+US-1816	small_airport	33.57656	-112.08124	2500	0	0	Mountain View Park Glider Landing Zone
+US-1830	small_airport	34.41136	-112.7279	3924	0	0	Dillon's Landing Strip
+US-1832	small_airport	34.52873	-112.97368	2743	0	0	Muleshoe Ranch Landing Strip
+US-1978	small_airport	34.24106	-112.36278	7190	0	0	Northstar Airport
+US-1990	small_airport	33.16871	-112.28224	1325	0	0	Flying A Ranch Airport
+US-1991	small_airport	33.22161	-112.30733	1319	0	0	Rainbow Rancho Airport
+US-1994	small_airport	33.14506	-112.65465	840	0	0	Desert Star Landing Strip
+US-1995	small_airport	33.13487	-112.65666	837	0	0	Woods Road North Landing Strip
+US-2048	small_airport	32.61263	-111.04575	2500	0	0	Palo Verde Ranch Airport
+US-2063	heliport	32.21731	-110.97171	2500	0	0	Tucson Police Department Helipad
+US-2078	heliport	35.94119	-113.90737	2500	0	0	Shamrock Heliport
+US-2123	small_airport	34.23413	-113.74702	2500	0	0	Rankin Ranch Landing Strip
+US-2124	small_airport	35.02856	-110.98516	2500	0	0	Bar T Bar Ranch / Chilson Landing Strip
+US-2191	heliport	32.6668	-114.11127	2500	0	0	US Border Patrol Wellton Heliport
+US-2193	small_airport	32.49795	-114.14994	804	0	0	TACTS Airfield
+US-2195	heliport	34.56693	-111.87611	2500	0	1	Verde Valley Medical Clinic Camp Verde Helipad
+US-2196	heliport	34.23049	-111.32083	4934	0	1	Banner Payson Medical Center Helipad
+US-2290	small_airport	32.571	-111.72892	1594	2524	0	Flying Crown Ranch Airport
+US-2424	heliport	33.28613	-111.8566	1275	0	1	Banner Ocotillo Medical Center Helipad
+US-2427	small_airport	31.55939	-111.29803	2500	0	0	Arivaca Hay Field Glider Landing Site
+US-2429	small_airport	31.58628	-111.52282	3493	0	0	Buenos Aires Airstrip
+US-2456	balloonport	31.48581	-110.29571	4872	0	0	Fort Huachuca TARS Site
+US-2464	balloonport	33.01587	-114.24328	991	0	0	Yuma TARS Site
+US-2518	small_airport	31.70414	-109.7892	2500	0	0	Flying K Ranch Airport
+US-2519	small_airport	31.71053	-109.79427	2500	0	0	Dawn Ridge Airport
+US-2520	small_airport	31.71796	-109.67894	2500	0	0	Elfrida Landing Strip
+US-2522	small_airport	32.02859	-109.90098	2500	0	0	Sunland Farms Airport
+US-2558	heliport	32.34963	-108.74642	2500	0	0	US Border Patrol Lordsburg Heliport
+US-2559	heliport	31.37687	-109.93083	2500	0	0	US Border Patrol Bisbee Heliport
+US-2560	heliport	31.35321	-110.96696	2500	0	0	US Border Patrol Nogales Heliport
+US-2561	heliport	31.34069	-110.96024	2500	0	1	Holy Cross Hospital Heliport
+US-2562	small_airport	31.99017	-111.38228	2714	0	0	King Anvil Ranch Airstrip
+US-2563	small_airport	32.03294	-111.35793	2621	0	0	Diamond Bell Airstrip
+US-2564	heliport	31.91792	-111.89022	2500	0	1	Sells Indian Hospital Hlelipad
+US-2565	heliport	31.96081	-111.59828	6785	0	0	Kitt Peak Heliport
+US-2648	small_airport	34.12494	-112.91724	2500	0	0	Moore Ranch Airstrip
+US-2659	small_airport	34.95883	-114.40468	2500	0	0	Green Quartz Mine Airstrip
+US-2660	small_airport	35.00375	-114.39043	2500	0	0	White Chief Mine Airstrip
+US-2662	small_airport	32.03147	-109.04516	2500	0	0	Cienega Ranch Landing Strip
+US-2663	small_airport	31.90154	-109.00894	2500	0	0	Painted Pony Airport
+US-2665	small_airport	31.74565	-109.04547	2500	0	0	Many Wells Landing Strip
+US-2669	small_airport	32.08652	-109.76467	4213	0	0	Ag-Air Airport
+US-2670	small_airport	32.02863	-109.78641	2500	0	0	Shelton Road Landing Strip
+US-2671	small_airport	32.01822	-109.80061	2500	0	0	Curry Airport
+US-2672	small_airport	32.01072	-109.78377	4210	0	0	York Airport
+US-2674	small_airport	31.95394	-109.85452	2500	0	0	Sunsites Airport
+US-2800	small_airport	32.87153	-109.83971	2500	0	0	Dublin Landing Strip
+US-2940	small_airport	32.66873	-111.54253	2500	0	0	Pretzer Strip
+US-2945	heliport	33.39499	-111.56686	2500	0	1	Banner Goldfield Medical Center Heliport
+US-2955	heliport	34.55819	-112.48159	2500	0	1	Yavapai Regional Medical Center West Campus Helipad
+US-2988	small_airport	36.42174	-113.3312	5295	0	0	Mount Trumbull Airport
+US-2989	small_airport	36.32229	-113.9728	2500	0	0	Grapevine Spring Airstrip
+US-3072	small_airport	32.75135	-114.05177	2500	0	0	Radium Hot Springs Airfield
+US-3073	small_airport	32.78015	-113.95825	2500	0	0	Terry Ranch Airport
+US-3116	heliport	33.61247	-114.59465	2500	0	1	Palo Verde Hospital Helipad
+US-3118	small_airport	34.03892	-114.38643	2500	0	0	Chino Airstrip
+US-3121	heliport	34.14703	-114.30329	2500	0	1	Parker Indian Hospital Helipad
+US-3124	heliport	34.83223	-114.61791	2500	0	1	Colorado River Medical Center Helipad
+US-3125	small_airport	34.87	-114.5888	2500	0	0	Fort Mojave Airstrip
+US-3127	heliport	35.93011	-114.83705	2500	0	0	Mead Substation Helipad
+US-3128	heliport	35.97509	-114.91269	2500	0	0	Railroad Pass Heliport
+US-3129	heliport	36.00364	-115.11469	2500	0	1	St Rose Dominican Hospital Siena Campus Heliport
+US-3208	heliport	34.90897	-111.43852	2500	0	0	Mormon Lake Helibase
+US-3311	heliport	33.57805	-111.25256	1923	0	0	Apache Lake Campground Heliport
+US-3312	heliport	33.6634	-111.11447	2238	0	0	Roosevelt Work Center Heliport
+US-3313	heliport	33.53689	-111.42869	1680	0	0	Canyon Lake Heliport
+US-3314	heliport	33.57458	-111.53741	1526	0	0	Saguaro Lake Helipad
+US-3315	heliport	33.54514	-111.60987	1427	0	0	MCSO Lake Patrol Helipad
+US-3316	heliport	33.55425	-111.61792	1384	0	0	Goldfield Work Center Helipad
+US-3317	heliport	33.55197	-111.60859	1401	0	0	MCSO Goldfield Helipad
+US-3322	heliport	33.8231	-108.94138	7047	0	0	Luna Work Center Heliport
+US-3324	small_airport	34.11515	-110.13503	5945	0	0	Forestdale Landing Strip
+US-3327	heliport	33.51798	-108.52524	8005	0	0	Negrito Fire Base Heliport
+US-3328	heliport	34.09705	-110.94058	5082	0	0	Pleasant Valley Ranger Station Heliport
+US-3330	heliport	33.8514	-111.8314	3201	0	0	Cave Creek Ranger Station Helipad
+US-3331	heliport	34.2405	-111.3016	5087	0	0	Payson Ranger Station Helipad
+US-3334	heliport	33.31848	-112.0495	1818	0	0	Desert Willow Helipad
+US-3351	heliport	31.55205	-110.22959	4386	0	1	Canyon Vista Medical Center Helipad
+US-3361	heliport	31.90115	-110.21103	3707	0	0	Saint David Fire Heliport
+US-3480	small_airport	32.76895	-108.32291	6447	0	0	Turner Ranch Airport
+US-3481	small_airport	32.94766	-108.58461	4591	0	0	Gila Airport
+US-3482	small_airport	33.18243	-108.68286	6028	3989	0	Sacaton Landing Strip
+US-3484	heliport	33.87011	-111.31951	2539	0	0	Punkin Center Heliport
+US-3511	small_airport	33.07479	-111.37029	1556	0	0	Florence Military Reservation Airstrip
+US-3514	small_airport	33.09204	-111.97801	1171	0	0	University of Arizona Maricopa Agricultural Center North Air
+US-3518	small_airport	33.3136	-112.5125	948	0	0	Rainbow Valley Landing Strip
+US-3616	small_airport	33.12738	-112.6669	781	0	0	Gilks Ranch Airport
+US-3617	small_airport	33.12692	-112.67564	738	0	0	Woods Road West Airstrip
+US-3677	small_airport	32.68097	-108.9632	3969	0	0	Mud Springs Ranch Airport
+US-3730	small_airport	33.6293	-112.77434	1414	0	0	Bell Road Airstrip
+US-3731	heliport	33.44765	-112.36002	984	0	1	Mountain Park Health Center Heliport
+US-3738	heliport	35.22066	-114.03765	3432	0	1	Kingman Regional Medical Center Heliport
+US-3739	heliport	35.21981	-113.98512	3501	0	1	Kingman Regional Medical Center Hualapai Mountain Campus Hel
+US-3741	heliport	32.42925	-110.94766	2699	0	1	Oro Valley Hospital Helipad
+US-3749	small_airport	33.06527	-114.4313	486	0	0	McAllister Wash Airstrip
+US-3751	small_airport	33.16201	-114.48147	827	0	0	Yuma Wash East Airstrip
+US-3752	small_airport	33.31135	-114.36561	1135	0	0	Mojave Wash Airstrip
+US-3756	small_airport	32.85138	-110.65631	2502	0	0	Rocking Diamond G Ranch Airstrip
+US-3757	small_airport	32.83776	-110.69308	2192	0	0	El Ranchito Aravaipa Landing Field
+US-3760	small_airport	32.88374	-111.84774	1342	0	0	Francisco Grande Gliderport
+US-3762	heliport	36.16089	-115.16814	2500	0	1	UMC Trauma Center Heliport
+US-3780	heliport	36.96262	-109.34975	5440	0	1	Four Corners Regional Health Center Heliport
+US-3796	small_airport	32.07799	-111.3315	2500	0	0	Buckelew Farm Landing Field
+US-3797	small_airport	32.90991	-109.86324	2500	0	0	Patterson Landing Strip
+US-3798	small_airport	32.952	-109.92353	2500	0	0	Palmer Farms Airfield
+US-3826	small_airport	36.46123	-114.88001	1969	0	0	Dry Lake Landing Strip
+US-3866	small_airport	33.72129	-113.7624	1289	0	0	Vicksburg Junction Airstrip
+US-3867	heliport	33.29664	-110.4174	2759	0	1	San Carlos Apache Healthcare Heliport
+US-3868	small_airport	34.21223	-113.0633	2800	0	0	Date Creek Ranch Airport
+US-3869	small_airport	34.37376	-113.18861	1804	0	0	Santa Maria Ranch Airport
+US-3870	small_airport	34.28625	-112.93863	3260	0	0	R/A Ranch Airfield
+US-3871	small_airport	34.92456	-113.65233	2820	0	0	Cane Springs Ranch Airstrip
+US-3872	small_airport	33.43811	-112.797	1043	0	0	Bug Heaven Airfield
+US-3873	heliport	32.67773	-112.90309	1004	0	0	Range Two Heliport
+US-3895	small_airport	32.2839	-109.7969	4194	0	0	Norton Airport
+US-3896	small_airport	31.56684	-110.39005	2500	0	0	Wren Field
+US-3908	heliport	33.3706	-110.45668	2844	0	0	San Carlos Heliport
+US-3909	small_airport	33.08168	-110.02863	2500	0	0	Diamond Bar Ranch Airport
+US-3931	small_airport	37.022	-112.38511	5096	0	0	Buck Brown Airport
+US-3967	small_airport	34.24766	-113.48562	2500	0	0	Alamo Lake / Wayside Oasis Airport
+US-3968	small_airport	33.84619	-111.24877	2500	0	0	Bouquet Ranch Airport
+US-3969	small_airport	33.91827	-113.97221	2500	0	0	Bouse Southeast Airstrip
+US-3970	small_airport	34.00855	-112.90693	2500	0	0	Railroad Track Airstrip
+US-3971	small_airport	33.74966	-113.56603	2500	0	0	Rancho Estrella Airstrip
+US-3972	small_airport	33.65167	-113.22333	2500	0	0	Windmill Airstrip
+US-3977	small_airport	32.98813	-112.28037	2500	0	0	99th Avenue Airport
+US-3998	small_airport	31.83334	-110.20888	3711	0	0	Saint David Gliderfield
+US-3999	small_airport	33.77887	-112.42869	1634	0	0	Bean Airport
+US-4000	small_airport	33.83077	-112.63003	1890	0	0	Ogden Field
+US-4001	small_airport	33.82205	-112.50109	1890	0	0	Joy Ranch Airport
+US-4122	small_airport	33.79714	-113.55374	2500	0	0	Centennial Park Airport
+US-4123	small_airport	33.74735	-113.58768	2500	0	0	Monroe Street Airport
+US-4124	small_airport	35.08599	-113.80787	2500	0	0	Blake Ranch Airport
+US-4129	heliport	32.46262	-114.6939	164	0	0	US Border Patrol San Luis Helipad
+US-4169	small_airport	32.19563	-111.27355	2307	0	0	Schuk Toak Farms Landing Field
+US-4172	small_airport	35.79271	-115.01256	1821	0	0	El Dorado Substation Airstrip
+US-4174	small_airport	34.66062	-114.01252	2133	0	0	Sundown Airstrip
+US-4175	small_airport	34.646	-114.0095	2126	0	0	Creosote Airstrip
+US-4176	small_airport	34.47307	-113.7211	2232	0	0	McCracken Mine Airport
+US-4177	small_airport	34.71358	-113.92119	3226	0	0	Seventeen Mile Ranch Airport
+US-4181	small_airport	32.9915	-113.33574	482	0	0	Agua Caliente Airport
+US-4204	heliport	35.87896	-113.99572	4110	0	0	Grand Canyon Ranch West Heliport
+US-4274	heliport	35.29367	-111.00055	4747	0	0	Sunrise Helipad
+US-4307	heliport	35.53706	-113.42031	4892	0	0	Hualapai Tribe EMS Heliport
+US-4316	small_airport	31.8779	-109.5232	4724	0	0	Klusaw Airport
+US-4317	small_airport	31.8863	-109.4828	4938	2635	0	Lima Hana Field
+US-4329	heliport	37.17893	-113.12243	3605	24	0	Zion Helicopters Heliport
+US-4432	heliport	32.22745	-110.85657	2561	0	1	Carondelet St Joseph's Hospital Heliport
+US-4506	heliport	33.34426	-112.05801	2345	0	0	Dobbins Helipad
+US-4514	heliport	32.44159	-110.78839	9137	0	0	Mount Lemmon Sky Center Observatory Heliport
+US-4515	heliport	33.40626	-110.82724	3376	0	1	Cobre Valley Regional Medical Center Heliport
+US-4516	heliport	33.49151	-109.33843	7159	0	0	P D Helispot
+US-4518	heliport	33.63242	-109.32584	9167	0	0	Hannagan Meadow Heliport
+US-4519	small_airport	33.63298	-110.59792	5082	0	0	Jackson Hole Airport
+US-4522	small_airport	31.88974	-109.08696	4354	0	0	Clark Airport
+US-4525	heliport	33.3423	-112.04593	2416	0	0	Buena Vista Helipad
+US-4541	small_airport	32.84932	-109.85253	3018	0	0	Wind Blown Airport
+US-4542	small_airport	32.8542	-109.84832	2973	0	0	Mud Hollow Airport
+US-4548	heliport	35.42335	-111.25485	5089	0	0	Roden Crater Helipad
+US-4571	heliport	33.62515	-111.91829	1511	0	0	Scottsdale Heliport
+US-4601	heliport	36.13616	-111.23532	4954	0	1	Tuba City Regional Health Care Heliport
+US-4662	heliport	33.22392	-108.23788	5820	0	0	Gila Cliff Dwellings Heliport
+US-4690	heliport	35.89605	-114.20669	2753	0	0	Temple Bar Helicopter Refueling Station
+US-4710	small_airport	32.23618	-110.32889	3222	0	0	Cascabel Central Landing Field
+US-4715	small_airport	33.85218	-114.7979	966	0	0	Midland Airport
+US-4716	small_airport	33.85218	-114.7979	966	0	0	[Duplicate] Midland Airport
+US-4717	small_airport	33.82033	-114.86336	958	0	0	Standard Mine / Arlington Mine Airport
+US-4725	small_airport	31.64137	-110.13989	4173	0	0	Lindsey Ranch Airport
+US-4828	small_airport	34.5362	-112.14576	4820	0	0	Flintstone Airport
+US-4835	heliport	33.39207	-111.61253	1522	0	1	Mountain Vista Medical Center Heliport
+US-4851	small_airport	33.55212	-108.63313	7450	5397	0	Rainy Mesa Airstrip
+US-4961	small_airport	34.33222	-112.06965	3638	0	0	EZ Ranch Airport
+US-4962	heliport	33.21567	-111.56616	1486	0	1	Banner Ironwood Medical Center Heliport
+US-5030	heliport	33.02858	-111.3745	1519	0	0	Arizona State Prison Florence Heliport
+US-5031	heliport	32.62209	-109.94218	4839	0	0	Arizona State Prison Fort Grant Heliport
+US-5071	heliport	33.33151	-112.83988	879	0	0	APS Redhawk Power Plant Heliport
+US-5072	small_airport	31.6204	-110.46079	4750	0	0	Babocomari Ranch Airport
+US-5123	heliport	33.05933	-115.03533	915	0	0	LZ Bull Heliport
+US-5124	small_airport	33.16071	-114.97052	1509	0	0	LZ Phantom Airfield
+US-5216	heliport	35.03611	-110.6927	2500	0	1	Little Colorado Medical Center Heliport
+US-5217	heliport	35.03491	-110.71525	6882	0	1	Winslow Indian Healthcare Center Heliport
+US-5219	heliport	35.5073	-108.72515	6788	0	1	Rehoboth McKinley Hospital Heliport
+US-5220	small_airport	35.83381	-111.88364	6754	0	0	Red Horse Wash Airport
+US-5221	heliport	36.12176	-112.69365	5742	0	0	Bar 4 Heliport
+US-5222	heliport	36.15742	-112.71007	5144	0	0	Hualapai Hilltop Heliport
+US-5224	heliport	36.23619	-112.68866	3192	0	0	Havasupai Village Heliport
+US-5248	small_airport	32.52184	-108.38236	5991	0	0	Keese Canyon Airport
+US-5284	small_airport	37.0287	-109.4612	5472	0	0	Boundary Butte Mesa Airport
+US-5338	small_airport	37.1615	-109.8609	4313	0	0	Mexican Hat Airport
+US-5384	small_airport	33.26611	-115.12672	1306	0	0	Blue Mountain Airfield
+US-5385	heliport	33.28203	-115.06518	1060	0	0	LZ Redwing Heliport
+US-5386	heliport	33.27149	-115.07513	1109	0	0	LZ Burt Heliport
+US-5387	heliport	33.24349	-115.07783	1247	0	0	LZ Goose Heliport
+US-5388	heliport	33.22292	-115.09904	1404	0	0	LZ Owl Heliport
+US-5389	heliport	33.23488	-115.1346	1467	0	0	LZ Jayhawk Heliport
+US-5421	small_airport	33.03617	-108.2069	5863	0	0	Salt Creek Airport
+US-5544	heliport	33.35147	-111.63631	1407	0	1	Arizona General Hospital Mesa Heliport
+US-5545	small_airport	36.75415	-112.94444	5520	0	0	Yellowstone Mesa Airport
+US-5547	small_airport	36.3612	-113.30832	5318	0	0	Kinney Flat Airport
+US-5548	heliport	35.95707	-113.76217	2070	0	0	Serenity Helicopters Picnic Area Heliport
+US-5549	heliport	35.96393	-113.75554	1907	0	0	Waterfall Rapids Picnic Area Heliport
+US-5550	heliport	35.96719	-113.76613	1440	0	0	Sundance Helicopters Picnic Area Heliport
+US-5551	heliport	35.96004	-113.74452	1486	0	0	Maverick Helicopters Picnic Area Heliport
+US-5552	small_airport	36.1984	-113.5128	5991	0	0	Penn Valley Airstrip
+US-5728	heliport	33.37311	-112.30648	981	0	0	Phoenix Raceway Heliport
+US-5729	heliport	33.3755	-112.30815	968	0	0	Phoenix Raceway Infield Heliport
+US-5730	heliport	36.27141	-115.01279	1954	0	0	Las Vegas Motor Speedway Infield Heliport
+US-5731	heliport	36.26737	-115.01574	1948	0	0	Las Vegas Motor Speedway Heliport
+US-5795	small_airport	32.65434	-114.70228	112	0	0	Morris Equipment Airport
+US-5861	small_airport	34.64661	-114.27036	1650	0	0	Rice Airport
+US-5862	heliport	35.19301	-109.31739	5883	0	1	Nahata' Dziil Health Center Heliport
+US-5876	small_airport	34.50796	-113.62795	1765	0	0	Greenwood Airport
+US-5877	small_airport	34.45129	-113.86997	1985	0	0	Pipeline Road Airport
+US-5878	small_airport	34.47634	-113.65774	1801	0	0	Signal Airport
+US-5879	small_airport	34.71027	-113.94632	2936	0	0	Silverado Airport
+US-5880	small_airport	35.27823	-113.59424	4488	0	0	Tobasa Airport
+US-5934	heliport	33.5741	-112.103	1235	70	0	Pulice Construction Heliport
+US-5937	small_airport	33.07044	-111.84801	1362	0	0	Seed Farm Airport
+US-5976	small_airport	33.39461	-112.73029	962	0	0	West Buckeye Airport
+US-6011	heliport	36.01514	-114.75693	1592	0	0	Hoover Dam Lakeview Heliport
+US-6012	heliport	36.01228	-114.73073	1403	0	0	Hoover Dam Lookout Heliport
+US-6056	heliport	37.09891	-113.55266	2654	0	1	Intermountain St George Regional Hospital Heliport
+US-6154	small_airport	36.14527	-114.71799	1203	0	0	Callville Bay Airport
+US-6273	heliport	33.55422	-112.21466	1135	0	0	Agua Fria Generating Station Heliport
+US-6274	heliport	33.3297	-111.75054	1276	0	0	Santan Generating Station Heliport
+US-6276	heliport	36.41133	-114.95959	2503	0	0	Silverhawk Generating Station Heliport
+US-6277	heliport	36.4298	-114.90095	2090	0	0	Harry Allen Generating Station Heliport
+US-6278	heliport	36.89717	-111.38598	4373	0	0	Navajo Generating Station Heliport
+US-6279	heliport	32.97279	-112.69642	712	0	0	Gila River Power Station Heliport
+US-6285	heliport	33.3435	-112.86138	892	0	0	Mesquite Power Generating Station Heliport
+US-6429	small_airport	35.67842	-114.08774	2784	0	0	Red Lake Landing Field
+US-6444	small_airport	33.17512	-114.28999	1073	0	0	Yuma Proving Ground East Airstrip
+US-6468	small_airport	34.69323	-113.57241	2113	0	0	Cholla Canyon Ranch Airport
+US-6473	heliport	33.38551	-111.72371	1302	0	1	Banner Gateway Medical Center Heliport
+US-6481	heliport	33.18746	-111.73854	1391	0	0	San Tan Remote Test Facility Heliport
+US-6507	heliport	35.98954	-113.78054	1243	0	0	Sundance Boat Tours Heliport
+US-6655	heliport	31.86868	-110.20885	3678	0	0	Arizona Lifeline 1 Heliport
+US-6656	heliport	31.39284	-110.29301	9433	0	0	Miller Peak Emergency Helipad
+US-6658	small_airport	32.20981	-109.95204	4282	0	0	Permenter Airport
+US-6659	heliport	31.40544	-110.3154	8726	0	0	Bear Spring Emergency Helipad
+US-6660	heliport	31.38172	-110.29197	8403	0	0	Copper Canyon Emergency Helipad
+US-6661	small_airport	32.32575	-110.22999	4154	0	0	Muleshoe Ranch Airport
+US-6662	small_airport	31.88353	-109.51667	4761	0	0	Uncle Curtis Airport
+US-6767	heliport	33.98227	-112.36273	1978	0	0	Castle Hot Springs Resort Heliport
+US-6872	small_airport	35.72178	-114.45054	2420	0	0	White Hills Airport
+US-6873	heliport	33.63011	-111.90901	1497	0	0	Peoples Hangar Heliport
+US-6875	heliport	33.62949	-111.9079	1598	35	0	Constellation Aviation Heliport
+US-6876	heliport	35.94149	-113.90803	5106	36	0	GC Heliport
+US-7000	heliport	33.44197	-112.5552	1106	0	0	Abrazo Buckeye Emergency Center Heliport
+US-7001	heliport	33.65611	-112.20133	1253	0	0	Abrazo Arrowhead Campus Heliport
+US-7007	small_airport	33.87175	-113.98716	1030	0	0	Stage Coach Airport
+US-7008	small_airport	33.8729	-113.97815	1024	0	0	Cunningham Wash Airport
+US-7103	heliport	33.82468	-109.12852	7993	0	0	Alpine Private Heliport
+US-7175	small_airport	32.085	-109.70134	4301	2680	0	Woods Bay Winery Airport
+US-7399	heliport	31.48347	-111.545	3594	0	0	US Border Patrol Sasabe Heliport
+US-7400	heliport	31.96375	-112.80427	1713	0	0	Organ Pipe Cactus National Monument Heliport
+US-7517	heliport	34.26778	-111.23844	4896	0	0	Tonto National Forest Payson Heliport
+US-7582	heliport	33.03868	-111.38604	1476	0	0	Florence Fire Station Heliport
+US-7605	heliport	33.69021	-114.21507	863	0	0	Tri State CareFlight 8 Base Heliport
+US-7606	heliport	35.00026	-114.59696	541	0	0	Tri State CareFlight 6 Base Heliport
+US-7607	heliport	35.00152	-114.59637	541	0	1	Valley View Medical Center Heliport
+US-7608	heliport	33.10701	-114.31376	1050	0	0	Yuma Proving Range Middle Mountains Heliport
+US-7609	heliport	32.93883	-114.39386	423	0	0	Yuma Proving Ground Ramsdell Ranch Heliport
+US-7710	heliport	33.05022	-109.32863	4091	0	1	Gila Health Resources Morenci Heliport
+US-7732	small_airport	31.992	-108.37671	4551	5000	0	Southwell Ranch Airport
+US-7757	heliport	34.06132	-112.81504	2602	0	0	Weaver Mountain Fire & Aviation Center Heliport
+US-7863	heliport	36.28808	-115.00761	2091	0	0	Las Vegas Motor Speedway Drag Strip Heliport
+US-7867	heliport	37.09994	-113.50133	2906	0	0	Nichols Peak Helipad
+US-8190	heliport	36.03543	-112.1294	6890	0	0	Grand Canyon Village Shuttle Heliport
+US-8191	heliport	35.22885	-111.82013	7144	0	0	Camp Navajo Heliport
+US-8440	heliport	35.72388	-114.48643	2415	36	0	White Hills Heliport
+US-8455	heliport	34.25492	-110.00015	6415	54	0	Aero Products Heliport
+US-8473	small_airport	32.56582	-110.42732	3419	1295	0	Kielberg Canyon Airport
+US-8490	heliport	31.37184	-109.20987	3915	0	0	San Bernardino Ranch Border Patrol Heliport
+US-8491	heliport	31.61997	-108.88749	5046	0	0	Animas Border Patrol Heliport
+US-8577	heliport	35.75885	-109.04997	6846	0	1	Fort Defiance Indian Hospital Heliport
+US-8655	heliport	33.07306	-111.48587	1492	42	0	HH Florence Helistop
+US-8972	heliport	32.73675	-111.54942	1573	40	1	Exceptional Community Hospital Heliport
+US-9093	small_airport	34.9841	-113.04267	5850	0	0	O RO Ranch Private Airport
+US-9135	heliport	32.38248	-111.19692	2072	0	0	Twin Peaks Pumping Plant Heliport
+US-9201	heliport	33.37366	-111.97299	1243	0	0	Oasis Water Park Heliport
+US-9202	heliport	32.26319	-109.22408	3629	0	0	San Simon Volunteer Fire District Heliport
+US-9203	heliport	32.24468	-109.82527	4064	0	0	US Border Patrol Willcox Heliport
+US-9211	heliport	33.45588	-112.04151	1107	0	1	St Lukes Medical Center Phoenix Heliport
+US-9212	heliport	32.17849	-110.93496	2532	0	0	Pima County Sheriff's Department San Xavier District Helipor
+US-9214	heliport	31.91506	-109.14113	4770	0	0	Portal Fire and Rescue Heliport
+US-9215	heliport	31.70982	-110.05491	4583	0	0	Tombstone Fire Department Heliport
+US-9225	small_airport	32.27683	-109.90666	4198	0	0	Kelley Ranch Airport
+US-9236	small_airport	32.34615	-109.92273	4228	0	0	Clark Airport
+US-9239	small_airport	32.03074	-109.45499	4977	0	0	Wear Ranch Airport
+US-9261	heliport	34.55874	-112.3808	5335	40	1	Exceptional Community Hospital Heliport
+US-9264	small_airport	35.441	-113.81488	3396	230	0	OMS UAS Test Range Airport
+UT25	small_airport	37.01587	-110.20203	5192	4000	0	Monument Valley Airport
+UT47	small_airport	37.1019	-113.314	3350	4400	0	Grassy Meadows/Sky Ranch Landowners Assn Airport
+UT52	heliport	37.09817	-113.57579	2700	60	1	Dixie Medical Center Heliport
+UT77	heliport	37.16953	-113.44073	3072	0	1	Exceptional Community Hospital Heliport
+Z95	small_airport	34.00168	-110.45512	5037	4200	0	Cibecue Airport

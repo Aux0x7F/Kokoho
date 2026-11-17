@@ -86,6 +86,20 @@ object AlertLog {
         save(context, emptyList())
     }
 
+    @Synchronized
+    fun purgeErroneousV116(context: Context) {
+        val l = list(context)
+        val changed = l.removeAll { e ->
+            e.label.contains("ICE-UHF-", ignoreCase = true) ||
+                e.label.contains("FED-VHF-", ignoreCase = true) ||
+                e.label.equals("ICE: ICE-ERO-OPS", ignoreCase = true) ||
+                e.label.equals("Two-way radio transmitting nearby", ignoreCase = true) ||
+                e.label.startsWith("Radio transmitting: CBP", ignoreCase = true) ||
+                e.category in setOf("TRACKER", "ALPR", "CELL_ANOMALY")
+        }
+        if (changed) save(context, l)
+    }
+
     private fun save(context: Context, l: List<Entry>) {
         runCatching {
             context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

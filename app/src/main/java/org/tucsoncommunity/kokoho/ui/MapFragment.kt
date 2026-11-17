@@ -190,6 +190,40 @@ class MapFragment : Fragment() {
     private var stopObservingBulk: (() -> Unit)? = null
     private val dateFmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
+    // Contextual map selection & bottom footer popup state
+    private var currentSelection: RfMap.MapSelection? = null
+    private var selectionSubmenuOpen: Boolean = false
+    private var selectionCard: android.widget.LinearLayout? = null
+    private var pendingWizardPhotoCb: ((String) -> Unit)? = null
+
+    private val wizardPhotoLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null && alive) {
+            runCatching {
+                act.contentResolver.openInputStream(uri)?.use { stream ->
+                    val raw = android.graphics.BitmapFactory.decodeStream(stream) ?: return@use null
+                    val maxDim = 1080
+                    val scale = kotlin.math.min(1f, maxDim.toFloat() / kotlin.math.max(raw.width, raw.height).coerceAtLeast(1))
+                    val bmp = if (scale < 1f) {
+                        android.graphics.Bitmap.createScaledBitmap(
+                            raw,
+                            (raw.width * scale).toInt().coerceAtLeast(1),
+                            (raw.height * scale).toInt().coerceAtLeast(1),
+                            true
+                        )
+                    } else raw
+                    val bos = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, bos)
+                    "data:image/jpeg;base64," + android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP)
+                }
+            }.getOrNull()?.let { dataUrl ->
+                pendingWizardPhotoCb?.invoke(dataUrl)
+            }
+        }
+        pendingWizardPhotoCb = null
+    }
+
     /** Where to? The search screen's answer: a destination (plan the routes) or a stop on the way. */
     private val searchLauncher = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { r ->
         if (r.resultCode != android.app.Activity.RESULT_OK || !alive) return@registerForActivityResult
@@ -280,20 +314,17 @@ class MapFragment : Fragment() {
         setupSettingsButton()
         setupOrientationButton()
         setupMenu()
-        if (tripId == null) setupMapTimeWindowPills()
-        if (!embedded) setupImmersiveButton()
+        setupMapTimeWindowPills()
+        setupSelectionFooter()
+        hideLegacyMapChrome()
         binding.bottomPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSideButtonsSoon() }
         // The scale and the map credit sit just under the status banner, or at the very top when there is none.
         binding.statusBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeScaleBar(); if (embedded) fitSideButtonsSoon() }
-        // Wider than tall: the round buttons become a row and the turn banner leaves them the right side. The small pane
-        // resized: its side buttons fit again under the status line.
         binding.root.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob -> if (r - l != or - ol || bt - t != ob - ot) fitSideButtonsSoon() }
 
         createEngine(savedInstanceState, null)
         if (tripId == null) {
-            nav = MapNav(act, binding, viewLifecycleOwner.lifecycleScope, embedded, { alive }, { rf }, { lastFix ?: knownFix() }, navHost)
-                .also { it.setup() }
-            // Alerts pop up over the full screen map only, never the main screen's split-view pane.
+            nav = null // Navigation features removed in v1.3.0
             if (!embedded) {
                 val cards = AlertCardController(act, binding, { lastFix ?: knownFix() }) { lat, lon ->
                     navHost.navLookAtRoute()
@@ -301,34 +332,29 @@ class MapFragment : Fragment() {
                 }
                 alertCards = cards
                 stopAlertCards = AlertCards.addListener { cards.show(it) }
-                // One that came in just before this screen opened (tapping its notification, say) is still shown.
                 AlertCards.latest?.takeIf { System.currentTimeMillis() - it.atMs < 6_000L }?.let { cards.show(it) }
             }
-            // Locate or pinpointing: the followed device's live signal, on the full screen map only (not the split-view pane).
             if (!embedded) {
                 val live = LiveReadCard(binding.liveRead)
                 stopLiveRead = LiveRead.addListener { live.show(it) }
             }
-        } else {
-            binding.searchButton.visibility = View.GONE
         }
         binding.map.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             if (bottom - top != oldBottom - oldTop) applyMode(animate = false)
         }
 
         if (tripId == null) {
+            org.tucsoncommunity.kokoho.posture.KokohoDirectory.preloadAsync(act)
             observeBulk()
             binding.recordButton.setOnClickListener { toggleRecording() }
             viewLifecycleOwner.lifecycleScope.launch {
                 viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    // A new or cleared Waze report is drawn at once, not at the next 3 s tick.
                     val stopWaze = org.tucsoncommunity.kokoho.online.WazePolice.addListener {
                         activity?.runOnUiThread { if (alive && viewLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) renderLive() }
                     }
                     try {
                         while (isActive) {
                             renderLive()
-                            // Cameras, CCTV and towers for the view: following you, the map never goes idle to ask for them.
                             rf?.safe("static") { rf?.maybeRedrawStatic() }
                             delay(3_000)
                         }
@@ -341,6 +367,7 @@ class MapFragment : Fragment() {
             binding.recordButton.visibility = View.GONE
         }
         if (embedded) compactControls()
+        hideLegacyMapChrome()
         binding.statusDismiss.setOnClickListener {
             // A download line goes first; the recording banner with the next tap.
             if (downloadShown) downloadsHidden = true else recBannerHiddenFor = TripRecorder.activeTripId
@@ -400,7 +427,7 @@ class MapFragment : Fragment() {
         if (old.provider == MapEngine.chosen(act)) return
         val cam = old.camera.takeIf { rf != null }
         rf = null
-        old.onPause(); old.onStop(); old.onDestroy()
+        runCatching { old.onPause() }; runCatching { old.onStop() }; runCatching { old.onDestroy() }
         binding.map.removeView(old.view)
         createEngine(null, cam)
         engine?.apply { onStart(); onResume() }
@@ -432,7 +459,28 @@ class MapFragment : Fragment() {
             }
         }
         m.onClick = { x, y -> r.safe("tap") { r.onTap(x, y, myPosition()) } }
-        if (tripId == null) m.onLongClick = { lat, lon -> r.safe("long press") { nav?.onLongPress(lat, lon) } }
+        if (tripId == null) {
+            r.onSelectTarget = { sel ->
+                if (alive) selectOnMap(sel, openSubmenu = false)
+            }
+            r.onTapEmpty = {
+                if (alive) {
+                    if (selectionSubmenuOpen) {
+                        selectionSubmenuOpen = false
+                        renderSelectionFooter()
+                    } else if (currentSelection != null) {
+                        selectOnMap(null)
+                    }
+                }
+            }
+            m.onLongClick = { lat, lon ->
+                r.safe("long press") {
+                    if (alive) {
+                        selectOnMap(RfMap.MapSelection.DroppedPoint(lat, lon), openSubmenu = false)
+                    }
+                }
+            }
+        }
         if (restore != null) { m.jumpTo(restore.lat, restore.lon, restore.zoom); centeredOnce = true }
         else placeCameraAtStart(m)
         placeScaleBar()
@@ -570,8 +618,9 @@ class MapFragment : Fragment() {
         styleThemeButton()
     }
 
-    /** Floating 30m | 24h | All Time selector pills at the top of the mobile Map tab. */
+    /** Floating rolling `30m` | `3h` | `24h` selector pills at the top of the Map tab. */
     private fun setupMapTimeWindowPills() {
+        if (tripId != null) return
         val density = resources.displayMetrics.density
         val bar = android.widget.LinearLayout(act).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
@@ -582,8 +631,8 @@ class MapFragment : Fragment() {
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = 999f * density
-                setColor(0xD90F1622.toInt())
-                setStroke((1 * density).toInt(), 0x38FFFFFF)
+                setColor(0xEB0F1622.toInt())
+                setStroke((1 * density).toInt(), 0x5594A3B8)
             }
             elevation = 6f * density
         }
@@ -593,13 +642,13 @@ class MapFragment : Fragment() {
         fun stylePills(selected: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow) {
             for ((win, tv) in buttons) {
                 val active = win == selected
-                tv.setTextColor(if (active) 0xFFFECACA.toInt() else 0xFFCBD5E1.toInt())
+                tv.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
                 tv.background = android.graphics.drawable.GradientDrawable().apply {
                     shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                     cornerRadius = 999f * density
                     if (active) {
-                        setColor(0x47EF4444)
-                        setStroke((1 * density).toInt(), 0xB3EF4444.toInt())
+                        setColor(0xFF3B280C.toInt())
+                        setStroke((1.5f * density).toInt(), 0xFFF59E0B.toInt())
                     } else {
                         setColor(0x00000000)
                     }
@@ -607,13 +656,13 @@ class MapFragment : Fragment() {
             }
         }
 
-        for (win in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.values()) {
+        for (win in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS) {
             val pill = android.widget.TextView(act).apply {
                 text = win.label
-                textSize = 12f
+                textSize = 13f
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
-                val ph = (11 * density).toInt()
-                val pv = (4 * density).toInt()
+                val ph = (13 * density).toInt()
+                val pv = (5 * density).toInt()
                 setPadding(ph, pv, ph, pv)
                 setOnClickListener {
                     org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, win)
@@ -629,7 +678,7 @@ class MapFragment : Fragment() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                if (bar.childCount > 0) marginStart = (3 * density).toInt()
+                if (bar.childCount > 0) marginStart = (4 * density).toInt()
             })
         }
 
@@ -643,6 +692,388 @@ class MapFragment : Fragment() {
             topMargin = (10 * density).toInt()
         }
         binding.root.addView(bar, lp)
+    }
+
+    private fun hideLegacyMapChrome() {
+        val b = _binding ?: return
+        b.searchButton.visibility = View.GONE
+        b.navBanner.visibility = View.GONE
+        b.navCard.visibility = View.GONE
+        b.navBar.visibility = View.GONE
+        b.mapFilterScroll.visibility = View.GONE
+        b.themeButton.visibility = View.GONE
+        b.mapSettingsButton.visibility = View.GONE
+        b.fullscreenButton.visibility = View.GONE
+        b.speedGauge.visibility = View.GONE
+        if (tripId == null) {
+            b.controls.visibility = View.GONE
+            b.compactControls.visibility = View.GONE
+            b.recordFab.visibility = View.GONE
+            b.tracesFab.visibility = View.GONE
+        }
+    }
+
+    private fun setupSelectionFooter() {
+        if (tripId != null) return
+        val density = resources.displayMetrics.density
+        val card = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val padH = (14 * density).toInt()
+            val padV = (12 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadii = floatArrayOf(
+                    18f * density, 18f * density,
+                    18f * density, 18f * density,
+                    0f, 0f,
+                    0f, 0f
+                )
+                setColor(KokohoJourneyUi.COLOR_SURFACE)
+                setStroke((1.2f * density).toInt(), KokohoJourneyUi.COLOR_BORDER_STRONG)
+            }
+            elevation = 10f * density
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+        }
+        selectionCard = card
+        binding.bottomPanel.addView(
+            card,
+            android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+    }
+
+    private fun selectOnMap(sel: RfMap.MapSelection?, openSubmenu: Boolean = false) {
+        currentSelection = sel
+        selectionSubmenuOpen = openSubmenu && sel != null
+        rf?.drawSelection(sel)
+        renderSelectionFooter()
+        fitSideButtonsSoon()
+    }
+
+    private var lastEvaluatedMapSnap: org.tucsoncommunity.kokoho.posture.PostureSnapshot? = null
+    private var liveRenderJob: kotlinx.coroutines.Job? = null
+    private var liveRenderPending = false
+
+    private fun refreshSelectionMetadata() {
+        val cur = currentSelection ?: return
+        if (cur is RfMap.MapSelection.Detection) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                val appCtx = act.applicationContext
+                val snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(appCtx)
+                }
+                if (!alive) return@launch
+                lastEvaluatedMapSnap = snap
+                val hit = snap.activeThreats.firstOrNull { it.uuid.equals(cur.entityUuid, ignoreCase = true) }
+                    ?: snap.mapThreats.firstOrNull { it.uuid.equals(cur.entityUuid, ignoreCase = true) }
+                if (hit != null) {
+                    val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(System.currentTimeMillis(), hit.lastSeenMs)
+                    val extra = when {
+                        hit.isAircraft -> hit.altitudeFtAgl?.let { "${it} ft" } ?: "ADS-B"
+                        hit.isDrone -> hit.altitudeFtAgl?.let { "${it} ft AGL" } ?: "Remote ID"
+                        else -> "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(act, hit.uncertaintyRadiusM)}"
+                    }
+                    currentSelection = cur.copy(
+                        title = hit.title.ifBlank { hit.friendlyLabel },
+                        subtitle = "${hit.agency.friendlyLabel} · $extra · $ageStr",
+                        agencyCode = hit.agency.id,
+                        lat = hit.lat ?: cur.lat,
+                        lon = hit.lon ?: cur.lon,
+                        radiusM = hit.uncertaintyRadiusM
+                    )
+                    renderSelectionFooter()
+                }
+            }
+        }
+    }
+
+    private fun makeFooterButton(
+        label: String,
+        primary: Boolean = false,
+        onClick: () -> Unit
+    ): android.widget.TextView {
+        val density = resources.displayMetrics.density
+        return android.widget.TextView(act).apply {
+            text = label
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+            setTextColor(if (primary) 0xFF0B0F17.toInt() else KokohoJourneyUi.COLOR_TEXT_PRIMARY)
+            val ph = (12 * density).toInt()
+            val pv = (11 * density).toInt()
+            setPadding(ph, pv, ph, pv)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 10f * density
+                setColor(if (primary) KokohoJourneyUi.COLOR_ACCENT_AMBER else KokohoJourneyUi.COLOR_SURFACE_ELEVATED)
+                setStroke(
+                    (1.2f * density).toInt(),
+                    if (primary) 0xFFFDE68A.toInt() else KokohoJourneyUi.COLOR_BORDER_STRONG
+                )
+            }
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun launchWizardFromFooter(
+        mode: KokohoReportWizard.Mode,
+        existingUuid: String?,
+        agencyCode: String?,
+        lat: Double,
+        lon: Double
+    ) {
+        val initAgency = agencyCode?.let { org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(it) }
+        KokohoReportWizard.open(
+            activity = act,
+            mode = mode,
+            existingEntityUuid = existingUuid,
+            initialAgency = initAgency,
+            droppedLat = lat,
+            droppedLon = lon,
+            requestPickPhoto = { cb ->
+                pendingWizardPhotoCb = cb
+                wizardPhotoLauncher.launch("image/*")
+            },
+            onSubmitted = { submittedKey ->
+                selectionSubmenuOpen = false
+                val normUuid = org.tucsoncommunity.kokoho.posture.KokohoSignatures.normalizeEntityId(submittedKey)
+                renderLive()
+                val snap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(act)
+                val threat = snap.activeThreats.firstOrNull { it.uuid.equals(normUuid, ignoreCase = true) }
+                    ?: snap.mapThreats.firstOrNull { it.uuid.equals(normUuid, ignoreCase = true) }
+                if (threat != null) {
+                    currentSelection = RfMap.MapSelection.Detection(
+                        entityUuid = threat.uuid,
+                        title = threat.title.ifBlank { threat.friendlyLabel },
+                        subtitle = "${threat.agency.friendlyLabel} · just reported",
+                        agencyCode = threat.agency.id,
+                        lat = threat.lat ?: lat,
+                        lon = threat.lon ?: lon,
+                        radiusM = threat.uncertaintyRadiusM
+                    )
+                } else if (currentSelection is RfMap.MapSelection.DroppedPoint) {
+                    val wit = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getWitnessReport(act, normUuid, approvedOnly = false)
+                    val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(wit?.agencyCode) ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_ICE
+                    val detailTail = wit?.agentName?.takeIf { it.isNotBlank() }
+                        ?: wit?.vehicleNumber?.takeIf { it.isNotBlank() }
+                        ?: wit?.accessoryKind?.takeIf { it.isNotBlank() }
+                        ?: "Field Sighting"
+                    currentSelection = RfMap.MapSelection.Detection(
+                        entityUuid = normUuid,
+                        title = "Confirmed ${ag.friendlyLabel}: $detailTail",
+                        subtitle = "${ag.friendlyLabel} · Reported sighting",
+                        agencyCode = ag.id,
+                        lat = lat,
+                        lon = lon,
+                        radiusM = 60
+                    )
+                }
+                rf?.drawSelection(currentSelection)
+                renderSelectionFooter()
+                DeviceActions.openDetails(act, "kokoho:$normUuid")
+            }
+        )
+    }
+
+    private fun renderSelectionFooter() {
+        val card = selectionCard ?: return
+        val sel = currentSelection
+        if (sel == null) {
+            card.removeAllViews()
+            card.visibility = View.GONE
+            return
+        }
+        val density = resources.displayMetrics.density
+        card.removeAllViews()
+        card.visibility = View.VISIBLE
+
+        val (rootTitle, rootSub) = when (sel) {
+            is RfMap.MapSelection.Detection -> sel.title to sel.subtitle
+            is RfMap.MapSelection.Facility -> sel.location.title to "Location · ${sel.location.address}"
+            is RfMap.MapSelection.DroppedPoint -> "Dropped Point" to String.format(Locale.US, "%.5f, %.5f", sel.lat, sel.lon)
+        }
+
+        // Header row: optional ← (when in Submit Report submenu), Title + Subtitle, and ✕ dismiss
+        val headerRow = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+
+        if (selectionSubmenuOpen) {
+            val backBtn = android.widget.TextView(act).apply {
+                text = "←"
+                textSize = 18f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setTextColor(KokohoJourneyUi.COLOR_TEXT_PRIMARY)
+                val p = (8 * density).toInt()
+                setPadding(p, (4 * density).toInt(), (10 * density).toInt(), (4 * density).toInt())
+                contentDescription = "Back to selection actions"
+                setOnClickListener {
+                    selectionSubmenuOpen = false
+                    renderSelectionFooter()
+                }
+            }
+            headerRow.addView(backBtn)
+        }
+
+        val titleCol = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        titleCol.addView(android.widget.TextView(act).apply {
+            text = if (selectionSubmenuOpen) "Submit Report" else rootTitle
+            textSize = 16f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(KokohoJourneyUi.COLOR_TEXT_PRIMARY)
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        titleCol.addView(android.widget.TextView(act).apply {
+            text = if (selectionSubmenuOpen) rootTitle else rootSub
+            textSize = 12.5f
+            setTextColor(KokohoJourneyUi.COLOR_TEXT_SECONDARY)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        headerRow.addView(titleCol)
+
+        val closeBtn = android.widget.TextView(act).apply {
+            text = "✕"
+            textSize = 16f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(KokohoJourneyUi.COLOR_TEXT_SECONDARY)
+            val p = (10 * density).toInt()
+            setPadding(p, (6 * density).toInt(), (4 * density).toInt(), (6 * density).toInt())
+            contentDescription = "Dismiss selection"
+            setOnClickListener { selectOnMap(null) }
+        }
+        headerRow.addView(closeBtn)
+        card.addView(headerRow)
+
+        val btnRow = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (10 * density).toInt()
+            }
+        }
+
+        fun addWeighted(btn: View) {
+            val lp = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (btnRow.childCount > 0) marginStart = (8 * density).toInt()
+            }
+            btnRow.addView(btn, lp)
+        }
+
+        if (!selectionSubmenuOpen) {
+            when (sel) {
+                is RfMap.MapSelection.Detection -> {
+                    addWeighted(makeFooterButton("View Details", primary = true) {
+                        DeviceActions.openDetails(act, "kokoho:${sel.entityUuid}")
+                    })
+                    addWeighted(makeFooterButton("Submit Report") {
+                        selectionSubmenuOpen = true
+                        renderSelectionFooter()
+                    })
+                }
+                is RfMap.MapSelection.Facility -> {
+                    addWeighted(makeFooterButton("View Details", primary = true) {
+                        DeviceDetailActivity.openLocation(act, sel.location.id)
+                    })
+                    addWeighted(makeFooterButton("Submit Report") {
+                        selectionSubmenuOpen = true
+                        renderSelectionFooter()
+                    })
+                }
+                is RfMap.MapSelection.DroppedPoint -> {
+                    addWeighted(makeFooterButton("Submit Report", primary = true) {
+                        selectionSubmenuOpen = true
+                        renderSelectionFooter()
+                    })
+                }
+            }
+        } else {
+            when (sel) {
+                is RfMap.MapSelection.Detection -> {
+                    addWeighted(makeFooterButton("Confirm/Refine", primary = true) {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.CONFIRM_REFINE,
+                            sel.entityUuid,
+                            sel.agencyCode,
+                            sel.lat,
+                            sel.lon
+                        )
+                    })
+                    addWeighted(makeFooterButton("False Positive") {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.FALSE_POSITIVE,
+                            sel.entityUuid,
+                            sel.agencyCode,
+                            sel.lat,
+                            sel.lon
+                        )
+                    })
+                    addWeighted(makeFooterButton("Bug Report") {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.BUG_REPORT,
+                            sel.entityUuid,
+                            sel.agencyCode,
+                            sel.lat,
+                            sel.lon
+                        )
+                    })
+                }
+                is RfMap.MapSelection.DroppedPoint -> {
+                    addWeighted(makeFooterButton("Law Enforcement", primary = true) {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.LAW_ENFORCEMENT,
+                            null,
+                            null,
+                            sel.lat,
+                            sel.lon
+                        )
+                    })
+                    addWeighted(makeFooterButton("Bug Report") {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.BUG_REPORT,
+                            null,
+                            null,
+                            sel.lat,
+                            sel.lon
+                        )
+                    })
+                }
+                is RfMap.MapSelection.Facility -> {
+                    addWeighted(makeFooterButton("Law Enforcement", primary = true) {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.LAW_ENFORCEMENT,
+                            null,
+                            sel.location.agencyCode,
+                            sel.location.lat,
+                            sel.location.lon
+                        )
+                    })
+                    addWeighted(makeFooterButton("Bug Report") {
+                        launchWizardFromFooter(
+                            KokohoReportWizard.Mode.BUG_REPORT,
+                            null,
+                            sel.location.agencyCode,
+                            sel.location.lat,
+                            sel.location.lon
+                        )
+                    })
+                }
+            }
+        }
+        card.addView(btnRow)
     }
 
     /** The gear on the map: Settings > Map (the map provider, what the map shows). */
@@ -964,27 +1395,13 @@ class MapFragment : Fragment() {
     /** The newest fix from the screen's own GPS (not a position remembered from before). */
     private var gpsFix: Location? = null
 
-    /**
-     * Your speed and the posted limit, in the corner. The speed is the GPS's own (hidden when there is no recent
-     * fix); the limit comes with the route while you are guided, else from the opt-in lookup of the road you are on.
-     */
+    /** Speedometer disabled in v1.3.0: always hidden. */
     private fun updateGauge() {
         val b = _binding ?: return
-        val g = b.speedGauge
-        val fix = gpsFix
-        val fresh = fix != null && fix.hasSpeed() && System.currentTimeMillis() - fix.time < 6_000L
-        if (tripId != null || !Prefs.mapSpeedometer(act) || !fresh) {
-            if (g.visibility != View.GONE) { g.visibility = View.GONE; fitSideButtonsSoon() }
-            return
+        if (b.speedGauge.visibility != View.GONE) {
+            b.speedGauge.visibility = View.GONE
+            fitSideButtonsSoon()
         }
-        val limit = when {
-            Navigator.active -> Navigator.speedLimitKmh()
-            Prefs.mapSpeedLimitLive(act) -> org.tucsoncommunity.kokoho.nav.SpeedLimits.Live.now(fix!!.latitude, fix.longitude)
-            else -> null
-        }
-        val wasShown = g.visibility == View.VISIBLE
-        g.set(fix!!.speed * 3.6f, limit, org.tucsoncommunity.kokoho.nav.NavFormat.miles(act), rf?.isDark ?: darkTiles())
-        if (!wasShown) fitSideButtonsSoon()
     }
 
     /**
@@ -1262,14 +1679,17 @@ class MapFragment : Fragment() {
     private fun styleOrientationButton() {
         val heading = Prefs.mapHeadingUp(act)
         val tilt = is3d()
-        val (accent, onAccent) = ChipStyle.accent(act)
         binding.orientationButton.setImageResource(when {
             tilt -> org.tucsoncommunity.kokoho.R.drawable.ic_view_3d
             heading -> org.tucsoncommunity.kokoho.R.drawable.ic_heading_up
             else -> org.tucsoncommunity.kokoho.R.drawable.ic_north_up
         })
-        binding.orientationButton.backgroundTintList = android.content.res.ColorStateList.valueOf(if (heading) accent else 0xFFFFFFFF.toInt())
-        binding.orientationButton.imageTintList = android.content.res.ColorStateList.valueOf(if (heading) onAccent else 0xFF0B5C63.toInt())
+        binding.orientationButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            if (heading) KokohoJourneyUi.COLOR_ACCENT_AMBER else KokohoJourneyUi.COLOR_SURFACE_ELEVATED
+        )
+        binding.orientationButton.imageTintList = android.content.res.ColorStateList.valueOf(
+            if (heading) 0xFF0B0F17.toInt() else KokohoJourneyUi.COLOR_TEXT_PRIMARY
+        )
         binding.orientationButton.contentDescription = when {
             tilt -> "Map: 3D driving view (tap for north up)"
             heading -> "Map: heading up (tap for the 3D driving view)"
@@ -1290,13 +1710,15 @@ class MapFragment : Fragment() {
         styleFollowButton()
     }
 
-    /** Filled with the theme highlight while following, plain otherwise. */
+    /** Filled with high-contrast amber while following, dark slate surface otherwise. */
     private fun styleFollowButton() {
         val on = following
-        val (accent, onAccent) = ChipStyle.accent(act)
-        val plain = 0xFFFFFFFF.toInt()
-        binding.centerButton.backgroundTintList = android.content.res.ColorStateList.valueOf(if (on) accent else plain)
-        binding.centerButton.imageTintList = android.content.res.ColorStateList.valueOf(if (on) onAccent else 0xFF0B5C63.toInt())
+        binding.centerButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            if (on) KokohoJourneyUi.COLOR_ACCENT_AMBER else KokohoJourneyUi.COLOR_SURFACE_ELEVATED
+        )
+        binding.centerButton.imageTintList = android.content.res.ColorStateList.valueOf(
+            if (on) 0xFF0B0F17.toInt() else KokohoJourneyUi.COLOR_TEXT_PRIMARY
+        )
         binding.centerButton.contentDescription = if (on) "Following your position" else "Follow my position"
         binding.centerButton.tooltipText = binding.centerButton.contentDescription
     }
@@ -1332,11 +1754,11 @@ class MapFragment : Fragment() {
 
     // ---- Lifecycle (the map engine needs every step) ------------------------------------------------
 
-    override fun onStart() { super.onStart(); engine?.onStart() }
+    override fun onStart() { super.onStart(); runCatching { engine?.onStart() } }
 
     override fun onResume() {
         super.onResume()
-        engine?.onResume()
+        runCatching { engine?.onResume() }
         swapEngineIfChanged()
         pickUpShared()
         applyMarker() // back from Settings > Map: a new marker shows at once
@@ -1358,8 +1780,17 @@ class MapFragment : Fragment() {
         }
         if (rf != null && rf?.isDark != darkTiles()) loadStyle()
         styleOrientationButton()
+        styleFollowButton()
         applyMode(animate = false)
-        nav?.refresh()
+        hideLegacyMapChrome()
+        if (tripId == null) {
+            // Returning from Details resets the contextual footer popup to its root while preserving map selection.
+            selectionSubmenuOpen = false
+            refreshSelectionMetadata()
+            rf?.drawSelection(currentSelection)
+            renderSelectionFooter()
+            renderLive()
+        }
     }
 
     override fun onPause() {
@@ -1368,17 +1799,17 @@ class MapFragment : Fragment() {
         shareView()
         stopGps()
         if (tripId == null) ScanForegroundService.mapHidden(act)
-        engine?.onPause()
+        runCatching { engine?.onPause() }
         super.onPause()
     }
 
-    override fun onStop() { engine?.onStop(); super.onStop() }
+    override fun onStop() { runCatching { engine?.onStop() }; super.onStop() }
 
-    override fun onLowMemory() { super.onLowMemory(); engine?.onLowMemory() }
+    override fun onLowMemory() { super.onLowMemory(); runCatching { engine?.onLowMemory() } }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        engine?.onSaveInstanceState(outState)
+        runCatching { engine?.onSaveInstanceState(outState) }
     }
 
     override fun onDestroyView() {
@@ -1391,7 +1822,7 @@ class MapFragment : Fragment() {
         org.tucsoncommunity.kokoho.alpr.CctvStore.onChanged = null
         stopGps()
         rf = null
-        engine?.onDestroy()
+        runCatching { engine?.onDestroy() }
         engine = null
         _binding = null
         super.onDestroyView()
@@ -1439,6 +1870,33 @@ class MapFragment : Fragment() {
 
     private fun renderLive() {
         if (!alive || tripId != null) return
+        if (liveRenderJob?.isActive == true) {
+            liveRenderPending = true
+            return
+        }
+        liveRenderJob = viewLifecycleOwner.lifecycleScope.launch {
+            do {
+                liveRenderPending = false
+                if (!alive || tripId != null) return@launch
+                val appCtx = act.applicationContext
+                val (devices, snap) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    org.tucsoncommunity.kokoho.posture.KokohoDirectory.ensureLoaded(appCtx)
+                    val devs = DeviceRegistry.snapshot()
+                    val s = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(appCtx)
+                    devs to s
+                }
+                if (!alive || tripId != null || _binding == null) return@launch
+                lastEvaluatedMapSnap = snap
+                applyLiveSnapshotOnMain(devices, snap)
+            } while (liveRenderPending && alive)
+        }
+    }
+
+    private fun applyLiveSnapshotOnMain(
+        devices: List<DeviceRegistry.Snapshot>,
+        snap: org.tucsoncommunity.kokoho.posture.PostureSnapshot
+    ) {
+        if (!alive || tripId != null || _binding == null) return
         val recording = TripRecorder.isRecording
         binding.recordButton.text = if (recording) "Stop recording" else "Record trace"
         val (accent, onAccent) = ChipStyle.accent(act)
@@ -1452,10 +1910,8 @@ class MapFragment : Fragment() {
         binding.recordFab.setImageResource(if (recording) org.tucsoncommunity.kokoho.R.drawable.ic_car_stop else org.tucsoncommunity.kokoho.R.drawable.ic_record)
         binding.recordFab.contentDescription = if (recording) "Stop recording" else "Record trace"
 
-        // Includes devices from a scan that just stopped: the registry drops them after 3 minutes.
-        val devices = DeviceRegistry.snapshot()
         var drawn = emptyList<MapPin>()
-        rf?.let { r -> r.safe("live") { drawn = r.drawLive(devices) } }
+        rf?.let { r -> r.safe("live") { drawn = r.drawLive(devices, snap) } }
         updateFilterCounts(devices)
 
         val positioned = devices.count { it.place != null }

@@ -46,6 +46,7 @@ object KokohoHubClient {
         val label: String = "",
         @SerializedName("started_at_ms") val startedAtMs: Long = 0L,
         @SerializedName("ended_at_ms") val endedAtMs: Long = 0L,
+        @SerializedName("avg_velocity_mps") val avgVelocityMps: Double = 0.0,
         @SerializedName("simplified_polyline") val simplifiedPolyline: List<List<Double>> = emptyList()
     ) {
         val points: List<Pair<Double, Double>>
@@ -62,7 +63,27 @@ object KokohoHubClient {
         @SerializedName("vehicle_number") val vehicleNumber: String = "",
         val notes: String = "",
         @SerializedName("photo_data_url") val photoDataUrl: String? = null,
-        @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
+        @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L,
+        val status: String = "PENDING"
+    )
+
+    private data class RemoteEntityDetailsDto(
+        @SerializedName("target_key") val targetKey: String = "",
+        val entity: RemoteTrendEntity? = null,
+        @SerializedName("approved_witness") val approvedWitness: RemoteWitnessDto? = null,
+        @SerializedName("pending_review_count") val pendingReviewCount: Int = 0,
+        val capabilities: List<String> = emptyList(),
+        @SerializedName("recent_tracks") val recentTracks: List<RemoteFlightTrack> = emptyList()
+    )
+
+    data class FetchedEntityDetails(
+        val targetKey: String,
+        val approvedWitness: WitnessReportRecord?,
+        val pendingReviewCount: Int,
+        val sightingCount: Int,
+        val corroborationCount: Int,
+        val capabilities: List<String>,
+        val recentTracks: List<RemoteFlightTrack>
     )
 
     data class RemoteConfidence(
@@ -125,9 +146,57 @@ object KokohoHubClient {
         val facets: List<String> = emptyList()
     )
 
-    private data class TrendsSnapshot(
-        val entities: List<RemoteTrendEntity> = emptyList()
+    data class RemoteHeatmapCell(
+        @SerializedName("h3_res8") val h3Res8: Long = 0L,
+        @SerializedName("center_lat") val centerLat: Double = 0.0,
+        @SerializedName("center_lon") val centerLon: Double = 0.0,
+        val category: String = "DHS_CBP",
+        @SerializedName("hit_count") val hitCount: Int = 1,
+        @SerializedName("max_confidence") val maxConfidence: Double = 0.5
     )
+
+    private data class RemoteLearnedMacDto(
+        val mac: String = "",
+        @SerializedName("oui_prefix") val ouiPrefix: String = "",
+        @SerializedName("nic_u24") val nicU24: Long = 0L,
+        @SerializedName("inferred_category") val inferredCategory: String = "DHS_CBP",
+        @SerializedName("inferred_label") val inferredLabel: String = "",
+        @SerializedName("reputation_score") val reputationScore: Double = 0.5,
+        @SerializedName("corroborated_hits") val corroboratedHits: Int = 0,
+        @SerializedName("total_hits") val totalHits: Int = 1,
+        @SerializedName("distinct_days") val distinctDays: Int = 1,
+        @SerializedName("distinct_h3_res10") val distinctH3Res10: Int = 1,
+        @SerializedName("association_pattern") val associationPattern: String = "TRANSIENT",
+        val capabilities: List<String> = emptyList(),
+        @SerializedName("ssid_hint") val ssidHint: String = "",
+        @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
+    )
+
+    private data class RemoteMacBlockDto(
+        @SerializedName("oui_prefix") val ouiPrefix: String = "",
+        @SerializedName("start_mac") val startMac: String = "",
+        @SerializedName("end_mac") val endMac: String = "",
+        @SerializedName("min_nic_u24") val minNicU24: Long = 0L,
+        @SerializedName("max_nic_u24") val maxNicU24: Long = 0L,
+        @SerializedName("inferred_category") val inferredCategory: String = "DHS_CBP",
+        @SerializedName("inferred_label") val inferredLabel: String = "",
+        @SerializedName("confirmed_count") val confirmedCount: Int = 0,
+        @SerializedName("confidence_boost") val confidenceBoost: Double = 0.5
+    )
+
+    private data class TrendsSnapshot(
+        val tracks: List<RemoteFlightTrack> = emptyList(),
+        @SerializedName("heatmap_cells") val heatmapCells: List<RemoteHeatmapCell> = emptyList(),
+        val entities: List<RemoteTrendEntity> = emptyList(),
+        @SerializedName("learned_macs") val learnedMacs: List<RemoteLearnedMacDto> = emptyList(),
+        @SerializedName("mac_blocks") val macBlocks: List<RemoteMacBlockDto> = emptyList()
+    )
+
+    @Volatile private var latestTrendsTracks: List<RemoteFlightTrack> = emptyList()
+    @Volatile private var latestHeatmapCells: List<RemoteHeatmapCell> = emptyList()
+
+    fun cachedFlightTracks(): List<RemoteFlightTrack> = latestTrendsTracks
+    fun cachedHeatmapCells(): List<RemoteHeatmapCell> = latestHeatmapCells
 
     data class StateSnapshot(
         val seq: Long = 0L,
@@ -231,12 +300,19 @@ object KokohoHubClient {
             statusLabel = "offline-first"
             return
         }
-        schedulePeriodicCheckin(app)
         if (streamJob?.isActive == true) return
+        schedulePeriodicCheckin(app)
         streamJob = scope.launch {
             checkinNow(app)
+            var lastTrendsRefreshAt = System.currentTimeMillis()
             while (isActive) {
                 try {
+                    val nowLoop = System.currentTimeMillis()
+                    if (nowLoop - lastTrendsRefreshAt >= 60_000L) {
+                        lastTrendsRefreshAt = nowLoop
+                        syncHistoricalEntities(app)
+                        syncWitnessReports(app)
+                    }
                     val base = hubUrl(app)
                     val url = URL("$base/v1/stream?since=$lastSeq&wait_ms=20000")
                     val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -345,7 +421,8 @@ object KokohoHubClient {
         scope.launch {
             runCatching {
                 val base = hubUrl(app)
-                val conn = (URL("$base/v1/trends?since_ms=0&limit=500").openConnection() as HttpURLConnection).apply {
+                val rollingSinceMs = (System.currentTimeMillis() - 48L * 3_600_000L).coerceAtLeast(0L)
+                val conn = (URL("$base/v1/trends?since_ms=$rollingSinceMs&limit=500").openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 8_000
                     readTimeout = 10_000
@@ -354,15 +431,75 @@ object KokohoHubClient {
                     if (conn.responseCode in 200..299) {
                         val body = conn.inputStream.bufferedReader().use { it.readText() }
                         val snap = gson.fromJson(body, TrendsSnapshot::class.java)
+                        if (snap != null) {
+                            latestTrendsTracks = snap.tracks.filterNot { tr ->
+                                KokohoSignatures.isAnomalousUnattributedAirRecord(
+                                    primaryKey = "adsb:",
+                                    category = tr.category,
+                                    label = tr.label,
+                                    facets = emptyList(),
+                                    avgVelocityMps = tr.avgVelocityMps
+                                )
+                            }
+                            latestHeatmapCells = snap.heatmapCells
+                            if (snap.learnedMacs.isNotEmpty() || snap.macBlocks.isNotEmpty()) {
+                                KokohoSignatures.mergeRemoteMacIntel(
+                                    app,
+                                    snap.learnedMacs.map {
+                                        KokohoSignatures.LearnedMacIntel(
+                                            mac = it.mac,
+                                            ouiPrefix = it.ouiPrefix,
+                                            nicU24 = it.nicU24,
+                                            agencyId = it.inferredCategory,
+                                            label = it.inferredLabel,
+                                            reputationScore = it.reputationScore,
+                                            corroboratedHits = it.corroboratedHits,
+                                            totalHits = it.totalHits,
+                                            distinctDays = it.distinctDays,
+                                            distinctH3Res10 = it.distinctH3Res10,
+                                            associationPattern = it.associationPattern,
+                                            capabilities = it.capabilities,
+                                            ssidHint = it.ssidHint,
+                                            updatedAtMs = it.updatedAtMs
+                                        )
+                                    },
+                                    snap.macBlocks.map {
+                                        KokohoSignatures.LearnedMacBlock(
+                                            ouiPrefix = it.ouiPrefix,
+                                            startMac = it.startMac,
+                                            endMac = it.endMac,
+                                            minNicU24 = it.minNicU24,
+                                            maxNicU24 = it.maxNicU24,
+                                            agencyId = it.inferredCategory,
+                                            label = it.inferredLabel,
+                                            confirmedCount = it.confirmedCount,
+                                            confidenceBoost = it.confidenceBoost
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                        val nowMs = System.currentTimeMillis()
                         for (e in snap?.entities.orEmpty()) {
                             if (e.entityUuid.isBlank()) continue
-                            if (e.estimatedLon > -110.8752) continue
                             if (KokohoSignatures.isFlockCamera(e.primaryFacetKey, e.label)) continue
-                            val existing = objects[e.entityUuid]
-                            if (existing != null && existing.updatedAtMs > e.lastSeenMs) continue
+                            if (KokohoSignatures.isAnomalousUnattributedAirRecord(
+                                    primaryKey = e.primaryFacetKey,
+                                    category = e.category,
+                                    label = e.label,
+                                    facets = e.facets
+                                )
+                            ) {
+                                objects.remove(e.entityUuid)
+                                continue
+                            }
                             val isAir = e.category.equals("DHS_AMO", ignoreCase = true) ||
                                 e.primaryFacetKey.startsWith("ICAO:", ignoreCase = true) ||
                                 e.primaryFacetKey.startsWith("adsb:", ignoreCase = true)
+                            // Only treat airborne trends entities as active aircraft objects while currently in flight (<= 5 min).
+                            if (isAir && nowMs - e.lastSeenMs > 5 * 60_000L) continue
+                            val existing = objects[e.entityUuid]
+                            if (existing != null && existing.updatedAtMs > e.lastSeenMs) continue
                             val propClass = if (isAir) "AIRBORNE" else "GROUND_DIRECT"
                             val evidenceList = (listOf(e.primaryFacetKey) + e.facets)
                                 .map { it.trim() }
@@ -446,7 +583,15 @@ object KokohoHubClient {
                     if (conn.responseCode in 200..299) {
                         val body = conn.inputStream.bufferedReader().use { it.readText() }
                         val type = object : com.google.gson.reflect.TypeToken<List<RemoteFlightTrack>>() {}.type
-                        gson.fromJson<List<RemoteFlightTrack>>(body, type) ?: emptyList()
+                        (gson.fromJson<List<RemoteFlightTrack>>(body, type) ?: emptyList()).filterNot { tr ->
+                            KokohoSignatures.isAnomalousUnattributedAirRecord(
+                                primaryKey = "adsb:",
+                                category = tr.category,
+                                label = tr.label,
+                                facets = emptyList(),
+                                avgVelocityMps = tr.avgVelocityMps
+                            )
+                        }
                     } else {
                         emptyList()
                     }
@@ -460,10 +605,10 @@ object KokohoHubClient {
         }
     }
 
-    /** Submits a verified Witness Report to `/v1/witness`. */
-    fun submitWitnessReport(report: WitnessReportRecord, context: Context? = null) {
+    /** Submits a Witness Report to `/v1/witness` (queued for manual review on server). */
+    fun submitWitnessReport(report: WitnessReportRecord, context: Context? = null, onComplete: ((Boolean) -> Unit)? = null) {
         scope.launch {
-            runCatching {
+            val ok = runCatching {
                 val base = if (context != null) hubUrl(context) else DEFAULT_HUB_URL
                 val dto = RemoteWitnessDto(
                     targetKey = report.targetKey,
@@ -475,7 +620,8 @@ object KokohoHubClient {
                     vehicleNumber = report.vehicleNumber,
                     notes = report.notes,
                     photoDataUrl = report.photoDataUrl,
-                    updatedAtMs = report.updatedAtMs
+                    updatedAtMs = report.updatedAtMs,
+                    status = "PENDING"
                 )
                 val json = gson.toJson(dto)
                 val conn = (URL("$base/v1/witness").openConnection() as HttpURLConnection).apply {
@@ -487,15 +633,119 @@ object KokohoHubClient {
                 }
                 try {
                     conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
-                    conn.responseCode
+                    conn.responseCode in 200..299
                 } finally {
                     conn.disconnect()
+                }
+            }.getOrDefault(false)
+            if (onComplete != null) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(ok)
                 }
             }
         }
     }
 
-    /** Synchronizes verified Witness Reports from `/v1/witness`. */
+    /**
+     * Fetches the specific approved details and review metadata for an entity when the user
+     * opens the Details screen (`GET /v1/details?target_key=...`).
+     */
+    fun fetchEntityDetails(
+        context: Context,
+        targetKey: String,
+        onResult: (FetchedEntityDetails?) -> Unit
+    ) {
+        val app = context.applicationContext
+        if (targetKey.isBlank()) {
+            onResult(null)
+            return
+        }
+        scope.launch {
+            val result = runCatching {
+                val base = hubUrl(app)
+                val encoded = java.net.URLEncoder.encode(targetKey.trim(), "UTF-8")
+                val conn = (URL("$base/v1/details?target_key=$encoded").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val dto = gson.fromJson(body, RemoteEntityDetailsDto::class.java)
+                        if (dto != null) {
+                            val approved = dto.approvedWitness?.let { w ->
+                                WitnessReportRecord(
+                                    targetKey = w.targetKey,
+                                    entityUuid = w.entityUuid,
+                                    agencyCode = w.agencyCode,
+                                    department = w.department,
+                                    badgeNumber = w.badgeNumber,
+                                    agentName = w.agentName,
+                                    vehicleNumber = w.vehicleNumber,
+                                    notes = w.notes,
+                                    photoDataUrl = w.photoDataUrl,
+                                    updatedAtMs = w.updatedAtMs,
+                                    status = w.status.ifBlank { "APPROVED" }
+                                )
+                            }
+                            if (approved != null) {
+                                KokohoSignatures.mergeRemoteWitnessReports(app, listOf(approved))
+                            }
+                            FetchedEntityDetails(
+                                targetKey = dto.targetKey.ifBlank { targetKey },
+                                approvedWitness = approved,
+                                pendingReviewCount = dto.pendingReviewCount,
+                                sightingCount = dto.entity?.sightingCount ?: 1,
+                                corroborationCount = dto.entity?.corroborationCount ?: 1,
+                                capabilities = dto.capabilities,
+                                recentTracks = dto.recentTracks
+                            )
+                        } else null
+                    } else null
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrNull()
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                onResult(result)
+            }
+        }
+    }
+
+    /** Uploads a debug/dev multi-pass field telemetry batch to `/v1/telemetry/batch`. */
+    fun uploadFieldTelemetryBatch(
+        context: Context,
+        payloadJson: String,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        val app = context.applicationContext
+        scope.launch {
+            val ok = runCatching {
+                val base = hubUrl(app)
+                val conn = (URL("$base/v1/telemetry/batch").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 10_000
+                    readTimeout = 10_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                }
+                try {
+                    conn.outputStream.use { it.write(payloadJson.toByteArray(Charsets.UTF_8)) }
+                    conn.responseCode in 200..299
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrDefault(false)
+            if (onComplete != null) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(ok)
+                }
+            }
+        }
+    }
+
+    /** Synchronizes APPROVED Witness Reports from `/v1/witness`. */
     fun syncWitnessReports(context: Context) {
         val app = context.applicationContext
         if (!KokohoSignatures.isAuxnetEnabled(app)) return
@@ -512,20 +762,23 @@ object KokohoHubClient {
                         val body = conn.inputStream.bufferedReader().use { it.readText() }
                         val type = object : com.google.gson.reflect.TypeToken<List<RemoteWitnessDto>>() {}.type
                         val list = gson.fromJson<List<RemoteWitnessDto>>(body, type) ?: emptyList()
-                        val mapped = list.map {
-                            WitnessReportRecord(
-                                targetKey = it.targetKey,
-                                entityUuid = it.entityUuid,
-                                agencyCode = it.agencyCode,
-                                department = it.department,
-                                badgeNumber = it.badgeNumber,
-                                agentName = it.agentName,
-                                vehicleNumber = it.vehicleNumber,
-                                notes = it.notes,
-                                photoDataUrl = it.photoDataUrl,
-                                updatedAtMs = it.updatedAtMs
-                            )
-                        }
+                        val mapped = list
+                            .filter { it.status.isBlank() || it.status.equals("APPROVED", ignoreCase = true) }
+                            .map {
+                                WitnessReportRecord(
+                                    targetKey = it.targetKey,
+                                    entityUuid = it.entityUuid,
+                                    agencyCode = it.agencyCode,
+                                    department = it.department,
+                                    badgeNumber = it.badgeNumber,
+                                    agentName = it.agentName,
+                                    vehicleNumber = it.vehicleNumber,
+                                    notes = it.notes,
+                                    photoDataUrl = it.photoDataUrl,
+                                    updatedAtMs = it.updatedAtMs,
+                                    status = "APPROVED"
+                                )
+                            }
                         KokohoSignatures.mergeRemoteWitnessReports(app, mapped)
                     }
                 } finally {
@@ -551,7 +804,9 @@ object KokohoHubClient {
         label: String,
         propagationClass: String,
         uncertaintyRadiusM: Double? = null,
-        isDerived: Boolean = false
+        isDerived: Boolean = false,
+        localSightings: Int = 1,
+        ssidHint: String? = null
     ) {
         val app = context.applicationContext
         if (!KokohoSignatures.isAuxnetEnabled(app) || !isSensorContributor(app)) return
@@ -573,10 +828,14 @@ object KokohoHubClient {
                     "label" to label,
                     "propagation_class" to propagationClass,
                     "timestamp_ms" to System.currentTimeMillis(),
-                    "is_derived" to isDerived
+                    "is_derived" to isDerived,
+                    "local_sightings" to localSightings
                 )
                 if (uncertaintyRadiusM != null) {
                     payload["uncertainty_radius_m"] = uncertaintyRadiusM
+                }
+                if (!ssidHint.isNullOrBlank()) {
+                    payload["ssid_hint"] = ssidHint
                 }
                 val json = gson.toJson(payload)
                 val conn = (URL("${hubUrl(app)}/v1/room/ingest").openConnection() as HttpURLConnection).apply {
@@ -592,7 +851,17 @@ object KokohoHubClient {
                     if (conn.responseCode in 200..299) {
                         val resp = conn.inputStream.bufferedReader().use { it.readText() }
                         val obj = gson.fromJson(resp, RemoteThreatObject::class.java)
-                        if (obj != null && obj.uuid.isNotBlank()) {
+                        val isDerivedResponse = obj != null && (
+                            obj.location.uncertaintyRadiusM <= 160.0 ||
+                                obj.confidence.spatial >= 0.80 ||
+                                obj.classification.evidenceSources.size >= 2 ||
+                                obj.location.propagationClass.equals("AIRBORNE", ignoreCase = true)
+                            )
+                        val isSinglePeerRfSelfEcho = primaryFacet.startsWith("rf:chan:") &&
+                            obj != null &&
+                            obj.corroborationCount <= 1 &&
+                            obj.classification.evidenceSources.size <= 1
+                        if (isDerivedResponse && !isSinglePeerRfSelfEcho && obj.uuid.isNotBlank()) {
                             objects[obj.uuid] = obj
                         }
                     }
@@ -603,28 +872,38 @@ object KokohoHubClient {
         }
     }
 
-    fun schedulePeriodicCheckin(context: Context) {
-        val am = context.getSystemService(AlarmManager::class.java) ?: return
-        val pi = PendingIntent.getBroadcast(
-            context,
+    @Volatile private var cachedCheckinPi: PendingIntent? = null
+    @Volatile private var lastScheduledAlarmAtMs: Long = 0L
+
+    private fun getOrCreateCheckinPendingIntent(context: Context): PendingIntent {
+        cachedCheckinPi?.let { return it }
+        val app = context.applicationContext
+        return PendingIntent.getBroadcast(
+            app,
             48222,
-            Intent(context, AuxnetCheckinReceiver::class.java),
+            Intent(app, AuxnetCheckinReceiver::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val triggerAt = System.currentTimeMillis() + CHECKIN_INTERVAL_MS
+        ).also { cachedCheckinPi = it }
+    }
+
+    fun schedulePeriodicCheckin(context: Context) {
+        val now = System.currentTimeMillis()
+        if (now - lastScheduledAlarmAtMs < 60_000L) return
+        lastScheduledAlarmAtMs = now
+        val app = context.applicationContext
+        val am = app.getSystemService(AlarmManager::class.java) ?: return
+        val pi = getOrCreateCheckinPendingIntent(app)
+        val triggerAt = now + CHECKIN_INTERVAL_MS
         runCatching {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
         }
     }
 
     private fun cancelPeriodicCheckin(context: Context) {
-        val am = context.getSystemService(AlarmManager::class.java) ?: return
-        val pi = PendingIntent.getBroadcast(
-            context,
-            48222,
-            Intent(context, AuxnetCheckinReceiver::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        lastScheduledAlarmAtMs = 0L
+        val app = context.applicationContext
+        val am = app.getSystemService(AlarmManager::class.java) ?: return
+        val pi = cachedCheckinPi ?: return
         runCatching { am.cancel(pi) }
     }
 }

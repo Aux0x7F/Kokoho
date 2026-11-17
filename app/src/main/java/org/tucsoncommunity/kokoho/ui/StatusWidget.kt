@@ -37,18 +37,31 @@ class StatusWidget : AppWidgetProvider() {
         private const val ACTION_TOGGLE = "org.tucsoncommunity.kokoho.widget.TOGGLE"
         @Volatile private var devices = 0
         @Volatile private var flagged = 0
+        @Volatile private var lastRenderedSig: String? = null
+        @Volatile private var lastRenderAtMs: Long = 0L
+        @Volatile private var cachedTogglePi: PendingIntent? = null
+        @Volatile private var cachedBodyPi: PendingIntent? = null
 
         fun updateAll(context: Context, deviceCount: Int = devices, flaggedCount: Int = flagged) {
             devices = deviceCount
             flagged = flaggedCount
-            val manager = AppWidgetManager.getInstance(context) ?: return
-            val ids = manager.getAppWidgetIds(ComponentName(context, StatusWidget::class.java))
-            if (ids.isNotEmpty()) render(context, manager, ids)
+            val running = ScanForegroundService.isRunning
+            val sig = "$running|$devices|$flagged"
+            val now = System.currentTimeMillis()
+            if (sig == lastRenderedSig && now - lastRenderAtMs < 30_000L) return
+            if (now - lastRenderAtMs < 4_000L && sig == lastRenderedSig) return
+            val app = context.applicationContext
+            val manager = AppWidgetManager.getInstance(app) ?: return
+            val ids = manager.getAppWidgetIds(ComponentName(app, StatusWidget::class.java))
+            lastRenderedSig = sig
+            lastRenderAtMs = now
+            if (ids.isNotEmpty()) render(app, manager, ids)
         }
 
         private fun render(context: Context, manager: AppWidgetManager, ids: IntArray) {
+            val app = context.applicationContext
             val running = ScanForegroundService.isRunning
-            val views = RemoteViews(context.packageName, R.layout.widget_status)
+            val views = RemoteViews(app.packageName, R.layout.widget_status)
             views.setTextViewText(R.id.widgetStatus, if (running) "Scanning" else "Idle")
             views.setTextViewText(
                 R.id.widgetCounts,
@@ -56,21 +69,17 @@ class StatusWidget : AppWidgetProvider() {
             )
             views.setTextViewText(R.id.widgetToggle, if (running) "■" else "▶")
             views.setContentDescription(R.id.widgetToggle, if (running) "Stop scanning" else "Start scanning")
-            views.setOnClickPendingIntent(
-                R.id.widgetToggle,
-                PendingIntent.getBroadcast(
-                    context, 0,
-                    Intent(context, StatusWidget::class.java).setAction(ACTION_TOGGLE),
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            )
-            views.setOnClickPendingIntent(
-                R.id.widgetBody,
-                PendingIntent.getActivity(
-                    context, 0, Intent(context, MainActivity::class.java),
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            )
+            val togglePi = cachedTogglePi ?: PendingIntent.getBroadcast(
+                app, 0,
+                Intent(app, StatusWidget::class.java).setAction(ACTION_TOGGLE),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            ).also { cachedTogglePi = it }
+            val bodyPi = cachedBodyPi ?: PendingIntent.getActivity(
+                app, 0, Intent(app, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            ).also { cachedBodyPi = it }
+            views.setOnClickPendingIntent(R.id.widgetToggle, togglePi)
+            views.setOnClickPendingIntent(R.id.widgetBody, bodyPi)
             manager.updateAppWidget(ids, views)
         }
 

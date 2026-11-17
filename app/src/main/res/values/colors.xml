@@ -17,10 +17,10 @@
     <!-- DedSec-inspired palette: black, white, electric blue (matches the header poster) -->
     <color name="dedsec_black">#050505</color>
     <color name="dedsec_panel">#0E1218</color>
-    <color name="dedsec_blue">#0070F0</color>
-    <color name="dedsec_blue_light">#4D9CFF</color>
-    <color name="dedsec_text">#F4F4F4</color>
-    <color name="dedsec_dim">#9AAAC0</color>
+    <color name="dedsec_blue">#FDE68A</color>
+    <color name="dedsec_blue_light">#FEF3C7</color>
+    <color name="dedsec_text">#FFFFFF</color>
+    <color name="dedsec_dim">#E2E8F0</color>
 
     <!-- fsociety (Mr. Robot-inspired): black, ash grey, blood red (matches the header poster) -->
     <color name="fsoc_black">#050505</color>

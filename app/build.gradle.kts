@@ -7,8 +7,23 @@ plugins {
 }
 
 // Bump both for every release. versionName ends up in the APK file name.
-val appVersionCode = 102
-val appVersionName = "1.1.2"
+// Monotonic channel-parity versionCode: base (major*1000 + minor*100 + patch*10) + channelOffset (0 = public, 1 = non-public channel)
+// so a specialized channel build always upgrades cleanly in-place over the matching public release without colliding.
+val baseVersionCode = 1300
+val baseVersionName = "1.3.0"
+val releaseChannel = providers.gradleProperty("rfs.channel").orNull?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: "public"
+val isPublicChannel = releaseChannel == "public"
+
+val channelProps = Properties().apply {
+    if (!isPublicChannel) {
+        val f = rootProject.file("$releaseChannel.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+}
+
+val appVersionCode = if (isPublicChannel) baseVersionCode else baseVersionCode + 1
+val appVersionName = if (isPublicChannel) baseVersionName else "$baseVersionName-$releaseChannel"
+val updateManifestPath = channelProps.getProperty("updateManifestPath") ?: "/v1/update/latest"
 
 // Release signing credentials live in keystore.properties (git-ignored).
 // Without that file, release builds are produced unsigned.
@@ -31,7 +46,27 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
 
+        buildConfigField("String", "RELEASE_CHANNEL", "\"$releaseChannel\"")
+        buildConfigField("String", "UPDATE_MANIFEST_PATH", "\"$updateManifestPath\"")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    sourceSets {
+        if (!isPublicChannel) {
+            val extraAssets = file("src/$releaseChannel/assets")
+            if (extraAssets.exists()) {
+                named("main") {
+                    assets.directories.add(extraAssets.path)
+                }
+            }
+            val extraTestJava = file("src/$releaseChannel/test/java")
+            if (extraTestJava.exists()) {
+                named("test") {
+                    kotlin.directories.add(extraTestJava.path)
+                }
+            }
+        }
     }
 
     signingConfigs {
@@ -75,6 +110,11 @@ android {
 
     // Native libraries stored compressed: a much smaller APK to download (unpacked once at install).
     packaging { jniLibs { useLegacyPackaging = true } }
+
+    // Keep pre-compressed `.gz` reference tables intact (`assets/reference/*.tsv.gz`) so aapt2 does not strip `.gz`.
+    androidResources {
+        noCompress += "gz"
+    }
 
     // No Google-encrypted dependency list in the APK or bundle (F-Droid's scanner flags it; only Play reads it).
     dependenciesInfo {

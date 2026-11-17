@@ -139,7 +139,7 @@ class RadioWatch {
                 f += STEP_HZ
             }
         }
-        // Watched frequencies: any burst counts (no learning, no busy filter - the user asked for them).
+        // Watched frequencies: require a brief baseline window and suppress always-on spurs/control carriers.
         for (t in cfg.targets) {
             val off = t.freqHz - centerHz
             if (kotlin.math.abs(off) > USABLE_HZ || kotlin.math.abs(off) <= DC_GUARD_HZ) continue
@@ -148,7 +148,13 @@ class RadioWatch {
             for (k in mid - half..mid + half) if (k in 0 until n && psdDb[k] > p) p = psdDb[k]
             val snr = (p - floor).roundToInt()
             val st = targetState.getOrPut(t.freqHz) { Channel() }
-            if (snr < maxOf(activeDb(cfg.minSnrDb), cfg.minSnrDb - 10)) continue
+            val minTargetSnr = maxOf(activeDb(cfg.minSnrDb), cfg.minSnrDb - 6)
+            val active = snr >= ACTIVE_DB && snr >= minTargetSnr
+            st.recent = (st.recent shl 1) or (if (active) 1L else 0L)
+            st.visits++
+            if (sweeps < LEARN_SWEEPS || st.visits < MIN_VISITS_BUSY) continue
+            if (st.busyRatio() >= BUSY_RATIO) continue
+            if (snr < minTargetSnr) continue
             found += Event(t.freqHz, snr, Band(t.label, t.freqHz, t.freqHz, Kind.TARGET), TARGET_CONFIDENCE, t,
                 repeat = now - st.lastEvent < REPEAT_MS)
         }
@@ -321,6 +327,8 @@ class RadioWatch {
             // 806-814 MHz: public-safety radios after the 800 MHz rebanding; LTE phones start at 814.
             Band("800 MHz public-safety radio band", 806_000_000L, 813_900_000L, Kind.PUBLIC_SAFETY_MOBILE),
             Band("VHF land-mobile band", 150_800_000L, 174_000_000L, Kind.SHARED),
+            // NTIA Federal UHF (FPS / ERO / DHS): direct simplex & vehicle mobiles
+            Band("Federal UHF radio band", 406_100_000L, 420_000_000L, Kind.PUBLIC_SAFETY_MOBILE),
             Band("UHF land-mobile band", 450_000_000L, 470_000_000L, Kind.SHARED)
         )
 

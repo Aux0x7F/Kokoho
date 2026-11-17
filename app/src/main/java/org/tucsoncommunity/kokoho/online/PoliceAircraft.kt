@@ -29,7 +29,9 @@ object PoliceAircraft {
         val altitudeFt: Int?,
         val speedKt: Double?,
         val trackDeg: Double?,
-        val military: Boolean
+        val military: Boolean,
+        val onGround: Boolean = false,
+        val category: String? = null
     )
 
     data class Entry(val registration: String, val owner: String, val model: String)
@@ -45,19 +47,104 @@ object PoliceAircraft {
     /** Government owners (agencies, states, counties, cities, the Crown): not proof of police, but a public-service flight. */
     private val GOV_OWNER = Regex(
         "GOVERNMENT|DEPARTMENT OF|DEPT OF|MINISTRY|STATE OF|COMMONWEALTH OF|PROVINCE OF|COUNTY OF|CITY OF|" +
-            "HIS MAJESTY|HER MAJESTY|NATIONAL GUARD|COAST GUARD",
+            "HIS MAJESTY|HER MAJESTY|COAST GUARD",
         RegexOption.IGNORE_CASE
     )
+
+    private val GLIDER_OR_TRAINER_REGEX = Regex(
+        "(MOTOR)?GLIDER|\\b(GLID|SAILPLANE|ASK-?21|DG-?1000|TG-?1[0-9]|G-?10[23]|L-?13|L-?23|BLANIK|SGS ?2-33|GROB ?103|CIRRUS ?STD|PA-?38|PA38|TOMAHAWK|PA-?44|PA44|SEMINOLE|PA-?24|PA24|COMANCHE|P28[A-Z]|PA-?28|PA28|CHEROKEE|ARCHER|WARRIOR|DAKOTA|C140|C150|C152|C170|C172|C177|CARDINAL|CESSNA 15[02]|CESSNA 17[027]|SKYHAWK|CUTLASS|DA20|DA40|SR20|AA-?5|CHEETAH|TIGER|M20[A-Z]?|MOONEY|RV-[0-9]{1,2})\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    private data class AirfieldPattern(val code: String, val lat: Double, val lon: Double, val fieldElevFt: Int)
+
+    private val REGIONAL_AIRFIELDS = listOf(
+        AirfieldPattern("KTUS", 32.1161, -110.9410, 2643),
+        AirfieldPattern("KRYN", 32.1422, -111.1746, 2419),
+        AirfieldPattern("KAVQ", 32.4095, -111.2184, 2031),
+        AirfieldPattern("KDMA", 32.1665, -110.8830, 2704),
+        AirfieldPattern("E77", 32.6366, -110.6409, 3275),
+        AirfieldPattern("KOLS", 31.4177, -110.8479, 3955),
+        AirfieldPattern("KFHU", 31.5885, -110.3444, 4719),
+        AirfieldPattern("57AZ", 32.4339, -111.0061, 2940),
+        AirfieldPattern("E95", 31.9993, -110.3582, 3829)
+    )
+
+    fun isAirportTrafficPattern(
+        centerLat: Double,
+        centerLon: Double,
+        altitudeFt: Int?,
+        isExplicitLeOrGov: Boolean = false
+    ): Boolean {
+        if (isExplicitLeOrGov) return false
+        org.tucsoncommunity.kokoho.posture.KokohoReferenceTables
+            .findMatchingAirfieldPattern(centerLat, centerLon, altitudeFt, isExplicitLeOrGov = false)
+            ?.let { return true }
+        for (af in REGIONAL_AIRFIELDS) {
+            val d = DeviceRegistry.metersBetween(centerLat, centerLon, af.lat, af.lon)
+            if (d <= 3_800.0 && (altitudeFt == null || altitudeFt <= af.fieldElevFt + 2_200)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private val MILITARY_NON_LE_AIRFRAME_REGEX = Regex(
+        "\\b(UH-?72|LUH-?72|LAKOTA|UH-?60|MH-?60|HH-?60|S-?70|BLACK ?HAWK|CH-?47|AH-?64|EC-?145|BK-?117|T-?38|T-?6|KC-?135|KC-?46|C-?130|C-?20|C-?12|C-?17|C-?5|E-?3|B-?52|V-?22|A-?10|F-?35|F-?16|USAF|AIR FORCE|ARMY|NAVY|MARINES|NATIONAL GUARD)\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isGroundedOrParked(p: Plane): Boolean {
+        if (p.onGround) return true
+        val alt = p.altitudeFt
+        if (alt != null && alt <= 100) return true
+        val spd = p.speedKt
+        // Landed/idling helicopters or taxiing aircraft in the Tucson basin (alt < 3,500 ft MSL, speed < 15 kt).
+        if (spd != null && spd < 15.0 && (alt == null || alt < 3_500)) return true
+        return false
+    }
+
+    fun isGliderOrExcludedTrainer(p: Plane): Boolean {
+        if (p.category.equals("B1", ignoreCase = true)) return true
+        val combined = listOfNotNull(p.type, p.callsign, p.owner, p.registration).joinToString(" ")
+        if (GLIDER_OR_TRAINER_REGEX.containsMatchIn(combined)) return true
+        val isExplicitLeOrDhs = LE_OWNER.containsMatchIn(combined)
+        val ref = org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupAircraft(p.hex)
+        if (!isExplicitLeOrDhs && ref != null && (ref.disposition == "TRN" || ref.disposition == "MED" || ref.disposition == "MIL" || ref.airframeKind == 'G')) {
+            return true
+        }
+        // Exclude pure US military / National Guard airframes (e.g. AE* ICAO hex, Blackhawk/Lakota) unless explicitly LE/DHS.
+        if (!isExplicitLeOrDhs && (p.hex.startsWith("ae", ignoreCase = true) || MILITARY_NON_LE_AIRFRAME_REGEX.containsMatchIn(combined))) {
+            return true
+        }
+        return false
+    }
+
+    /** Enriches a raw ADS-B plane (especially offline RTL-SDR 1090 MHz packets) from `KokohoReferenceTables`. */
+    fun enrichPlane(p: Plane): Plane {
+        val ref = org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupAircraft(p.hex) ?: return p
+        val reg = p.registration?.takeIf { it.isNotBlank() } ?: ref.registration.takeIf { it.isNotBlank() }
+        val tp = p.type?.takeIf { it.isNotBlank() } ?: ref.icaoType.takeIf { it.isNotBlank() }
+        val own = p.owner?.takeIf { it.isNotBlank() } ?: ref.owner.takeIf { it.isNotBlank() }
+        return if (reg === p.registration && tp === p.type && own === p.owner) {
+            p
+        } else {
+            p.copy(registration = reg, type = tp, owner = own)
+        }
+    }
 
     /** The label of an unlisted aircraft circling overhead ([classify]). */
     const val CIRCLING = "Aircraft circling overhead"
 
     @Volatile private var registry: Map<String, Entry>? = null
 
-    fun load(context: Context): Map<String, Entry> = registry ?: synchronized(this) {
-        registry ?: parseRegistry(
-            context.assets.open("aircraft/law_enforcement.tsv").bufferedReader().use { it.readText() }
-        ).also { registry = it }
+    fun load(context: Context): Map<String, Entry> {
+        org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.ensureLoaded(context)
+        return registry ?: synchronized(this) {
+            registry ?: parseRegistry(
+                context.assets.open("aircraft/law_enforcement.tsv").bufferedReader().use { it.readText() }
+            ).also { registry = it }
+        }
     }
 
     internal fun parseRegistry(text: String): Map<String, Entry> = text.lineSequence()
@@ -77,6 +164,9 @@ object PoliceAircraft {
             val lat = o.num("lat") ?: return@mapNotNull null
             val lon = o.num("lon") ?: return@mapNotNull null
             val hex = o.str("hex")?.lowercase()?.removePrefix("~") ?: return@mapNotNull null
+            val baroStr = o.str("alt_baro")
+            val onGround = baroStr.equals("ground", ignoreCase = true)
+            val altFt = if (onGround) 0 else (o.num("alt_baro")?.toInt() ?: o.num("alt_geom")?.toInt())
             Plane(
                 hex = hex,
                 callsign = o.str("flight")?.trim()?.ifEmpty { null },
@@ -84,11 +174,13 @@ object PoliceAircraft {
                 type = o.str("desc") ?: o.str("t"),
                 owner = o.str("ownOp"),
                 lat = lat, lon = lon,
-                // alt_baro is "ground" for aircraft on the ground.
-                altitudeFt = o.num("alt_baro")?.toInt() ?: o.num("alt_geom")?.toInt() ?: if (o.str("alt_baro") == "ground") 0 else null,
+                // alt_baro is "ground" for aircraft on the ground (never overwrite 0 with alt_geom).
+                altitudeFt = altFt,
                 speedKt = o.num("gs"),
                 trackDeg = o.num("track"),
-                military = ((o.num("dbFlags")?.toInt() ?: 0) and 1) != 0
+                military = ((o.num("dbFlags")?.toInt() ?: 0) and 1) != 0,
+                onGround = onGround,
+                category = o.str("category")
             )
         }
     }
@@ -104,6 +196,7 @@ object PoliceAircraft {
      * [LoiterTracker]; [distanceM] is the ground distance from you.
      */
     fun classify(p: Plane, registry: Map<String, Entry>, circling: Boolean, distanceM: Double?, via: String = VIA_ONLINE, alertM: Double = ALERT_M): Hit? {
+        if (isGliderOrExcludedTrainer(p)) return null
         val where = describe(p, distanceM)
         // One 40 km away is listed, but it isn't overhead.
         val over = if (distanceM != null && distanceM <= alertM) " overhead" else ""
@@ -191,7 +284,7 @@ object PoliceAircraft {
 
         fun update(p: Plane, now: Long): Boolean {
             val q = tracks.getOrPut(p.hex) { ArrayDeque() }
-            val airborne = (p.altitudeFt ?: 1) > 0 && (p.speedKt ?: MIN_SPEED_KT) >= MIN_SPEED_KT
+            val airborne = !isGroundedOrParked(p) && !isGliderOrExcludedTrainer(p) && (p.speedKt ?: MIN_SPEED_KT) >= MIN_SPEED_KT
             val last = q.lastOrNull()
             // The RTL-SDR's list repeats the last position every couple of seconds until a new one is decoded.
             val fresh = last == null || (now - last.time >= MIN_GAP_MS && (last.lat != p.lat || last.lon != p.lon))
@@ -203,6 +296,9 @@ object PoliceAircraft {
             for (i in 1 until q.size) turned += wrap(q[i].track - q[i - 1].track)
             val cLat = q.sumOf { it.lat } / q.size
             val cLon = q.sumOf { it.lon } / q.size
+            val ownerTxt = listOfNotNull(p.owner, p.callsign, p.type).joinToString(" ")
+            val explicitLeOrGov = LE_OWNER.containsMatchIn(ownerTxt) || GOV_OWNER.containsMatchIn(ownerTxt)
+            if (isAirportTrafficPattern(cLat, cLon, p.altitudeFt, explicitLeOrGov)) return false
             val dist = q.map { DeviceRegistry.metersBetween(cLat, cLon, it.lat, it.lon) }
             if (dist.max() > 4_000 || dist.average() < MIN_RADIUS_M) return false
             // How far the positions went around the average spot (a straight pass sweeps under 180 degrees).
@@ -235,6 +331,179 @@ object PoliceAircraft {
 
     /** One aircraft as last heard, with what it matched (null: ordinary traffic). */
     data class Seen(val plane: Plane, val hit: Hit?)
+
+    data class FlightFix(val timeMs: Long, val lat: Double, val lon: Double)
+
+    data class LandedSpot(
+        val hex: String,
+        val agencyId: String,
+        val lat: Double,
+        val lon: Double,
+        val hitCount: Int,
+        val updatedAtMs: Long
+    )
+
+    private const val LANDED_PREFS = "kokoho_landed_air"
+    private const val KEY_LANDED_JSON = "landed_spots_json"
+    private const val TRAIL_MAX_AGE_MS = 90 * 60_000L
+    private const val GROUNDED_RECENT_MS = 15 * 60_000L
+
+    private val airborneTrails = java.util.concurrent.ConcurrentHashMap<String, ArrayDeque<FlightFix>>()
+    private val groundedAtByHex = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val landedSpotsByKey = java.util.concurrent.ConcurrentHashMap<String, LandedSpot>()
+    @Volatile private var landedSpotsLoaded = false
+
+    fun recordAirborneFix(hex: String, lat: Double, lon: Double, nowMs: Long = System.currentTimeMillis()) {
+        val normHex = hex.trim().uppercase()
+        if (normHex.isEmpty()) return
+        groundedAtByHex.remove(normHex)
+        val q = airborneTrails.getOrPut(normHex) { ArrayDeque() }
+        synchronized(q) {
+            val last = q.lastOrNull()
+            if (last == null || (nowMs - last.timeMs >= 4_000L && DeviceRegistry.metersBetween(last.lat, last.lon, lat, lon) >= 75.0)) {
+                q.addLast(FlightFix(nowMs, lat, lon))
+            }
+            while (q.isNotEmpty() && nowMs - q.first().timeMs > TRAIL_MAX_AGE_MS) q.removeFirst()
+            while (q.size > 120) q.removeFirst()
+        }
+    }
+
+    fun recentAirborneTrail(
+        hex: String,
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = TRAIL_MAX_AGE_MS
+    ): List<Pair<Double, Double>> {
+        val normHex = hex.trim().uppercase()
+        if (normHex in currentlyGroundedHexes(nowMs)) return emptyList()
+        val q = airborneTrails[normHex] ?: return emptyList()
+        synchronized(q) {
+            while (q.isNotEmpty() && nowMs - q.first().timeMs > maxAgeMs) q.removeFirst()
+            val newest = q.lastOrNull() ?: return emptyList()
+            if (nowMs - newest.timeMs > 5 * 60_000L) return emptyList()
+            return q.map { it.lat to it.lon }
+        }
+    }
+
+    private fun ensureLandedLoaded(context: Context?) {
+        if (landedSpotsLoaded || context == null) return
+        synchronized(this) {
+            if (landedSpotsLoaded) return
+            runCatching {
+                val raw = context.getSharedPreferences(LANDED_PREFS, Context.MODE_PRIVATE)
+                    .getString(KEY_LANDED_JSON, null)
+                if (!raw.isNullOrBlank()) {
+                    val arr = com.google.gson.JsonParser.parseString(raw).asJsonArray
+                    for (el in arr) {
+                        val o = el.asJsonObject
+                        val key = o.get("key")?.asString ?: continue
+                        val spot = LandedSpot(
+                            hex = o.get("hex")?.asString ?: "",
+                            agencyId = o.get("agencyId")?.asString ?: "DHS_AMO",
+                            lat = o.get("lat")?.asDouble ?: continue,
+                            lon = o.get("lon")?.asDouble ?: continue,
+                            hitCount = o.get("hitCount")?.asInt ?: 1,
+                            updatedAtMs = o.get("updatedAtMs")?.asLong ?: 0L
+                        )
+                        landedSpotsByKey[key] = spot
+                    }
+                }
+            }
+            landedSpotsLoaded = true
+        }
+    }
+
+    private fun persistLandedSpots(context: Context) {
+        val arr = com.google.gson.JsonArray()
+        val sorted = landedSpotsByKey.entries
+            .sortedByDescending { it.value.updatedAtMs }
+            .take(64)
+        for ((k, s) in sorted) {
+            val o = JsonObject().apply {
+                addProperty("key", k)
+                addProperty("hex", s.hex)
+                addProperty("agencyId", s.agencyId)
+                addProperty("lat", s.lat)
+                addProperty("lon", s.lon)
+                addProperty("hitCount", s.hitCount)
+                addProperty("updatedAtMs", s.updatedAtMs)
+            }
+            arr.add(o)
+        }
+        context.getSharedPreferences(LANDED_PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_LANDED_JSON, arr.toString()).apply()
+    }
+
+    fun markGroundedAndRecordLanding(
+        context: Context?,
+        hex: String,
+        agencyId: String,
+        lat: Double,
+        lon: Double,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        val normHex = hex.trim().uppercase()
+        if (normHex.isEmpty()) return
+        groundedAtByHex[normHex] = nowMs
+        airborneTrails.remove(normHex)
+        ensureLandedLoaded(context)
+        val existingEntry = landedSpotsByKey.entries.firstOrNull { (_, s) ->
+            s.hex.equals(normHex, ignoreCase = true) && DeviceRegistry.metersBetween(s.lat, s.lon, lat, lon) <= 800.0
+        }
+        if (existingEntry != null) {
+            val prev = existingEntry.value
+            val n = prev.hitCount + 1
+            // Throttle updates within 2 minutes at the exact same landing pad so hitCount doesn't inflate on every poll
+            if (nowMs - prev.updatedAtMs >= 120_000L) {
+                landedSpotsByKey[existingEntry.key] = prev.copy(
+                    lat = ((prev.lat * prev.hitCount) + lat) / n,
+                    lon = ((prev.lon * prev.hitCount) + lon) / n,
+                    hitCount = n,
+                    updatedAtMs = nowMs
+                )
+                context?.let { persistLandedSpots(it) }
+            }
+        } else {
+            val key = "$normHex@${Math.round(lat * 100.0)}:${Math.round(lon * 100.0)}"
+            landedSpotsByKey[key] = LandedSpot(normHex, agencyId, lat, lon, 1, nowMs)
+            context?.let { persistLandedSpots(it) }
+        }
+    }
+
+    fun currentlyGroundedHexes(nowMs: Long = System.currentTimeMillis()): Set<String> {
+        groundedAtByHex.entries.removeIf { nowMs - it.value > GROUNDED_RECENT_MS }
+        val out = HashSet<String>(groundedAtByHex.keys)
+        for (seen in all(nowMs)) {
+            if (isGroundedOrParked(seen.plane)) {
+                out.add(seen.plane.hex.uppercase())
+            }
+        }
+        return out
+    }
+
+    fun landedSpots(context: Context?): List<LandedSpot> {
+        ensureLandedLoaded(context)
+        return landedSpotsByKey.values.toList()
+    }
+
+    /** 2-pass Chaikin corner cutting smoothing preserving start and end coordinates. */
+    fun chaikinSmooth(points: List<Pair<Double, Double>>, iterations: Int = 2): List<Pair<Double, Double>> {
+        if (points.size < 3 || iterations <= 0) return points
+        var cur = points
+        repeat(iterations) {
+            if (cur.size < 3) return cur
+            val next = ArrayList<Pair<Double, Double>>(cur.size * 2)
+            next.add(cur.first())
+            for (i in 0 until cur.size - 1) {
+                val p0 = cur[i]
+                val p1 = cur[i + 1]
+                next.add((0.75 * p0.first + 0.25 * p1.first) to (0.75 * p0.second + 0.25 * p1.second))
+                next.add((0.25 * p0.first + 0.75 * p1.first) to (0.25 * p0.second + 0.75 * p1.second))
+            }
+            next.add(cur.last())
+            cur = next
+        }
+        return cur
+    }
 
     /** Every aircraft from the latest poll, for the map; empty when the source is off. */
     @Volatile var latest: List<Seen> = emptyList()

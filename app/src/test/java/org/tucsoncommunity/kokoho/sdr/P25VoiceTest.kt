@@ -35,7 +35,14 @@ class P25VoiceTest {
         val d = IntArray(816)
         P25TestSignal.dibitsOf(P25Frame.nidCodeword(0x293 shl 4 or duid) shl 1, 32).copyInto(d)
         for (i in 0 until 9) codeword(voice[i]).copyInto(d, P25Voice.VOICE_AT[i])
-        hexWord(algid shr 2).copyInto(d, 452); hexWord(algid and 3 shl 4).copyInto(d, 457)
+        // Encryption sync (zero MI and key ID) or link control (zeros), with its Reed-Solomon parity.
+        val words = IntArray(24)
+        if (duid == P25Voice.DUID_LDU2) {
+            words[12] = algid shr 2
+            words[13] = (algid and 3) shl 4
+            P25ReedSolomon.encode(words, 8)
+        }
+        for (i in 0 until 24) hexWord(words[i]).copyInto(d, intArrayOf(176, 268, 360, 452, 544, 636)[i / 4] + 5 * (i % 4))
         hit(d)
         return withStatus(d)
     }
@@ -148,5 +155,66 @@ class P25VoiceTest {
         chunks(iq(IntArray(60) { it % 4 } + P25TestSignal.SYNC + ldu(P25Voice.DUID_LDU2, voice(8), algid = 0x84) + IntArray(60) { it % 4 }), enc::feed)
         assertTrue(enc.ended)
         assertEquals(0, later)
+    }
+
+    @Test
+    fun cqpskSimulcastPiOver4DqpskDecodesCleanlyWithEnvelopeNullsAndCrystalOffset() {
+        // Synthesize PCWIN-style CQPSK / LSM (pi/4-DQPSK) control-channel TSDU frames:
+        // Each symbol advances phase by ±pi/4 or ±3pi/4 and linearly interpolates complex I/Q across
+        // symbol centers (producing genuine mid-symbol AM envelope nulls on ±3pi/4 transitions!) + 650 Hz offset.
+        val blockBytes = byteArrayOf(0x80.toByte(), 0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x01)
+        val tsduFrame = P25TestSignal.frame(0x3A0, P25Frame.DUID_TSDU, P25TestSignal.block(blockBytes))
+        val allDibits = IntArray(80) { (it * 3 + 1) % 4 } +
+            P25TestSignal.SYNC + tsduFrame +
+            P25TestSignal.SYNC + tsduFrame +
+            IntArray(60) { it % 4 }
+
+        val rate = P25Demod.SAMPLE_RATE
+        val perSym = rate / P25Demod.SYMBOL_RATE
+        val iqBuf = ByteArray(allDibits.size * perSym * 2)
+        val rnd = java.util.Random(42)
+        var symPhase = 0.0
+        var carrierPhase = 0.0
+        val carrierStep = 2.0 * PI * (250_000.0 + 650.0) / rate
+        var k = 0
+        var prevR = 1.0
+        var prevI = 0.0
+        for (d in allDibits) {
+            val dPhi = when (d) {
+                1 -> 3.0 * PI / 4.0
+                0 -> PI / 4.0
+                2 -> -PI / 4.0
+                else -> -3.0 * PI / 4.0
+            }
+            symPhase += dPhi
+            val nextR = cos(symPhase)
+            val nextI = sin(symPhase)
+            for (m in 0 until perSym) {
+                // Raised-cosine crossfade between complex constellation points -> passes near (0,0) on ±3pi/4!
+                val w = 0.5 * (1.0 - cos(PI * (m + 1) / perSym))
+                val bbR = (1.0 - w) * prevR + w * nextR
+                val bbI = (1.0 - w) * prevI + w * nextI
+                carrierPhase += carrierStep
+                val cR = cos(carrierPhase)
+                val cI = sin(carrierPhase)
+                val rfI = bbR * cR - bbI * cI
+                val rfQ = bbR * cI + bbI * cR
+                iqBuf[k++] = (127.5 + 55.0 * rfI + rnd.nextGaussian() * 2.5).roundToInt().coerceIn(0, 255).toByte()
+                iqBuf[k++] = (127.5 + 55.0 * rfQ + rnd.nextGaussian() * 2.5).roundToInt().coerceIn(0, 255).toByte()
+            }
+            prevR = nextR
+            prevI = nextI
+        }
+
+        val decodedTsbks = ArrayList<P25Frame.Tsbk>()
+        val seenNacs = HashSet<Int>()
+        val demod = P25Demod(250_000.0) { frame ->
+            val dec = P25Frame.decode(frame)
+            dec.nid?.let { seenNacs += it.nac }
+            decodedTsbks += dec.tsbks
+        }
+        chunks(iqBuf, demod::feed)
+        assertTrue("CQPSK/LSM demodulator must decode PCWIN NAC 0x3A0, got $seenNacs", 0x3A0 in seenNacs)
+        assertTrue("CQPSK/LSM demodulator must recover CRC-valid TSBKs, got ${decodedTsbks.size}", decodedTsbks.size >= 1)
     }
 }

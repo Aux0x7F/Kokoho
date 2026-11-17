@@ -20,10 +20,21 @@ import kotlinx.coroutines.launch
 
 internal fun AppCompatActivity.logScreen(name: String, adapter: RecyclerView.Adapter<*>) =
     ActivityLogBinding.inflate(layoutInflater).also {
-        setContentView(it.root)
-        it.root.applySystemBarInsets()
-        title = name
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        val bg = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this)
+        it.root.setBackgroundColor(bg)
+        val header = KokohoJourneyUi.wrapActivityWithSubjourneyHeader(
+            activity = this,
+            contentView = it.root,
+            title = name,
+            bgColorArgb = bg,
+            menuItemsProvider = KokohoJourneyUi.optionsMenuBridge(this)
+        )
+        // Only show the ⋯ button if this Activity actually defines options menu items
+        val hasMenu = KokohoJourneyUi.optionsMenuBridge(this).invoke().isNotEmpty()
+        header.moreButton.visibility = if (hasMenu) View.VISIBLE else View.GONE
+        val shell = header.root.parent as View
+        setContentView(shell)
+        shell.applySystemBarInsets()
         it.recyclerView.layoutManager = LinearLayoutManager(this)
         it.recyclerView.adapter = adapter
     }
@@ -52,9 +63,9 @@ internal class DetectionRows<T>(
 
 internal fun AppCompatActivity.visualTitle(label: String) = TextView(this).apply {
     text = label
-    textSize = 12f
+    textSize = 12.5f
     setTypeface(typeface, Typeface.BOLD)
-    setTextColor(ChipStyle.accent(context).first)
+    setTextColor(KokohoJourneyUi.HIGHLIGHT_AMBER)
     letterSpacing = 0.08f
 }
 

@@ -52,4 +52,11 @@ interface DetectionDao {
 
     @Query("DELETE FROM detections")
     suspend fun clearAll()
+
+    @Query("""
+        DELETE FROM detections
+        WHERE label LIKE '%ICE-UHF-%'
+           OR category IN ('TRACKER', 'ALPR', 'CELL_ANOMALY')
+    """)
+    suspend fun purgeErroneousRecordsV116(): Int
 }

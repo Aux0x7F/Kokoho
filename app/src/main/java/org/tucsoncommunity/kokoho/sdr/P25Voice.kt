@@ -27,29 +27,52 @@ object P25Voice {
 
     /** Where the nine codewords start, in dibits after the NID's first (status symbols out). */
     internal val VOICE_AT = intArrayOf(32, 104, 196, 288, 380, 472, 564, 656, 744)
-    /** The LDU2's 4th group of hex words, after codeword 5: the algorithm ID is in its first two. */
-    private const val ALGID_AT = 452
+    /** Where the six 4-word (20-dibit) LC / ES hex-word groups start, between codewords 1-2, 2-3, ..., 6-7. */
+    internal val HEX_AT = intArrayOf(176, 268, 360, 452, 544, 636)
 
     /** A voice frame, or null when it isn't one (or its NID is beyond repair). */
-    fun decode(frame: IntArray): Frame? {
+    fun decode(frame: IntArray, soft: FloatArray? = null, nac: Int? = null): Frame? {
         val d = P25Frame.stripStatus(frame)
-        val nid = P25Frame.nid(d) ?: return null
+        val s = soft?.let(P25Frame::stripStatus)
+        val nid = P25Frame.nid(d, s, nac) ?: return null
         if (nid.duid != DUID_LDU1 && nid.duid != DUID_LDU2 || d.size < VOICE_AT.last() + 72) return null
-        val algid = if (nid.duid != DUID_LDU2) null else {
-            val a = hex(d, ALGID_AT); val b = hex(d, ALGID_AT + 5)
-            if (a == null || b == null) null else a shl 2 or (b shr 4)
-        }
+        // LDU2: 16 ES data words + 8 RS(24,16,9) parity words; the algorithm ID is the 15th and 16th words' first 8 bits.
+        val algid = if (nid.duid != DUID_LDU2) null else rsWords(d, 8)?.let { w -> w[12] shl 2 or (w[13] shr 4) }
         return Frame(nid, VOICE_AT.map { imbe(d, it) }, algid)
     }
 
-    /** A hex word (6 bits + 4 Hamming 10,6 parity, 5 dibits) at [at], corrected; null with more than one error. */
-    internal fun hex(d: IntArray, at: Int): Int? {
+    /**
+     * The 9 bytes (72 bits) of link control from an LDU1 after Hamming(10,6) on its 24 hex words and RS(24,12,13)
+     * across them; null when more than 6 hex words are damaged.
+     */
+    fun lc(d: IntArray): ByteArray? {
+        val w = rsWords(d, 12) ?: return null
+        val out = ByteArray(9)
+        var acc = 0; var bits = 0; var at = 0
+        for (i in 0 until 12) {
+            acc = acc shl 6 or w[i]; bits += 6
+            while (bits >= 8) { bits -= 8; out[at++] = (acc shr bits and 0xff).toByte() }
+        }
+        return out
+    }
+
+    /** The 24 hex words of an LDU, Hamming-corrected then Reed-Solomon corrected with [parity] = 12 (LDU1) or 8 (LDU2). */
+    internal fun rsWords(d: IntArray, parity: Int): IntArray? {
+        val w = IntArray(24) { k -> hex(d, HEX_AT[k / 4] + (k % 4) * 5, raw = true)!! }
+        return if (P25ReedSolomon.decode(w, parity) != null) w else null
+    }
+
+    /**
+     * A hex word (6 bits + 4 Hamming 10,6 parity, 5 dibits) at [at], single-bit corrected; with [raw] false, null when
+     * a 2-bit error is seen (with [raw] true, the raw 6 data bits are kept for Reed-Solomon to fix).
+     */
+    internal fun hex(d: IntArray, at: Int, raw: Boolean = false): Int? {
         var v = 0
         for (i in 0 until 5) v = v shl 2 or d[at + i]
         val syn = hexParity(v shr 4) xor (v and 0xf)
         if (syn == 0) return v shr 4
         val bit = HEX_SYNDROME[syn]
-        return if (bit < 0) null else (v xor (1 shl bit)) shr 4
+        return if (bit >= 0) (v xor (1 shl bit)) shr 4 else if (raw) v shr 4 else null
     }
 
     /** Hamming(10,6,3) parity of 6 data bits (TIA-102.BAAA; rows of G after its identity part). */

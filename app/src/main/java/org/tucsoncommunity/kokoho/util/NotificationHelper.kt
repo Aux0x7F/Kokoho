@@ -122,19 +122,37 @@ object NotificationHelper {
         if (stale) nm.cancel(DOWNLOAD_NOTIFICATION_ID)
     }
 
+    @Volatile private var cachedOpenAppPi: PendingIntent? = null
+    @Volatile private var cachedStopServicePi: PendingIntent? = null
+    @Volatile private var lastNotifiedSignature: String? = null
+    @Volatile private var lastNotifyAtMs: Long = 0L
+    @Volatile private var legacyCleanedOnce: Boolean = false
+
     /**
      * Brings the app back exactly like tapping its launcher icon: the existing
      * task comes to the front on whatever screen you left, or MainActivity
      * starts fresh if the app isn't open.
      */
     private fun openAppIntent(context: Context): PendingIntent {
-        val intent = Intent(context, MainActivity::class.java)
+        cachedOpenAppPi?.let { return it }
+        val app = context.applicationContext
+        val intent = Intent(app, MainActivity::class.java)
             .setAction(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
         return PendingIntent.getActivity(
-            context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+            app, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        ).also { cachedOpenAppPi = it }
+    }
+
+    private fun stopServiceIntent(context: Context): PendingIntent {
+        cachedStopServicePi?.let { return it }
+        val app = context.applicationContext
+        return PendingIntent.getService(
+            app, 1,
+            Intent(app, ScanForegroundService::class.java).setAction(ScanForegroundService.ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        ).also { cachedStopServicePi = it }
     }
 
     /**
@@ -144,7 +162,7 @@ object NotificationHelper {
      */
     fun currentPostureSummary(context: Context): Pair<String, String?> {
         val snap = runCatching {
-            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(context)
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.latestOrEvaluate(context, maxAgeMs = 3_000L)
         }.getOrNull()
         val groups = snap?.monitorGroups.orEmpty()
         if (groups.isEmpty()) {
@@ -173,11 +191,7 @@ object NotificationHelper {
     fun buildServiceNotification(context: Context, @Suppress("UNUSED_PARAMETER") text: String = ""): Notification {
         val discreet = Prefs.discreetMode(context)
         val (titleLine, subLine) = currentPostureSummary(context)
-        val stop = PendingIntent.getService(
-            context, 1,
-            Intent(context, ScanForegroundService::class.java).setAction(ScanForegroundService.ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val stop = stopServiceIntent(context)
         val builder = NotificationCompat.Builder(context, CHANNEL_SERVICE)
             .setContentTitle(if (discreet) "Kokoho" else titleLine)
             .setSmallIcon(R.drawable.ic_tile_scan)
@@ -191,15 +205,25 @@ object NotificationHelper {
         if (!discreet && !subLine.isNullOrBlank()) {
             builder.setContentText(subLine)
         }
+        lastNotifiedSignature = "$discreet|$titleLine|${subLine.orEmpty()}"
+        lastNotifyAtMs = System.currentTimeMillis()
         return builder.build()
     }
 
     fun updateServiceNotification(context: Context, text: String = "") {
         try {
+            val now = System.currentTimeMillis()
+            if (now - lastNotifyAtMs < 4_500L) return
+            val discreet = Prefs.discreetMode(context)
+            val (titleLine, subLine) = currentPostureSummary(context)
+            val sig = "$discreet|$titleLine|${subLine.orEmpty()}"
+            if (sig == lastNotifiedSignature && now - lastNotifyAtMs < 30_000L) return
             val nm = context.getSystemService(NotificationManager::class.java) ?: return
-            // Cancel any legacy multi-entry alert notifications so only the single persistent notification exists
-            runCatching {
-                nm.activeNotifications.filter { it.id >= ALERT_NOTIFICATION_ID_BASE }.forEach { nm.cancel(it.id) }
+            if (!legacyCleanedOnce) {
+                legacyCleanedOnce = true
+                runCatching {
+                    nm.activeNotifications.filter { it.id >= ALERT_NOTIFICATION_ID_BASE }.forEach { nm.cancel(it.id) }
+                }
             }
             nm.notify(SERVICE_NOTIFICATION_ID, buildServiceNotification(context, text))
         } catch (e: SecurityException) {

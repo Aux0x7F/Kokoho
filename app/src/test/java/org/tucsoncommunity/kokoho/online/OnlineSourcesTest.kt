@@ -52,6 +52,48 @@ class OnlineSourcesTest {
         assertTrue(h1.label.startsWith("Police aircraft overhead: "))
         assertEquals("Police aircraft overhead", org.tucsoncommunity.kokoho.util.Spoken.aircraft(h1, 300.0, 0.0))
         assertEquals("Police aircraft, 2 kilometers northeast", org.tucsoncommunity.kokoho.util.Spoken.aircraft(h1, 2000.0, 50.0))
+        assertEquals(
+            null,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifyAircraftAgency(
+                "UNITED STATES AIR FORCE", "N16TG", "GLIDER1", "Military / government aircraft nearby", type = "TG16", hex = "ae1234", speedKt = 65.0
+            )
+        )
+        assertEquals(
+            null,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifyAircraftAgency(
+                "ARIZONA ARMY NATIONAL GUARD", "20-2111", "R2111", "Government aircraft: National Guard", type = "UH72", hex = "ae5678", speedKt = 95.0
+            )
+        )
+        assertEquals(
+            null,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifyAircraftAgency(
+                "SOUTHWEST AIRLINES", "N834SW", "SWA123", null, type = "B738", hex = "ab1234", speedKt = 240.0
+            )
+        )
+        val groundWithGeom = PoliceAircraft.parseFeed(
+            """{"now":1,"aircraft":[{"hex":"a99999","flight":"N72PD","t":"H60","lat":32.11,"lon":-110.94,"alt_baro":"ground","alt_geom":2650,"gs":2.0}]}"""
+        ).single()
+        assertTrue(groundWithGeom.onGround)
+        assertEquals(0, groundWithGeom.altitudeFt)
+        assertTrue(PoliceAircraft.isGroundedOrParked(groundWithGeom))
+        val motorglider = PoliceAircraft.Plane(
+            hex = "a6692f", callsign = null, registration = "N512DG", type = "Motorglider",
+            owner = null, lat = 32.1, lon = -111.0, altitudeFt = 5175, speedKt = 68.0,
+            trackDeg = 180.0, military = true
+        )
+        assertNull(PoliceAircraft.classify(motorglider, registry, circling = false, distanceM = 4500.0))
+        assertEquals(
+            null,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifyAircraftAgency(
+                null, "N512DG", null, "Military / government aircraft nearby", type = "Motorglider", hex = "a6692f", speedKt = 68.0
+            )
+        )
+        assertEquals(
+            org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifyAircraftAgency(
+                "US CUSTOMS AND BORDER PROTECTION", "N123BP", "OMAHA1", "Police aircraft overhead: US Customs"
+            )
+        )
     }
 
     @Test

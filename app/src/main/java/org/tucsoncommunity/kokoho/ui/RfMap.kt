@@ -45,9 +45,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
 
         private const val PRECISION = "rf-precision"; private const val CONES = "rf-cctv-cones"
         private const val CAM_CONES = "rf-camera-cones"
+        private const val HEAT = "rf-kokoho-heat"
+        private const val FLIGHT_TRACKS = "rf-flight-tracks"
         private const val TRACE = "rf-trace"; private const val DRONE_LINES = "rf-drone-lines"
         private const val TOWERS = "rf-towers"; private const val CCTV = "rf-cctv"; private const val CAMERAS = "rf-cameras"
         private const val DEVICES = "rf-devices"; private const val DOTS = "rf-device-dots"; private const val LABELS = "rf-device-labels"
+        private const val LOCATIONS = "rf-kokoho-locations"; private const val LOCATION_LABELS = "rf-kokoho-location-labels"
+        private const val DROPPED_POINT = "rf-dropped-point"; private const val SELECTED_PIN = "rf-selected-pin"
         private const val WAZE = "rf-waze"; private const val DRONE_OPS = "rf-drone-ops"; private const val DRONES = "rf-drones"
         private const val AIRCRAFT = "rf-aircraft"
         private const val PINGS = "rf-pings"
@@ -81,11 +85,39 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     var cctvLine: String? = null; private set
     /** Cell towers with a position (the Cells chip's count). */
     var towerCount = 0; private set
+    sealed class MapSelection {
+        data class Detection(
+            val entityUuid: String,
+            val title: String,
+            val subtitle: String,
+            val agencyCode: String,
+            val lat: Double,
+            val lon: Double,
+            val radiusM: Int?
+        ) : MapSelection()
+
+        data class Facility(
+            val location: org.tucsoncommunity.kokoho.posture.KokohoDirectory.FacilityLocation
+        ) : MapSelection()
+
+        data class DroppedPoint(
+            val lat: Double,
+            val lon: Double
+        ) : MapSelection()
+    }
+
+    /** Invoked on live map when the user taps a detection, facility location, or picks an entity from a cluster. */
+    var onSelectTarget: ((MapSelection) -> Unit)? = null
+    /** Invoked on live map when the user taps empty map space. */
+    var onTapEmpty: (() -> Unit)? = null
+
     /** After a camera download or an ignore changed what's on the map. */
     var onStaticChanged: (() -> Unit)? = null
 
     // What's on the map now, to find what a tap hit.
     private var pins: Map<String, MapPin> = emptyMap()
+    private var locationsById: Map<String, org.tucsoncommunity.kokoho.posture.KokohoDirectory.FacilityLocation> = emptyMap()
+    private var activeSelection: MapSelection? = null
     private var wazeShown: Map<String, WazePolice.Shown> = emptyMap()
     private var planes: Map<String, PoliceAircraft.Seen> = emptyMap()
     private var drones: Map<String, DeviceRegistry.Snapshot> = emptyMap()
@@ -108,6 +140,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     private var staticCctv = false
     private var lastCameraFetch = 0L
     private var lastCctvFetch = 0L
+    private val sourceJsonCache = HashMap<String, String>()
+    private var locationsDrawnKey: String? = null
+    private var staticCleared = false
 
     /** Loads the light or night style; [onLoaded] once its layers are in. */
     fun loadStyle(dark: Boolean, onLoaded: () -> Unit) {
@@ -115,6 +150,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         map.setStyle(dark) { fresh ->
             if (activity.isFinishing || activity.isDestroyed) return@setStyle
             if (fresh || !map.hasSource(DEVICES)) safe("style") {
+                sourceJsonCache.clear()
+                locationsDrawnKey = null
+                staticCleared = false
                 addImages()
                 addLayers(dark)
             } else safe("style") {
@@ -127,6 +165,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             staticBox = null
             wigleDrawn = null
             askedDrawn = null
+            locationsDrawnKey = null
+            staticCleared = false
             safe("loaded") { onLoaded() }
         }
     }
@@ -139,8 +179,11 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         try { block() } catch (e: Exception) { android.util.Log.w("RfMap", "$what failed", e) }
     }
 
-    /** The same icons as before. */
+    private val registeredBadgeIcons = HashSet<String>()
+
+    /** The same icons as before, plus agency classification badge bitmaps. */
     private fun addImages() {
+        registeredBadgeIcons.clear()
         val dp = activity.resources.displayMetrics.density
         KnownCamera.Kind.entries.forEach { map.addImage("rf-cam-${it.name}", MapIcons.cameraIcon(dp, it)) }
         map.addImage("rf-cctv-public", MapIcons.cctvIcon(dp, false))
@@ -150,11 +193,44 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         map.addImage("rf-plane-clear", MapIcons.planeIcon(dp, false, clear = true))
         map.addImage("rf-tower", MapIcons.towerIcon(dp))
         map.addImage("rf-drone", droneArrow(dp))
+        map.addImage("rf-dropped-pin", MapIcons.droppedPinIcon(dp))
+        map.addImage("rf-selection-ring", MapIcons.selectionRingIcon(dp))
+        map.addImage("rf-facility-fire", MapIcons.facilityBadgeIcon(dp, 0xFFDC2626.toInt(), isFire = true))
+        for (agency in org.tucsoncommunity.kokoho.posture.KokohoAgency.entries) {
+            val facId = "rf-facility-${agency.id}"
+            map.addImage(facId, MapIcons.facilityBadgeIcon(dp, agency.mapColorArgb, isFire = false))
+            registeredBadgeIcons += facId
+        }
+        for (kind in MapIcons.BadgeIconKind.entries) {
+            for (agency in org.tucsoncommunity.kokoho.posture.KokohoAgency.entries) {
+                val id = "rf-badge-${kind.id}-${agency.id}"
+                map.addImage(
+                    id,
+                    MapIcons.classificationBadgeIcon(dp, kind, agency.mapColorArgb)
+                )
+                registeredBadgeIcons += id
+            }
+        }
+    }
+
+    private fun ensureBadgeIcon(kind: MapIcons.BadgeIconKind, colorArgb: Int, agencyId: String): String {
+        val hexPart = String.format("%06X", colorArgb and 0xFFFFFF)
+        val agency = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(agencyId)
+        val iconId = if (agency != null && (agency.mapColorArgb and 0xFFFFFF) == (colorArgb and 0xFFFFFF)) {
+            "rf-badge-${kind.id}-${agency.id}"
+        } else {
+            "rf-badge-${kind.id}-$hexPart"
+        }
+        if (registeredBadgeIcons.add(iconId)) {
+            val dp = activity.resources.displayMetrics.density
+            map.addImage(iconId, MapIcons.classificationBadgeIcon(dp, kind, colorArgb))
+        }
+        return iconId
     }
 
     /** Every layer, as map style JSON (the same on both engines). */
     private fun addLayers(dark: Boolean) {
-        listOf(NAV_ROUTES, NAV_PLACES, PRECISION, CONES, CAM_CONES, TRACE, DRONE_LINES, TOWERS, CCTV, CAMERAS, PINGS, DEVICES, WIGLE, ASKED, WAZE, DRONE_OPS, DRONES, AIRCRAFT)
+        listOf(NAV_ROUTES, NAV_PLACES, HEAT, PRECISION, CONES, CAM_CONES, FLIGHT_TRACKS, TRACE, DRONE_LINES, TOWERS, CCTV, CAMERAS, LOCATIONS, PINGS, DEVICES, WIGLE, ASKED, WAZE, DRONE_OPS, DRONES, AIRCRAFT, DROPPED_POINT, SELECTED_PIN)
             .forEach { map.addSource(it) }
         fun get(k: String) = a("get", k)
         val color = a("to-color", get("color"))
@@ -188,15 +264,33 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("line-color" to "#FFFFFF", "line-width" to 11.0)),
             layer("$NAV_ROUTES-line", "line", NAV_ROUTES, filter = a("==", get("sel"), true), layout = routeLine,
                 paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0)),
-            // Flagged signal radius circles (distance radius circle or triangulated position circle).
-            layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to a("*", 0.34, get("opacity")))),
-            layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("*", 0.95, get("opacity")))),
+            // 50% transparent heatmap overlay (ground hotspots + generally landed aircraft zones).
+            layer(HEAT, "heatmap", paint = o(
+                "heatmap-weight" to a("coalesce", get("weight"), 1.0),
+                "heatmap-intensity" to 1.05,
+                "heatmap-radius" to a("interpolate", a("linear"), a("zoom"), 9, 18.0, 12, 30.0, 15, 44.0),
+                "heatmap-opacity" to 0.50,
+                "heatmap-color" to a(
+                    "interpolate", a("linear"), a("heatmap-density"),
+                    0.0, "rgba(0,0,0,0)",
+                    0.2, "rgba(59,130,246,0.55)",
+                    0.45, "rgba(168,85,247,0.72)",
+                    0.7, "rgba(249,115,22,0.85)",
+                    1.0, "rgba(239,68,68,0.95)"
+                )
+            )),
+            // Flagged signal radius / centroid bubbles (50% transparent fill so the basemap reads cleanly through).
+            layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to a("*", 0.50, get("opacity")))),
+            layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("*", 0.92, get("opacity")))),
             // What each CCTV camera watches (zoomed in).
             layer("$CONES-fill", "fill", CONES, minzoom = CCTV_CONE_ZOOM, paint = o("fill-color" to color, "fill-opacity" to get("opacity"))),
             // Which way each plate, speed and red-light camera faces (when mapped), in its icon's colour.
             layer("$CAM_CONES-fill", "fill", CAM_CONES, minzoom = CAMERA_CONE_ZOOM, paint = o("fill-color" to color, "fill-opacity" to get("opacity"))),
             layer("$CAM_CONES-line", "line", CAM_CONES, minzoom = CAMERA_CONE_ZOOM,
                 paint = o("line-color" to color, "line-width" to 1.2, "line-opacity" to a("*", get("opacity"), 2.5))),
+            // Thin Chaikin-smoothed flight tracks (current in-flight for <=3h, all 24h tracks for 24h).
+            layer(FLIGHT_TRACKS, "line", layout = o("line-cap" to "round", "line-join" to "round"),
+                paint = o("line-color" to color, "line-width" to 2.0, "line-opacity" to a("coalesce", get("opacity"), 0.82))),
             layer(TRACE, "line", layout = o("line-cap" to "round", "line-join" to "round"),
                 paint = o("line-color" to color, "line-width" to 5.0)),
             layer(DRONE_LINES, "line", paint = o("line-color" to DRONE_COLOR, "line-width" to 2.5, "line-dasharray" to a(4.0, 2.5))),
@@ -205,16 +299,29 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // Plate, speed and red-light cameras; the ones whose alerts you turned off, faded.
             layer(CAMERAS, "symbol", minzoom = CAMERAS_MIN_ZOOM, layout = o("icon-image" to get("icon"), *overlap),
                 paint = o("icon-opacity" to get("opacity"))),
+            // Directory Locations (DHS facilities visible from city/state zoom >= 7, municipal police/sheriff/fire from >= 10.5).
+            layer("$LOCATIONS-fed", "symbol", LOCATIONS, minzoom = 7.0, filter = a("==", get("federal"), true),
+                layout = o("icon-image" to get("icon"), "icon-size" to 0.96, *overlap)),
+            layer("$LOCATIONS-local", "symbol", LOCATIONS, minzoom = 10.5, filter = a("==", get("federal"), false),
+                layout = o("icon-image" to get("icon"), "icon-size" to 0.86, *overlap)),
+            layer("$LOCATION_LABELS-fed", "symbol", LOCATIONS, minzoom = 11.0, filter = a("==", get("federal"), true),
+                layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 12.5, "text-anchor" to "top",
+                    "text-offset" to a(0.0, 1.15), "text-optional" to true),
+                paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0)),
+            layer("$LOCATION_LABELS-local", "symbol", LOCATIONS, minzoom = 13.0, filter = a("==", get("federal"), false),
+                layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 11.5, "text-anchor" to "top",
+                    "text-offset" to a(0.0, 1.1), "text-optional" to true),
+                paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 1.8)),
             // A saved trace's every sighting of each device (Settings › Log every sighting in traces): small, under the devices.
             layer(PINGS, "circle", paint = o("circle-color" to color, "circle-radius" to 3.0, "circle-opacity" to 0.8)),
-            // Devices: only drawn as a center dot when narrow enough to be a point (showDot == true).
-            layer(DOTS, "circle", DEVICES, filter = a("==", get("showDot"), true),
-                layout = o("circle-sort-key" to a("case", flagged, 1.0, 0.0)),
-                paint = o("circle-color" to color, "circle-radius" to a("case", flagged, 8.0, 5.0),
-                    "circle-stroke-color" to "#FFFFFF", "circle-stroke-width" to 1.5, "circle-opacity" to get("opacity"))),
+            // Devices: circular agency-colored icon badge when narrow enough to show a point (showDot == true).
+            layer(DOTS, "symbol", DEVICES, filter = a("==", get("showDot"), true),
+                layout = o("icon-image" to get("icon"), "icon-size" to 0.92, *overlap,
+                    "symbol-sort-key" to a("case", flagged, 1.0, 0.0)),
+                paint = o("icon-opacity" to get("opacity"))),
             layer(LABELS, "symbol", DEVICES, filter = flagged,
                 layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 13.0, "text-anchor" to "top",
-                    "text-offset" to a(0.0, 0.6), "text-optional" to true),
+                    "text-offset" to a(0.0, 1.15), "text-optional" to true),
                 paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0, "text-opacity" to get("opacity"))),
             // Networks pinned from a WiGLE search: purple, with their name.
             layer(WIGLE, "circle", paint = o("circle-color" to WIGLE_COLOR, "circle-radius" to 7.0,
@@ -233,29 +340,30 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // Waze reports: blue police, red accident, orange hazard, brown closure, purple jam.
             layer(WAZE, "circle", paint = o("circle-color" to color, "circle-radius" to 9.0,
                 "circle-stroke-color" to "#FFFFFF", "circle-stroke-width" to 2.0)),
-            // A drone's operator / take-off point, and the drone pointing its way.
+            // A drone's operator / take-off point, and the drone badge.
             layer(DRONE_OPS, "circle", paint = o("circle-color" to "#F5E100", "circle-radius" to 7.0,
                 "circle-stroke-color" to DRONE_COLOR, "circle-stroke-width" to 2.0)),
             layer(DRONES, "symbol",
-                layout = o("icon-image" to "rf-drone", "icon-rotate" to get("dir"),
-                    "icon-rotation-alignment" to "map", *overlap,
+                layout = o("icon-image" to get("icon"), "icon-size" to 0.92,
+                    "icon-rotation-alignment" to "viewport", *overlap,
                     "text-field" to get("label"), "text-font" to font, "text-size" to 12.0, "text-anchor" to "top",
                     "text-offset" to a(0.0, 1.4), "text-optional" to true),
                 paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0)),
-            // Aircraft: police / government ones bold purple with their agency and altitude, others small and grey
-            // (under the Aircraft filter: every one large and labelled).
             // Where the route ends (red) and the stops on the way (white with a blue edge), above everything else.
             layer("$NAV_PLACES-pin", "circle", NAV_PLACES, paint = o(
                 "circle-color" to a("case", a("==", get("end"), true), "#D93025", "#FFFFFF"), "circle-radius" to 9.0,
                 "circle-stroke-color" to a("case", a("==", get("end"), true), "#FFFFFF", NAV_ROUTE_COLOR), "circle-stroke-width" to 3.0)),
             layer(AIRCRAFT, "symbol", layout = o("icon-image" to get("icon"), "icon-rotate" to get("track"),
                 "icon-rotation-alignment" to "map",
-                "icon-size" to a("interpolate", a("linear"), a("zoom"), 9, a("case", a("==", get("clear"), true), 1.0, 0.5), 12, 1.0, 16, 2.0),
+                "icon-size" to a("interpolate", a("linear"), a("zoom"), 9, 0.82, 12, 0.98, 16, 1.2),
                 *overlap, "symbol-sort-key" to a("case", flagged, 1.0, 0.0),
                 "text-field" to get("label"), "text-font" to font, "text-size" to 12.0, "text-anchor" to "top",
-                "text-offset" to a(0.0, 1.6), "text-optional" to true),
-                paint = o("text-color" to "#FFFFFF", "text-halo-color" to a("case", flagged, hex(MapIcons.POLICE_AIRCRAFT_COLOR),
-                    hex(MapIcons.CLEAR_AIRCRAFT_COLOR)), "text-halo-width" to 3.0))
+                "text-offset" to a(0.0, 1.5), "text-optional" to true),
+                paint = o("text-color" to "#FFFFFF", "text-halo-color" to a("coalesce", get("color"), hex(MapIcons.POLICE_AIRCRAFT_COLOR)),
+                    "text-halo-width" to 3.0)),
+            // User-dropped map point & active map selection halo ring.
+            layer(DROPPED_POINT, "symbol", layout = o("icon-image" to "rf-dropped-pin", "icon-size" to 1.0, *overlap)),
+            layer(SELECTED_PIN, "symbol", layout = o("icon-image" to "rf-selection-ring", "icon-size" to 1.0, *overlap))
         ).forEach { map.addLayer(it) }
     }
 
@@ -265,7 +373,10 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     private fun ready() = map.styleLoaded
 
     private fun set(source: String, features: List<JSONObject>) {
-        map.setData(source, GeoJson.collection(features))
+        val json = GeoJson.collection(features)
+        if (sourceJsonCache[source] == json) return
+        sourceJsonCache[source] = json
+        map.setData(source, json)
     }
 
     /** Devices (and their radius circles); returns what was drawn. */
@@ -279,11 +390,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             } else {
                 p.lat to p.lon
             }
+            val iconId = ensureBadgeIcon(p.iconKind, p.color, p.agencyId)
             GeoJson.feature(
                 GeoJson.point(labelLat, labelLon),
                 "mac" to p.mac,
                 "label" to p.label.take(48),
                 "color" to hex(p.color),
+                "icon" to iconId,
                 "flagged" to p.flagged,
                 "showDot" to p.showDot,
                 "opacity" to p.opacity
@@ -297,6 +410,18 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 "opacity" to p.opacity
             )
         })
+    }
+
+    /** Draws a single drone's operator pin and tether line on detail views (clears when opLat/opLon are null). */
+    fun drawSingleDroneOperator(uuid: String, droneLat: Double, droneLon: Double, opLat: Double?, opLon: Double?) {
+        if (!ready()) return
+        if (opLat == null || opLon == null) {
+            set(DRONE_OPS, emptyList())
+            set(DRONE_LINES, emptyList())
+            return
+        }
+        set(DRONE_OPS, listOf(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to uuid)))
+        set(DRONE_LINES, listOf(GeoJson.feature(GeoJson.line(listOf(opLat to opLon, droneLat to droneLon)), "mac" to uuid)))
     }
 
     /** Every sighting of the drawn devices in a saved trace, in each device's colour (draw after [drawPins]). */
@@ -325,6 +450,62 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             listOfNotNull(end?.let { GeoJson.feature(GeoJson.point(it.first, it.second), "end" to true) }))
     }
 
+    /** Draws or clears the active selection ring and optional dropped-point pin. */
+    fun drawSelection(selection: MapSelection?) {
+        activeSelection = selection
+        if (!ready()) return
+        when (selection) {
+            null -> {
+                set(DROPPED_POINT, emptyList())
+                set(SELECTED_PIN, emptyList())
+            }
+            is MapSelection.DroppedPoint -> {
+                set(DROPPED_POINT, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
+                set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
+            }
+            is MapSelection.Detection -> {
+                set(DROPPED_POINT, emptyList())
+                set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
+            }
+            is MapSelection.Facility -> {
+                set(DROPPED_POINT, emptyList())
+                set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.location.lat, selection.location.lon))))
+            }
+        }
+    }
+
+    /** Draws civic/facility Location pins, skipping GeoJSON rebuilds whenever visibility filters are unchanged. */
+    fun drawLocations() {
+        if (!ready()) return
+        if (tripMode) {
+            if (locationsDrawnKey == "trip") return
+            locationsDrawnKey = "trip"
+            locationsById = emptyMap()
+            set(LOCATIONS, emptyList())
+            return
+        }
+        val visible = org.tucsoncommunity.kokoho.posture.KokohoDirectory.visibleLocations(activity)
+        val key = "${visible.size}|${visible.firstOrNull()?.id.orEmpty()}|${visible.lastOrNull()?.id.orEmpty()}"
+        if (key == locationsDrawnKey) return
+        locationsDrawnKey = key
+        locationsById = visible.associateBy { it.id }
+        set(LOCATIONS, visible.map { loc ->
+            val isFire = loc.locationGroup.equals("FIRE", ignoreCase = true) ||
+                loc.title.contains("Fire", ignoreCase = true) ||
+                loc.description.contains("Fire", ignoreCase = true)
+            val ag = loc.agency
+            val iconId = if (isFire) "rf-facility-fire" else "rf-facility-${ag.id}"
+            val isFed = loc.locationGroup.equals("FEDERAL", ignoreCase = true) || ag.isDhs
+            GeoJson.feature(
+                GeoJson.point(loc.lat, loc.lon),
+                "id" to loc.id,
+                "label" to loc.title.take(44),
+                "icon" to iconId,
+                "federal" to isFed
+            )
+        })
+    }
+
     /** A route: the trace being recorded (orange) or a saved one (blue). */
     fun drawTrace(points: List<Pair<Double, Double>>, color: String) {
         if (!ready()) return
@@ -334,15 +515,19 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     /**
      * Fast-changing live layers: draws ONLY Kokoho's active flagged agency detections
      * (with overlapping radii collapsed into single circles labeled with comma-separated agencies,
-     * 30m solid + 2h staleness fade, pinpointed Pro/Enterprise/RemoteID drones with altitude,
+     * rolling window radius/staleness fade, pinpointed Pro/Enterprise/RemoteID drones with altitude,
      * and ADS-B aircraft with tap-to-view flight tracks).
      */
-    fun drawLive(@Suppress("UNUSED_PARAMETER") devices: List<DeviceRegistry.Snapshot>): List<MapPin> {
+    fun drawLive(
+        @Suppress("UNUSED_PARAMETER") devices: List<DeviceRegistry.Snapshot>,
+        precomputedSnap: org.tucsoncommunity.kokoho.posture.PostureSnapshot? = null
+    ): List<MapPin> {
         if (!ready()) return emptyList()
-        val snap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(activity)
+        val snap = precomputedSnap ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(activity)
         val nowMs = System.currentTimeMillis()
         val fallbackLat = ScanForegroundService.lastFix?.latitude ?: map.camera.lat.takeIf { kotlin.math.abs(it) > 1e-4 } ?: 32.2226
         val fallbackLon = ScanForegroundService.lastFix?.longitude ?: map.camera.lon.takeIf { kotlin.math.abs(it) > 1e-4 } ?: -110.9747
+        val timeWindow = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
 
         val groundThreats = snap.mapThreats.filter {
             !it.isAircraft &&
@@ -350,75 +535,162 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
         val zoom = map.camera.zoom
+        val zoomMergeM = org.tucsoncommunity.kokoho.posture.KokohoSignatures.zoomGravityMergeRadiusM(zoom)
+
+        data class ThreatNode(
+            val threat: org.tucsoncommunity.kokoho.posture.EvaluatedThreat,
+            val lat: Double,
+            val lon: Double,
+            val radiusM: Double,
+            val mass: Double
+        )
 
         data class MergedCluster(
-            val threats: MutableList<org.tucsoncommunity.kokoho.posture.EvaluatedThreat>,
+            val nodes: MutableList<ThreatNode>,
             var lat: Double,
             var lon: Double,
-            var radiusM: Double
+            var radiusM: Double,
+            var totalMass: Double
         )
 
         val clusters = mutableListOf<MergedCluster>()
         for (t in groundThreats) {
             val rawLat = t.lat ?: fallbackLat
             val rawLon = t.lon ?: fallbackLon
-            // Display derived positions and narrow (<= 200 ft / 61 m) circles as derived;
-            // only jitter wide (200ft+) uncorroborated single-sample circles.
-            val isDerivedOrNarrow = t.isApproximatedPosition ||
-                t.sightingCount >= 2 ||
-                t.uncertaintyRadiusM <= org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.WIDE_CIRCLE_JITTER_MIN_M
-            val (lat, lon) = if (isDerivedOrNarrow) {
-                rawLat to rawLon
-            } else {
-                org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.deriveJitteredCenter(t.uuid, rawLat, rawLon, t.uncertaintyRadiusM)
-            }
+            val lat = rawLat
+            val lon = rawLon
             val r = if (t.isPinpointed) 0.0 else t.mapCircleRadiusM.toDouble()
-            val match = clusters.firstOrNull { c ->
-                val d = DeviceRegistry.metersBetween(lat, lon, c.lat, c.lon)
-                // Multiple colocated derived dots collapse into one aggregate centroid until closer zoom levels (>= 15.5)
-                val bothDerivedDots = (isDerivedOrNarrow && r <= 180.0) && c.radiusM <= 180.0
-                val overlapThreshold = if (bothDerivedDots && zoom >= 15.5) {
-                    14.0
-                } else {
-                    kotlin.math.max(95.0, kotlin.math.min(r, c.radiusM) * 0.65)
+            val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
+            val node = ThreatNode(t, lat, lon, r, mass)
+            val match = if (zoomMergeM <= 0.0) {
+                null
+            } else {
+                clusters.firstOrNull { c ->
+                    val d = DeviceRegistry.metersBetween(lat, lon, c.lat, c.lon)
+                    d <= zoomMergeM
                 }
-                d <= overlapThreshold
             }
             if (match != null) {
-                match.threats += t
-                val n = match.threats.size.toDouble()
-                match.lat = ((match.lat * (n - 1.0)) + lat) / n
-                match.lon = ((match.lon * (n - 1.0)) + lon) / n
+                val nextMass = match.totalMass + mass
+                match.lat = ((match.lat * match.totalMass) + (lat * mass)) / nextMass
+                match.lon = ((match.lon * match.totalMass) + (lon * mass)) / nextMass
+                match.totalMass = nextMass
+                match.nodes += node
                 if (r > 0.0 && (match.radiusM == 0.0 || r < match.radiusM)) {
                     match.radiusM = r
                 }
             } else {
-                clusters += MergedCluster(mutableListOf(t), lat, lon, r)
+                clusters += MergedCluster(mutableListOf(node), lat, lon, r, mass)
             }
         }
 
+        // Second-pass gravity convergence: merge any clusters whose gravity centers shifted within zoom proximity
+        if (zoomMergeM > 0.0) {
+            var i = 0
+            while (i < clusters.size) {
+                var j = i + 1
+                while (j < clusters.size) {
+                    val c1 = clusters[i]
+                    val c2 = clusters[j]
+                    val d = DeviceRegistry.metersBetween(c1.lat, c1.lon, c2.lat, c2.lon)
+                    if (d <= zoomMergeM) {
+                        val nextMass = c1.totalMass + c2.totalMass
+                        c1.lat = ((c1.lat * c1.totalMass) + (c2.lat * c2.totalMass)) / nextMass
+                        c1.lon = ((c1.lon * c1.totalMass) + (c2.lon * c2.totalMass)) / nextMass
+                        c1.totalMass = nextMass
+                        c1.nodes.addAll(c2.nodes)
+                        if (c2.radiusM > 0.0 && (c1.radiusM == 0.0 || c2.radiusM < c1.radiusM)) {
+                            c1.radiusM = c2.radiusM
+                        }
+                        clusters.removeAt(j)
+                    } else {
+                        j++
+                    }
+                }
+                i++
+            }
+        } else {
+            // When zoomed way in (zoom >= 15.5, zoomMergeM == 0.0), split co-located pucks (< 4.5m apart)
+            // onto a small 5.5m radial ring so every probable agent has its own visible, tappable puck.
+            val visited = BooleanArray(clusters.size)
+            for (idx in clusters.indices) {
+                if (visited[idx]) continue
+                val coloc = mutableListOf(idx)
+                visited[idx] = true
+                for (jdx in idx + 1 until clusters.size) {
+                    if (visited[jdx]) continue
+                    val d = DeviceRegistry.metersBetween(
+                        clusters[idx].lat, clusters[idx].lon,
+                        clusters[jdx].lat, clusters[jdx].lon
+                    )
+                    if (d < 4.5) {
+                        coloc += jdx
+                        visited[jdx] = true
+                    }
+                }
+                if (coloc.size > 1) {
+                    val baseLat = coloc.sumOf { clusters[it].lat } / coloc.size
+                    val baseLon = coloc.sumOf { clusters[it].lon } / coloc.size
+                    val ringR = 5.5
+                    for ((k, cIdx) in coloc.withIndex()) {
+                        val bearing = 360.0 * k / coloc.size
+                        val (offLat, offLon) = MapGeo.offset(baseLat, baseLon, ringR, bearing)
+                        clusters[cIdx].lat = offLat
+                        clusters[cIdx].lon = offLon
+                    }
+                }
+            }
+        }
+
+        // Pure gravity-centered centroid bubbles (no blurry heatmap layer overlay)
+        set(HEAT, emptyList())
+        drawLocations()
+
         val shown = clusters.map { c ->
-            val sorted = c.threats.sortedWith(
+            val threats = c.nodes.map { it.threat }
+            val sorted = threats.sortedWith(
                 compareBy<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> { it.agency.priorityRank }
                     .thenBy { it.nearestEdgeDistanceM }
             )
             val lead = sorted.first()
-            val agenciesInline = sorted.map { it.friendlyLabel }.distinct().joinToString(", ")
+            val agenciesInline = if (sorted.size == 1) {
+                lead.title.ifBlank { lead.friendlyLabel }
+            } else {
+                sorted.map { t ->
+                    if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) t.label else t.friendlyLabel
+                }.distinct().joinToString(", ")
+            }
             val newestMs = sorted.maxOf { it.lastSeenMs }
+            val ageMs = (nowMs - newestMs).coerceAtLeast(0L)
             val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, newestMs)
             val totalSightings = sorted.sumOf { it.sightingCount.coerceAtLeast(1) }
             val distinctSignals = sorted.sumOf { it.evidenceCount.coerceAtLeast(1) }
             val effRadiusM = if (c.radiusM > 0.0) c.radiusM.toInt() else lead.uncertaintyRadiusM
             val opacity = org.tucsoncommunity.kokoho.posture.KokohoSignatures.mapCorroborationOpacity(
                 activity,
-                nowMs - newestMs,
+                ageMs,
                 totalSightings,
                 distinctSignals,
                 effRadiusM
             ).toDouble()
-            val accText = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, lead.uncertaintyRadiusM)}"
+            val windowExpandedRadiusM = org.tucsoncommunity.kokoho.posture.KokohoSignatures.projectRollingRadiusM(
+                timeWindow,
+                ageMs,
+                effRadiusM,
+                isPinpointed = false
+            )
+            val accText = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, windowExpandedRadiusM)}"
             val isPinpointed = sorted.all { it.isPinpointed }
-            val radius = if (isPinpointed) null else c.radiusM.coerceAtLeast(35.0)
+            val radius = if (isPinpointed) {
+                null
+            } else {
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.projectRollingRadiusM(
+                    timeWindow,
+                    ageMs,
+                    c.radiusM.coerceAtLeast(35.0).toInt(),
+                    isPinpointed = false
+                ).toDouble()
+            }
             val fullDist = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatUserDistance(activity, lead.nearestEdgeDistanceM, lead.uncertaintyRadiusM)
             val note = when {
                 !lead.isApproximatedPosition ->
@@ -430,21 +702,55 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
             val unitLines = sorted.joinToString("\n") { t ->
                 val st = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
-                "• ${t.friendlyLabel}: ${t.title} ($st)"
+                val nameStr = if (t.label != t.agency.friendlyLabel && t.label.isNotBlank()) "${t.friendlyLabel} (${t.label})" else t.friendlyLabel
+                "• $nameStr: ${t.title} ($st)"
             }
-            val showCenterDot = isPinpointed || sorted.size >= 2 || totalSightings >= 2 || effRadiusM <= 180
+            val hasVehicleOuiOrKit = sorted.any { u ->
+                u.evidenceSources.any {
+                    it.facetKey.startsWith("hw:mac:", ignoreCase = true) ||
+                        it.kind == "WIFI_BLE_OUI" ||
+                        it.kind.startsWith("COMPANION_")
+                }
+            }
+            val badgeKind = when {
+                lead.isDrone -> MapIcons.BadgeIconKind.DRONE
+                lead.agency == org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO -> {
+                    if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isHelicopterAirframe(null, lead.agency.id, lead.title, lead.agency)) {
+                        MapIcons.BadgeIconKind.HELICOPTER
+                    } else {
+                        MapIcons.BadgeIconKind.SMALL_PLANE
+                    }
+                }
+                hasVehicleOuiOrKit -> MapIcons.BadgeIconKind.CAR
+                else -> MapIcons.BadgeIconKind.RADIO
+            }
+            // Compute colocated agency gravity weights relative to cluster's center of gravity (c.lat, c.lon)
+            val colocationScaleM = kotlin.math.max(100.0, kotlin.math.max(zoomMergeM * 0.75, c.radiusM * 0.85))
+            val agencyGravity = mutableMapOf<org.tucsoncommunity.kokoho.posture.KokohoAgency, Double>()
+            for (n in c.nodes) {
+                val distToCog = DeviceRegistry.metersBetween(n.lat, n.lon, c.lat, c.lon)
+                val colocWeight = n.mass * kotlin.math.exp(-(distToCog * distToCog) / (2.0 * colocationScaleM * colocationScaleM))
+                agencyGravity[n.threat.agency] = (agencyGravity[n.threat.agency] ?: 0.0) + colocWeight
+            }
+            val mixedColorArgb = org.tucsoncommunity.kokoho.posture.KokohoSignatures.mixAgencyColorsArgb(agencyGravity)
+            // When zoomed way in (zoom >= 15.5, zoomMergeM <= 0.0), always render each agent's puck at its center regardless of precision
+            val showCenterDot = zoomMergeM <= 0.0 || isPinpointed || sorted.any { it.isApproximatedPosition }
+            val countTag = if (sorted.size > 1) " (${sorted.size} agents)" else ""
             MapPin(
                 mac = "kokoho:${lead.uuid}",
                 lat = c.lat,
                 lon = c.lon,
-                label = "$agenciesInline · $accText · $staleness",
+                label = "$agenciesInline$countTag · $accText · $staleness",
                 flagged = true,
-                color = lead.posture.colorArgb,
-                details = "${lead.posture.badgeLabel}\n$fullDist · Last seen $staleness\n$unitLines",
+                color = mixedColorArgb,
+                details = "${lead.agency.friendlyLabel} · ${lead.posture.badgeLabel}\n$fullDist · Last seen $staleness\n$unitLines",
                 radiusM = radius,
                 whereNote = note,
                 showDot = showCenterDot,
-                opacity = opacity
+                opacity = opacity,
+                iconKind = badgeKind,
+                agencyId = lead.agency.id,
+                groupMembers = sorted
             )
         }
         drawPins(shown)
@@ -467,8 +773,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             GeoJson.feature(
                 GeoJson.point(lat, lon),
                 "mac" to t.uuid,
+                "icon" to "rf-badge-${MapIcons.BadgeIconKind.DRONE.id}-${t.agency.id}",
                 "dir" to (t.aircraftTrackDeg ?: 0.0),
-                "label" to "${t.friendlyLabel} · $altPart · $staleness"
+                "label" to "${t.label} · $altPart · $staleness"
             )
         })
         set(DRONE_OPS, droneThreats.mapNotNull { t ->
@@ -484,7 +791,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             GeoJson.feature(GeoJson.line(listOf(opLat to opLon, lat to lon)), "mac" to t.uuid)
         })
 
-        // ADS-B & Circling Spy Planes
+        // ADS-B & Circling Spy Planes (helicopters get rotorcraft badge; fixed-wing rotate along track)
         val airThreats = snap.mapThreats.filter { it.isAircraft }
         airThreatsByUuid = airThreats.associateBy { it.uuid }
         set(AIRCRAFT, airThreats.map { t ->
@@ -493,25 +800,103 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             val altOrDist = t.altitudeFtAgl?.let { "${it} ft" }
                 ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.nearestEdgeDistanceM)
             val cirTag = if (t.isCircling) " · CIRCLING" else ""
+            val kind = if (t.isHelicopter) MapIcons.BadgeIconKind.HELICOPTER else MapIcons.BadgeIconKind.SMALL_PLANE
             GeoJson.feature(
                 GeoJson.point(lat, lon),
                 "hex" to t.uuid,
-                "icon" to "rf-plane-police",
-                "track" to (t.aircraftTrackDeg ?: 0.0),
+                "icon" to "rf-badge-${kind.id}-${t.agency.id}",
+                "track" to (if (t.isHelicopter) 0.0 else (t.aircraftTrackDeg ?: 0.0)),
+                "color" to t.agency.mapColorHex,
                 "flagged" to true,
                 "clear" to true,
-                "label" to "${t.friendlyLabel}$cirTag · $altOrDist"
+                "label" to "${t.label}$cirTag · $altOrDist"
             )
         })
+
+        // Thin Chaikin-smoothed flight tracks:
+        //  - 30m / 3h windows: ONLY currently in-flight aircraft
+        //  - 24h / 1wk windows: all flights within the active window
+        val trackFeatures = mutableListOf<JSONObject>()
+        val cachedTracks = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedFlightTracks()
+        if (timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HOURS_24 ||
+            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.WEEK_1
+        ) {
+            val enabledAirAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAircraftAgencies(activity)
+            val liveEntities = airThreats.map { it.uuid }.toSet()
+            val coveredHexes = HashSet<String>()
+            val trackWindowMs = timeWindow.windowMs
+            for (tr in cachedTracks) {
+                if (nowMs - tr.endedAtMs > trackWindowMs) continue
+                val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(tr.category) ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO
+                val allowed = if (ag.isDhs) enabledAirAgencies.any { it.isDhs } else ag in enabledAirAgencies
+                if (!allowed) continue
+                val pts = tr.points
+                if (pts.size < 2) continue
+                val smoothed = PoliceAircraft.chaikinSmooth(pts, 2)
+                val isInFlight = tr.entityUuid in liveEntities
+                coveredHexes += tr.entityUuid
+                trackFeatures += GeoJson.feature(
+                    GeoJson.line(smoothed),
+                    "color" to ag.mapColorHex,
+                    "opacity" to if (isInFlight) 0.88 else 0.58
+                )
+            }
+            for (t in airThreats) {
+                if (t.uuid in coveredHexes) continue
+                val hexKey = t.aircraftHex ?: continue
+                val localPts = PoliceAircraft.recentAirborneTrail(hexKey, nowMs, 3 * 3600_000L)
+                if (localPts.size >= 2) {
+                    val smoothed = PoliceAircraft.chaikinSmooth(localPts, 2)
+                    trackFeatures += GeoJson.feature(
+                        GeoJson.line(smoothed),
+                        "color" to t.agency.mapColorHex,
+                        "opacity" to 0.88
+                    )
+                }
+            }
+        } else {
+            val tracksByEntity = cachedTracks.associateBy { it.entityUuid }
+            for (t in airThreats) {
+                val serverPts = tracksByEntity[t.uuid]?.points.orEmpty()
+                val pts = if (serverPts.size >= 2) {
+                    serverPts
+                } else {
+                    PoliceAircraft.recentAirborneTrail(t.aircraftHex ?: "", nowMs, 3 * 3600_000L)
+                }
+                if (pts.size >= 2) {
+                    val smoothed = PoliceAircraft.chaikinSmooth(pts, 2)
+                    trackFeatures += GeoJson.feature(
+                        GeoJson.line(smoothed),
+                        "color" to t.agency.mapColorHex,
+                        "opacity" to 0.85
+                    )
+                }
+            }
+        }
+        set(FLIGHT_TRACKS, trackFeatures)
 
         if (TripRecorder.isRecording) {
             val trace = TripRecorder.livePoints()
             drawTrace(trace.map { it.lat to it.lon }, TRACE_COLOR)
         } else if (selectedFlightTrackPoints.size >= 2) {
-            drawTrace(selectedFlightTrackPoints, "#EC4899")
+            drawTrace(selectedFlightTrackPoints, airThreatsByUuid.values.firstOrNull()?.agency?.mapColorHex ?: "#EC4899")
         } else {
             drawTrace(emptyList(), TRACE_COLOR)
         }
+        // Keep selection ring synced with moved entity coordinates if an entity is currently selected
+        val curSel = activeSelection
+        if (curSel is MapSelection.Detection) {
+            val updated = snap.mapThreats.firstOrNull { it.uuid.equals(curSel.entityUuid, ignoreCase = true) }
+            if (updated?.lat != null && updated.lon != null) {
+                activeSelection = curSel.copy(
+                    title = updated.title.ifBlank { curSel.title },
+                    lat = updated.lat,
+                    lon = updated.lon,
+                    radiusM = updated.uncertaintyRadiusM
+                )
+            }
+        }
+        drawSelection(activeSelection)
         return shown
     }
 
@@ -548,9 +933,12 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
      * Cameras, CCTV and cell towers: many, and they don't move - drawn for the area in view (and
      * around it), again once the view leaves that area or every 15 s for new downloads.
      */
-    fun maybeRedrawStatic(@Suppress("UNUSED_PARAMETER") force: Boolean = false) {
+    fun maybeRedrawStatic(force: Boolean = false) {
         if (!ready()) return
-        clearStatic()
+        if (!staticCleared || force) {
+            clearStatic()
+            staticCleared = true
+        }
     }
 
     private fun clearStatic() {
@@ -622,70 +1010,154 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     fun onTap(x: Float, y: Float, me: Pair<Double, Double>?) {
         val r = 22f * activity.resources.displayMetrics.density
         val box = RectF(x - r, y - r, x + r, y + r)
-        val asked = listOf(AIRCRAFT to "hex", WAZE to "id", DRONES to "mac", DRONE_OPS to "mac", DOTS to "mac",
-            CAMERAS to "id", CCTV to "id", TOWERS to "id", WIGLE to "id", ASKED to "id", "$PRECISION-fill" to "mac")
+        val asked = listOf(
+            AIRCRAFT to "hex",
+            WAZE to "id",
+            DRONES to "mac",
+            DRONE_OPS to "mac",
+            DOTS to "mac",
+            "$LOCATIONS-fed" to "id",
+            "$LOCATIONS-local" to "id",
+            CAMERAS to "id",
+            CCTV to "id",
+            TOWERS to "id",
+            WIGLE to "id",
+            ASKED to "id",
+            "$PRECISION-fill" to "mac"
+        )
         map.query(box, asked) { found ->
             if (activity.isFinishing || activity.isDestroyed) return@query
             safe("tap") { showTapped(found, me) }
         }
     }
 
+    private fun toDetectionSelection(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat, fallbackLat: Double, fallbackLon: Double): MapSelection.Detection {
+        val nowMs = System.currentTimeMillis()
+        val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+        val extra = when {
+            t.isAircraft -> t.altitudeFtAgl?.let { "${it} ft" } ?: "ADS-B"
+            t.isDrone -> t.altitudeFtAgl?.let { "${it} ft AGL" } ?: "Remote ID"
+            else -> "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.uncertaintyRadiusM)}"
+        }
+        return MapSelection.Detection(
+            entityUuid = t.uuid,
+            title = t.title.ifBlank { t.friendlyLabel },
+            subtitle = "${t.agency.friendlyLabel} · $extra · $ageStr",
+            agencyCode = t.agency.id,
+            lat = t.lat ?: fallbackLat,
+            lon = t.lon ?: fallbackLon,
+            radiusM = t.uncertaintyRadiusM
+        )
+    }
+
     private fun showTapped(found: List<List<String>>, me: Pair<Double, Double>?) {
-        val (air, waze, drone, op, dots, cams, cctv, tower) = found
+        val air = found[0]
+        val waze = found[1]
+        val drone = found[2]
+        val op = found[3]
+        val dots = found[4]
+        val locHits = (found[5] + found[6]).distinct()
+        val cams = found[7]
+        val cctv = found[8]
+        val tower = found[9]
+        val wigleHits = found[10]
+        val askedHits = found[11]
+        val precisionHits = found[12]
+
+        val selectCb = onSelectTarget
+
         air.firstNotNullOfOrNull { airThreatsByUuid[it] }?.let { t ->
             val targetHex = t.aircraftHex ?: t.uuid
             org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(activity, targetHex) { tracks ->
-                val serverPts = tracks.firstOrNull()?.points.orEmpty()
-                selectedFlightTrackPoints = serverPts
-                drawTrace(serverPts, "#EC4899")
+                val rawPts = tracks.firstOrNull()?.points.orEmpty()
+                val smoothed = PoliceAircraft.chaikinSmooth(rawPts, 2)
+                selectedFlightTrackPoints = smoothed
+                drawTrace(smoothed, t.agency.mapColorHex)
             }
-            val nowMs = System.currentTimeMillis()
-            val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
-            val altLine = t.altitudeFtAgl?.let { "Altitude: $it ft\n" }.orEmpty()
-            val cirLine = if (t.isCircling) "Pattern: CIRCLING OVERHEAD\n" else ""
-            val msg = "${t.title}\n$cirLine${altLine}Last seen: $staleness\n${t.evidenceSummary}\n\nFlight track polyline highlighted on map."
-            com.google.android.material.dialog.MaterialAlertDialogBuilder(activity)
-                .setTitle(t.friendlyLabel)
-                .setMessage(msg)
-                .setPositiveButton("Details / Witness Report") { _, _ ->
-                    DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
-                }
-                .setNeutralButton("Clear Track") { _, _ ->
-                    selectedFlightTrackPoints = emptyList()
-                    drawTrace(emptyList(), TRACE_COLOR)
-                }
-                .setNegativeButton("Close", null)
-                .show()
+            if (selectCb != null) {
+                selectCb(toDetectionSelection(t, map.camera.lat, map.camera.lon))
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            }
             return
         }
         air.firstNotNullOfOrNull { planes[it] }?.let { s -> MapDialogs.showAircraft(activity, s.plane, s.hit, me); return }
         waze.firstNotNullOfOrNull { wazeShown[it] }?.let { MapDialogs.showWaze(activity, it); return }
-        found[8].firstNotNullOfOrNull { wigle[it] }?.let { p ->
+        wigleHits.firstNotNullOfOrNull { wigle[it] }?.let { p ->
             MapDialogs.showWigle(activity, p, me) { WiglePins.remove(activity, p.net.bssid); drawWigle() }
             return
         }
-        found[9].firstNotNullOfOrNull { asked[it] }?.let { s ->
+        askedHits.firstNotNullOfOrNull { asked[it] }?.let { s ->
             val ssid = ProbeLog.onMap ?: return
             MapDialogs.showAsked(activity, ssid, s, me) { ProbeLog.showOnMap(null); drawAsked() }
             return
         }
         (drone + op).firstNotNullOfOrNull { droneThreatsByUuid[it] }?.let { t ->
-            DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            if (selectCb != null) {
+                selectCb(toDetectionSelection(t, map.camera.lat, map.camera.lon))
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            }
             return
         }
         (drone + op).firstNotNullOfOrNull { drones[it] }?.let { s ->
-            MapDialogs.showDrone(activity, s.mac, MapDialogs.droneDetails(s, s.remoteId!!)); return
+            DeviceActions.openDetails(activity, s.mac)
+            return
         }
-        val here = (dots + found[10]).distinct().mapNotNull { pins[it] }
-        if (here.isNotEmpty()) { MapDialogs.showPins(activity, here); return }
+        // Check direct puck dots BEFORE facility locations, and facility locations BEFORE wide precision bubbles!
+        val dotPins = dots.distinct().mapNotNull { pins[it] }
+        if (dotPins.isNotEmpty()) {
+            val allMembers = dotPins.flatMap { it.groupMembers }.distinctBy { it.uuid }
+            if (selectCb != null && allMembers.isNotEmpty()) {
+                if (allMembers.size > 1) {
+                    MapDialogs.showGroupAgentsModal(activity, allMembers) { chosen ->
+                        selectCb(toDetectionSelection(chosen, dotPins.first().lat, dotPins.first().lon))
+                    }
+                } else {
+                    selectCb(toDetectionSelection(allMembers.first(), dotPins.first().lat, dotPins.first().lon))
+                }
+            } else if (allMembers.size > 1) {
+                MapDialogs.showGroupAgentsModal(activity, allMembers)
+            } else if (dotPins.size > 1) {
+                MapDialogs.showPins(activity, dotPins)
+            } else {
+                DeviceActions.openDetails(activity, dotPins.first().mac)
+            }
+            return
+        }
+        locHits.firstNotNullOfOrNull { locationsById[it] }?.let { loc ->
+            if (selectCb != null) {
+                selectCb(MapSelection.Facility(loc))
+            } else {
+                DeviceDetailActivity.openLocation(activity, loc.id)
+            }
+            return
+        }
+        val bubblePins = precisionHits.distinct().mapNotNull { pins[it] }
+        if (bubblePins.isNotEmpty()) {
+            val allMembers = bubblePins.flatMap { it.groupMembers }.distinctBy { it.uuid }
+            if (selectCb != null && allMembers.isNotEmpty()) {
+                if (allMembers.size > 1) {
+                    MapDialogs.showGroupAgentsModal(activity, allMembers) { chosen ->
+                        selectCb(toDetectionSelection(chosen, bubblePins.first().lat, bubblePins.first().lon))
+                    }
+                } else {
+                    selectCb(toDetectionSelection(allMembers.first(), bubblePins.first().lat, bubblePins.first().lon))
+                }
+            } else if (allMembers.size > 1) {
+                MapDialogs.showGroupAgentsModal(activity, allMembers)
+            } else if (bubblePins.size > 1) {
+                MapDialogs.showPins(activity, bubblePins)
+            } else {
+                DeviceActions.openDetails(activity, bubblePins.first().mac)
+            }
+            return
+        }
         cams.firstNotNullOfOrNull { cameras[it] }?.let { c -> MapDialogs.showKnownCamera(activity, c) { maybeRedrawStatic(force = true) }; return }
         cctv.firstNotNullOfOrNull { cctvs[it] }?.let { MapDialogs.showCctv(activity, it); return }
-        tower.firstNotNullOfOrNull { towers[it] }?.let { MapDialogs.showTower(activity, it) }
+        tower.firstNotNullOfOrNull { towers[it] }?.let { MapDialogs.showTower(activity, it); return }
+        onTapEmpty?.invoke()
     }
-
-    private operator fun <T> List<T>.component6() = this[5]
-    private operator fun <T> List<T>.component7() = this[6]
-    private operator fun <T> List<T>.component8() = this[7]
 
     /** Opens what an aircraft / Waze link points at, when it's on the map now. */
     fun showAircraft(seen: PoliceAircraft.Seen, me: Pair<Double, Double>?) = MapDialogs.showAircraft(activity, seen.plane, seen.hit, me)

@@ -1,40 +1,44 @@
 package org.tucsoncommunity.kokoho.settings
 
+import android.Manifest
 import android.content.Intent
-import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.text.InputType
+import android.provider.Settings
 import android.view.Gravity
-import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.switchmaterial.SwitchMaterial
-import org.tucsoncommunity.kokoho.detect.Category
-import org.tucsoncommunity.kokoho.posture.KokohoAgency
 import org.tucsoncommunity.kokoho.posture.KokohoHubClient
 import org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
 import org.tucsoncommunity.kokoho.posture.KokohoSignatures
-import org.tucsoncommunity.kokoho.sdr.SdrRadio
-import org.tucsoncommunity.kokoho.service.ScanForegroundService
-import org.tucsoncommunity.kokoho.ui.ThemeManager
-import org.tucsoncommunity.kokoho.util.UpdateChecker
+import org.tucsoncommunity.kokoho.ui.KokohoJourneyUi
+import org.tucsoncommunity.kokoho.util.Permissions
 import org.tucsoncommunity.kokoho.util.Prefs
+import org.tucsoncommunity.kokoho.util.UpdateChecker
 import org.tucsoncommunity.kokoho.util.applySystemBarInsets
 
+/**
+ * Kokoho `v1.3.x` Settings Activity.
+ *
+ * Agency & Location filters now live cleanly in the root `☰ -> Filters` menu (with independent
+ * Alarm + Map Eye toggles). Settings focuses on scan rate permissions, privacy, units, alerts,
+ * live updates, and diagnostic exports using the unified Subjourney header and WCAG AAA contrast.
+ */
 class SettingsActivity : AppCompatActivity() {
 
     companion object {
@@ -57,33 +61,34 @@ class SettingsActivity : AppCompatActivity() {
 
     private data class SearchableSection(
         val container: LinearLayout,
-        val headerView: View,
         val rows: MutableList<SearchableRow> = mutableListOf()
     )
 
     private val sections = mutableListOf<SearchableSection>()
-    private val agencySwitches = LinkedHashMap<KokohoAgency, SwitchMaterial>()
-    private lateinit var masterDhsSwitch: SwitchMaterial
-    private var updatingAgencySwitches = false
+    private var bgPermSubView: TextView? = null
+    private var batterySubView: TextView? = null
+
+    private val bgLocationLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        bgPermSubView?.text = if (granted || Permissions.hasBackgroundLocation(this)) {
+            "Granted — unthrottled background Wi-Fi & BLE scanning active"
+        } else {
+            "Not granted — allow 'All the time' in Android Location permissions for background scanning"
+        }
+    }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    private fun isNightMode(): Boolean {
-        val mode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        return mode == Configuration.UI_MODE_NIGHT_YES
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "Settings"
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
         KokohoSignatures.ensureLoaded(this)
 
         val bgColor = KokohoPostureEngine.currentPostureColorArgb(this)
-        val cardBg = 0x38000000
-        val cardStroke = 0x55FFFFFF
+        val cardBg = 0x44000000
+        val cardStroke = 0x66FFFFFF
         val primaryInk = Color.WHITE
-        val secondaryInk = 0xDDFFFFFF.toInt()
+        val secondaryInk = KokohoJourneyUi.INK_SECONDARY
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -95,13 +100,29 @@ class SettingsActivity : AppCompatActivity() {
         }
         root.applySystemBarInsets()
 
-        // Search Bar (upstream-style live settings search)
+        val header = KokohoJourneyUi.createSubjourneyHeader(
+            activity = this,
+            initialTitle = "Settings",
+            showCloseAll = false,
+            menuItemsProvider = {
+                listOf(
+                    KokohoJourneyUi.SubjourneyMenuItem("Check for App Updates") {
+                        UpdateChecker.check(this, silent = false)
+                    },
+                    KokohoJourneyUi.SubjourneyMenuItem("Export Diagnostic Logs") {
+                        exportCrashAndDebugLogs()
+                    }
+                )
+            }
+        )
+        root.addView(header.root)
+
         val searchBox = EditText(this).apply {
-            hint = "Search settings (e.g. DHS, CBP, ADS-B, decay, privacy, units)…"
+            hint = "Search settings (e.g. background, battery, privacy, units, logs)…"
             setSingleLine(true)
             textSize = 14.5f
             setTextColor(primaryInk)
-            setHintTextColor(secondaryInk)
+            setHintTextColor(KokohoJourneyUi.INK_MUTED)
             setPadding(dp(16), dp(12), dp(16), dp(12))
             background = GradientDrawable().apply {
                 cornerRadius = dp(12).toFloat()
@@ -109,9 +130,8 @@ class SettingsActivity : AppCompatActivity() {
                 setStroke(dp(1), cardStroke)
             }
         }
-
         val searchWrapper = FrameLayout(this).apply {
-            setPadding(dp(14), dp(12), dp(14), dp(8))
+            setPadding(dp(14), dp(10), dp(14), dp(8))
             addView(searchBox, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         root.addView(searchWrapper)
@@ -120,14 +140,13 @@ class SettingsActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(4), dp(14), dp(28))
         }
-
         val scrollView = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             addView(scrollContent)
         }
         root.addView(scrollView)
 
-        fun createSection(titleText: String? = null, subtitleText: String? = null): SearchableSection {
+        fun createSection(titleText: String, subtitleText: String? = null): SearchableSection {
             val secLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16), dp(14), dp(16), dp(14))
@@ -147,27 +166,25 @@ class SettingsActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 0, 0, dp(8))
             }
-            if (!titleText.isNullOrBlank()) {
-                val titleTv = TextView(this).apply {
-                    text = titleText
-                    textSize = 16f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(primaryInk)
-                }
-                headerBox.addView(titleTv)
-                if (!subtitleText.isNullOrBlank()) {
-                    val subTv = TextView(this).apply {
-                        text = subtitleText
-                        textSize = 12.5f
-                        setTextColor(secondaryInk)
-                        setPadding(0, dp(2), 0, 0)
-                    }
-                    headerBox.addView(subTv)
-                }
-                secLayout.addView(headerBox)
+            val titleTv = TextView(this).apply {
+                text = titleText
+                textSize = 16f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(primaryInk)
             }
+            headerBox.addView(titleTv)
+            if (!subtitleText.isNullOrBlank()) {
+                val subTv = TextView(this).apply {
+                    text = subtitleText
+                    textSize = 13f
+                    setTextColor(secondaryInk)
+                    setPadding(0, dp(2), 0, 0)
+                }
+                headerBox.addView(subTv)
+            }
+            secLayout.addView(headerBox)
             scrollContent.addView(secLayout)
-            return SearchableSection(secLayout, headerBox).also { sections += it }
+            return SearchableSection(secLayout).also { sections += it }
         }
 
         fun addSwitchRow(
@@ -176,16 +193,16 @@ class SettingsActivity : AppCompatActivity() {
             subtitleText: String?,
             checked: Boolean,
             keywords: String = "",
-            indentDp: Int = 0,
             onChanged: (Boolean) -> Unit
         ): SwitchMaterial {
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(indentDp), dp(6), 0, dp(6))
+                setPadding(0, dp(6), 0, dp(6))
             }
             val sw = SwitchMaterial(this).apply {
                 text = titleText
                 textSize = 14.5f
+                typeface = Typeface.DEFAULT_BOLD
                 setTextColor(primaryInk)
                 isChecked = checked
                 setOnCheckedChangeListener { _, isOn -> onChanged(isOn) }
@@ -194,7 +211,7 @@ class SettingsActivity : AppCompatActivity() {
             if (!subtitleText.isNullOrBlank()) {
                 val sub = TextView(this).apply {
                     text = subtitleText
-                    textSize = 12f
+                    textSize = 13f
                     setTextColor(secondaryInk)
                     setPadding(dp(4), 0, dp(48), dp(2))
                 }
@@ -232,18 +249,23 @@ class SettingsActivity : AppCompatActivity() {
             }
             val s = TextView(this).apply {
                 text = subtitleText
-                textSize = 12.5f
+                textSize = 13f
                 setTextColor(secondaryInk)
                 setPadding(0, dp(2), 0, 0)
             }
             textCol.addView(t)
             textCol.addView(s)
 
-            val btn = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            val btn = MaterialButton(this).apply {
                 text = buttonLabel
-                textSize = 12.5f
+                isAllCaps = false
+                textSize = 13f
+                typeface = Typeface.DEFAULT_BOLD
+                cornerRadius = dp(10)
+                backgroundTintList = android.content.res.ColorStateList.valueOf(KokohoJourneyUi.SURFACE_ELEVATED)
                 setTextColor(Color.WHITE)
-                strokeColor = android.content.res.ColorStateList.valueOf(0x88FFFFFF.toInt())
+                strokeColor = android.content.res.ColorStateList.valueOf(KokohoJourneyUi.BORDER_STRONG)
+                strokeWidth = dp(1)
                 setOnClickListener { onClick(s) }
             }
             row.addView(textCol)
@@ -253,195 +275,86 @@ class SettingsActivity : AppCompatActivity() {
             return s
         }
 
-        // ---- SECTION 1: Monitored Agencies (Radio, P25 & Fleet OUI) ----
-        val secAgencies = createSection(
-            "Monitored Agencies",
-            "Controls which agencies appear in Monitor, Map, and List. DHS is enabled by default."
+        // ---- SECTION 1: High-Rate Background Scanning & Permissions ----
+        val secPermissions = createSection(
+            "Scan Rate & Background Permissions",
+            "Grant background location and unrestricted battery so BLE, Wi-Fi, and USB SDR never throttle while driving with the screen off."
         )
 
-        masterDhsSwitch = addSwitchRow(
-            section = secAgencies,
-            titleText = "DHS",
-            subtitleText = "Master toggle for Department of Homeland Security sub-agencies",
-            checked = KokohoSignatures.isMasterDhsEnabled(this),
-            keywords = "dhs master radio homeland security border patrol ice cbp hsi amo fps interop"
-        ) { isOn ->
-            if (!updatingAgencySwitches) {
-                KokohoSignatures.setMasterDhs(this, isOn)
-                refreshAgencySwitchStates()
-                syncRuntimeTargets()
-            }
-        }
-
-        val dhsOrdered = listOf(
-            KokohoAgency.DHS_ICE to "ICE (ERO Tactical channels & fleet)",
-            KokohoAgency.DHS_AMO to "DHS Air (Air & Marine Operations & circling aircraft)",
-            KokohoAgency.DHS_CBP to "CBP (Border Patrol mobile inputs, tactical & fleet)",
-            KokohoAgency.DHS_HSI to "HSI (Homeland Security Investigations)",
-            KokohoAgency.DHS_FPS to "FPS (Federal Protective Service — default OFF)",
-            KokohoAgency.DHS_INTEROP to "Federal Interop (National / AZ federal interop — default OFF)"
-        )
-        val enabledNow = KokohoSignatures.getEnabledAgencies(this)
-        for ((ag, desc) in dhsOrdered) {
-            val sw = addSwitchRow(
-                section = secAgencies,
-                titleText = ag.friendlyLabel,
-                subtitleText = desc,
-                checked = ag in enabledNow,
-                keywords = "dhs ${ag.friendlyLabel} ${ag.fullName}",
-                indentDp = 14
-            ) { _ ->
-                if (!updatingAgencySwitches) {
-                    KokohoSignatures.toggleAgency(this, ag)
-                    refreshAgencySwitchStates()
-                    syncRuntimeTargets()
+        bgPermSubView = addActionRow(
+            section = secPermissions,
+            titleText = "Background Location ('Allow all the time')",
+            subtitleText = if (Permissions.hasBackgroundLocation(this)) {
+                "Granted — unthrottled background Wi-Fi & BLE scanning active"
+            } else {
+                "Recommended — prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
+            },
+            buttonLabel = if (Permissions.hasBackgroundLocation(this)) "Granted" else "Allow",
+            keywords = "background location scan rate permissions wifi ble"
+        ) { _ ->
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !Permissions.hasBackgroundLocation(this)) {
+                bgLocationLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+            } else {
+                runCatching {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", packageName, null)
+                        )
+                    )
                 }
             }
-            agencySwitches[ag] = sw
         }
 
-        val optionalOrdered = listOf(
-            KokohoAgency.DRONE to "Pro / Enterprise / Military Drones (Skydio, BRINC, Teal, Anafi USA, Enterprise & Remote ID with altitude)",
-            KokohoAgency.SHERIFF to "Sheriff (PCSO / County Sheriff)",
-            KokohoAgency.POLICE to "Police (TPD / Municipal dispatch & tactical)",
-            KokohoAgency.FIRE to "Fire (TFD / Regional Fire & Wildland)",
-            KokohoAgency.SAR to "SAR (Search & Rescue / Mountain & Desert SAR)"
-        )
-        for ((ag, desc) in optionalOrdered) {
-            val sw = addSwitchRow(
-                section = secAgencies,
-                titleText = ag.friendlyLabel,
-                subtitleText = desc,
-                checked = ag in enabledNow,
-                keywords = "optional ${ag.friendlyLabel} ${ag.fullName} drone skydio brinc tpd pcso tfd",
-                indentDp = 14
-            ) { _ ->
-                if (!updatingAgencySwitches) {
-                    KokohoSignatures.toggleAgency(this, ag)
-                    refreshAgencySwitchStates()
-                    syncRuntimeTargets()
-                }
-            }
-            agencySwitches[ag] = sw
+        batterySubView = addActionRow(
+            section = secPermissions,
+            titleText = "Unrestricted Battery Usage",
+            subtitleText = if (Permissions.isIgnoringBatteryOptimizations(this)) {
+                "Active — Android Doze will not throttle sensor sweeps"
+            } else {
+                "Recommended — exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
+            },
+            buttonLabel = if (Permissions.isIgnoringBatteryOptimizations(this)) "Active" else "Exempt",
+            keywords = "battery optimization unrestricted doze scan rate"
+        ) { _ ->
+            runCatching { startActivity(Permissions.batteryOptimizationExemptionIntent(this)) }
         }
 
-        // ---- SECTION 2: Aircraft (ADS-B) ----
-        val secAircraft = createSection(
-            "Aircraft (ADS-B)",
-            "Server-side and local ADS-B aircraft tracking. On by default for DHS aircraft."
-        )
-
-        addSwitchRow(
-            section = secAircraft,
-            titleText = "Enable ADS-B Aircraft",
-            subtitleText = "Monitor airborne transponders via Auxnet server ingestion, online ADS-B feeds, and local 1090 MHz SDR",
-            checked = KokohoSignatures.isAdsbEnabled(this),
-            keywords = "adsb aircraft plane helicopter aviation"
-        ) { isOn ->
-            KokohoSignatures.setAdsbEnabled(this, isOn)
-            Prefs.setCategoryEnabled(this, Category.AIRCRAFT, isOn)
-            Prefs.setAircraftOnline(this, isOn)
-            syncRuntimeTargets()
-        }
-
-        val enabledAir = KokohoSignatures.getEnabledAircraftAgencies(this)
-        addSwitchRow(
-            section = secAircraft,
-            titleText = "DHS Aircraft (CBP / AMO / ICE)",
-            subtitleText = "Default ON — CBP Air & Marine Blackhawks, AS350s, PC-12s, and ICE airframes",
-            checked = KokohoSignatures.isDhsAircraftEnabled(this),
-            keywords = "dhs aircraft cbp amo ice helicopter plane omaha",
-            indentDp = 10
-        ) { isOn ->
-            KokohoSignatures.setDhsAircraftEnabled(this, isOn)
-        }
-
-        val optionalAir = listOf(
-            KokohoAgency.POLICE to "Police Aircraft (TPD / State Police)",
-            KokohoAgency.SHERIFF to "Sheriff Aircraft (PCSO / County aviation)",
-            KokohoAgency.SAR to "SAR Aircraft (Search & Rescue air assets)",
-            KokohoAgency.FIRE to "Fire Aircraft (Aerial firefighting & spotters)"
-        )
-        for ((ag, label) in optionalAir) {
-            addSwitchRow(
-                section = secAircraft,
-                titleText = label,
-                subtitleText = "Default OFF — Show ${ag.friendlyLabel} aircraft when airborne nearby",
-                checked = ag in enabledAir,
-                keywords = "aircraft adsb ${ag.friendlyLabel} tpd sheriff pcso sar fire",
-                indentDp = 10
-            ) { _ ->
-                KokohoSignatures.toggleAircraftAgency(this, ag)
-            }
-        }
-
-        // ---- SECTION 3: Signal Decay Time (Separate section, no title) ----
-        val secDecay = createSection(titleText = null)
-
-        addActionRow(
-            section = secDecay,
-            titleText = "Signal Decay Time",
-            subtitleText = "Retain flagged signals and local triangulation samples for ${KokohoSignatures.signalDecayMinutes(this)} minutes",
-            buttonLabel = "Change",
-            keywords = "decay time window retention triangulation"
-        ) { subTv ->
-            val choices = KokohoSignatures.DECAY_MINUTE_CHOICES
-            val labels = choices.map { mins ->
-                when (mins) {
-                    30 -> "30 minutes (Default)"
-                    60 -> "1 hour (60 minutes)"
-                    120 -> "2 hours (120 minutes)"
-                    else -> "$mins minutes"
-                }
-            }.toTypedArray()
-            val curIdx = choices.indexOf(KokohoSignatures.signalDecayMinutes(this)).coerceAtLeast(0)
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Signal Decay Time")
-                .setSingleChoiceItems(labels, curIdx) { dialog, which ->
-                    val chosen = choices[which]
-                    KokohoSignatures.setSignalDecayMinutes(this, chosen)
-                    subTv.text = "Retain flagged signals and local triangulation samples for $chosen minutes"
-                    dialog.dismiss()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-
-        // ---- SECTION 4: Privacy (Opt-out connected features) ----
+        // ---- SECTION 2: Privacy ----
         val secPrivacy = createSection(
             "Privacy",
-            "Opt-out controls for connected features."
+            "Sharing defaults to OFF on every startup. Use the top-bar Share / Stop button when you choose to contribute."
         )
 
         addSwitchRow(
             section = secPrivacy,
-            titleText = "Enable Contribution (Share Pill)",
-            subtitleText = "Master switch for observation sharing. When disabled, the top-bar Share pill is greyed out and your contributed observations are purged immediately. When enabled, use the Share pill next to Scan to toggle live sharing of derived positions.",
+            titleText = "Allow Observation Sharing (Share Button)",
+            subtitleText = "Master switch for the top-bar Share / Stop button. Turning this off purges contributed observations immediately.",
             checked = KokohoSignatures.isContributionAllowedInSettings(this),
-            keywords = "privacy contribute observations share sharing pill server vpn ephemeral purge opt out"
+            keywords = "privacy contribute observations share stop server purge"
         ) { isOn ->
             KokohoSignatures.setContributionAllowedInSettings(this, isOn)
-            if (!isOn) {
-                Toast.makeText(this, "Contribution disabled & observations purged", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Contribution enabled — use the Share pill next to Scan", Toast.LENGTH_SHORT).show()
-            }
+            Toast.makeText(
+                this,
+                if (isOn) "Sharing capability enabled (currently stopped until you tap Share)" else "Sharing disabled & observations purged",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         addSwitchRow(
             section = secPrivacy,
-            titleText = "Push notifications",
-            subtitleText = "Uses no Google Services. Kokoho delivers real-time alerts using its own self-hosted push notification system.",
+            titleText = "Self-Hosted Push Alerts",
+            subtitleText = "Uses zero Google Play Services. Receives real-time Auxnet sector updates.",
             checked = KokohoSignatures.isPushNotificationsEnabled(this),
-            keywords = "privacy push notifications alerts google services self hosted"
+            keywords = "privacy push notifications alerts self hosted"
         ) { isOn ->
             KokohoSignatures.setPushNotificationsEnabled(this, isOn)
         }
 
-        // ---- SECTION 5: Units, Alerts & Diagnostics ----
+        // ---- SECTION 3: Units, Alerts & Diagnostics ----
         val secDisplay = createSection(
             "Units, Alerts & Diagnostics",
-            "Distance formatting, alert sound/vibration, live updates, and crash/debug log export."
+            "Distance formatting, alert sound/vibration, live updates, and diagnostic export."
         )
 
         addActionRow(
@@ -451,24 +364,26 @@ class SettingsActivity : AppCompatActivity() {
             buttonLabel = "Change",
             keywords = "units imperial metric miles feet kilometers meters distance"
         ) { subTv ->
-            val items = arrayOf("Imperial (ft / mi) — Default", "Metric (m / km)")
-            val checked = if (KokohoSignatures.isImperialUnits(this)) 0 else 1
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Distance Units")
-                .setSingleChoiceItems(items, checked) { dialog, which ->
-                    val imp = (which == 0)
-                    KokohoSignatures.setImperialUnits(this, imp)
-                    subTv.text = if (imp) "Imperial (ft / mi) — Default" else "Metric (m / km)"
-                    dialog.dismiss()
-                }
-                .setNegativeButton("Cancel", null)
-                .show()
+            KokohoJourneyUi.showActionSheetModal(
+                this,
+                "Distance Units",
+                listOf(
+                    KokohoJourneyUi.SubjourneyMenuItem("Imperial (ft / mi) — Default") {
+                        KokohoSignatures.setImperialUnits(this, true)
+                        subTv.text = "Imperial (ft / mi) — Default"
+                    },
+                    KokohoJourneyUi.SubjourneyMenuItem("Metric (m / km)") {
+                        KokohoSignatures.setImperialUnits(this, false)
+                        subTv.text = "Metric (m / km)"
+                    }
+                )
+            )
         }
 
         addSwitchRow(
             section = secDisplay,
             titleText = "Alert Sound",
-            subtitleText = "Play audible alert tone when a monitored agency is detected",
+            subtitleText = "Play audible alert tone when an Alarm-enabled category is detected",
             checked = Prefs.soundEnabled(this),
             keywords = "alert sound audio tone beep"
         ) { isOn ->
@@ -478,7 +393,7 @@ class SettingsActivity : AppCompatActivity() {
         addSwitchRow(
             section = secDisplay,
             titleText = "Alert Vibration",
-            subtitleText = "Vibrate when posture escalates",
+            subtitleText = "Vibrate when Monitor posture escalates",
             checked = Prefs.vibrateEnabled(this),
             keywords = "alert vibrate vibration haptic"
         ) { isOn ->
@@ -488,7 +403,7 @@ class SettingsActivity : AppCompatActivity() {
         addActionRow(
             section = secDisplay,
             titleText = "Live App Updates",
-            subtitleText = "Check Auxnet Hub (${KokohoHubClient.hubUrl(this)}) for newer Kokoho builds",
+            subtitleText = "Check Kokoho Hub (${KokohoHubClient.hubUrl(this)}) for newer releases on your channel (${org.tucsoncommunity.kokoho.BuildConfig.RELEASE_CHANNEL})",
             buttonLabel = "Check Now",
             keywords = "update live apk version upgrade"
         ) { _ ->
@@ -505,7 +420,6 @@ class SettingsActivity : AppCompatActivity() {
             exportCrashAndDebugLogs()
         }
 
-        // Live search filtering
         searchBox.doAfterTextChanged { editable ->
             val q = editable?.toString()?.trim()?.lowercase().orEmpty()
             for (sec in sections) {
@@ -527,24 +441,17 @@ class SettingsActivity : AppCompatActivity() {
         setContentView(root)
     }
 
-    private fun refreshAgencySwitchStates() {
-        updatingAgencySwitches = true
-        try {
-            val enabled = KokohoSignatures.getEnabledAgencies(this)
-            masterDhsSwitch.isChecked = enabled.any { it.isDhs }
-            for ((ag, sw) in agencySwitches) {
-                sw.isChecked = ag in enabled
-            }
-        } finally {
-            updatingAgencySwitches = false
+    override fun onResume() {
+        super.onResume()
+        bgPermSubView?.text = if (Permissions.hasBackgroundLocation(this)) {
+            "Granted — unthrottled background Wi-Fi & BLE scanning active"
+        } else {
+            "Recommended — prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
         }
-    }
-
-    private fun syncRuntimeTargets() {
-        val targets = KokohoSignatures.watchedTargetsForEnabled(this)
-        SdrRadio.config = SdrRadio.config.copy(targets = targets)
-        if (ScanForegroundService.isRunning) {
-            runCatching { ScanForegroundService.start(this) }
+        batterySubView?.text = if (Permissions.isIgnoringBatteryOptimizations(this)) {
+            "Active — Android Doze will not throttle sensor sweeps"
+        } else {
+            "Recommended — exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
         }
     }
 
@@ -578,30 +485,23 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         val fullReport = sb.toString()
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Crash & Debug Logs")
-            .setMessage(fullReport.take(4000))
-            .setPositiveButton("Share / Export") { _, _ ->
-                val share = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, "Kokoho Crash & Debug Logs")
-                    putExtra(Intent.EXTRA_TEXT, fullReport)
+        KokohoJourneyUi.showActionSheetModal(
+            this,
+            "Crash & Debug Logs",
+            listOf(
+                KokohoJourneyUi.SubjourneyMenuItem("Share / Export Diagnostic Bundle") {
+                    val share = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "Kokoho Crash & Debug Logs")
+                        putExtra(Intent.EXTRA_TEXT, fullReport)
+                    }
+                    startActivity(Intent.createChooser(share, "Export Crash & Debug Logs"))
+                },
+                KokohoJourneyUi.SubjourneyMenuItem("Clear Crash Log") {
+                    runCatching { if (crashFile.exists()) crashFile.delete() }
+                    Toast.makeText(this, "Crash log cleared", Toast.LENGTH_SHORT).show()
                 }
-                startActivity(Intent.createChooser(share, "Export Crash & Debug Logs"))
-            }
-            .setNeutralButton("Clear Crash Log") { _, _ ->
-                runCatching { if (crashFile.exists()) crashFile.delete() }
-                Toast.makeText(this, "Crash log cleared", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Close", null)
-            .show()
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == android.R.id.home) {
-            finish()
-            return true
-        }
-        return super.onOptionsItemSelected(item)
+            )
+        )
     }
 }

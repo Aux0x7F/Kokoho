@@ -20,6 +20,9 @@ object FixedRouter {
     /** Every match is only "it's a vehicle router": nothing else backs it. */
     fun routerOnly(hits: List<Hit>) = hits.isNotEmpty() && hits.all { ROUTER.containsMatchIn(it.label) }
 
+    /** True when [mac] was learned as a familiar stationary router in earlier sessions. */
+    fun isFamiliar(mac: String): Boolean = mac.trim().uppercase() in familiar
+
     /** True for a router-only device ([hits]) that is one of the [familiar] ones. Never on the Weak threshold (0): it alerts on every match. */
     fun quiet(mac: String, hits: List<Hit>, threshold: Int) = threshold > 0 && mac.uppercase() in familiar && routerOnly(hits)
 

@@ -43,7 +43,8 @@ object UpdateChecker {
         val apkSize: Long = 0L,
         val apkSha256: String? = null,
         val versionCode: Int = 0,
-        val notes: String = ""
+        val notes: String = "",
+        val channel: String = "public"
     )
 
     @Volatile
@@ -79,11 +80,20 @@ object UpdateChecker {
         return false
     }
 
-    fun isUpdateAvailable(latest: Latest): Boolean {
-        if (latest.versionCode > 0 && latest.versionCode != BuildConfig.VERSION_CODE) {
-            return latest.versionCode > BuildConfig.VERSION_CODE
+    fun isUpdateAvailable(
+        latest: Latest,
+        currentChannel: String = BuildConfig.RELEASE_CHANNEL,
+        currentVersionCode: Int = BuildConfig.VERSION_CODE,
+        currentVersionName: String = BuildConfig.VERSION_NAME
+    ): Boolean {
+        val remoteChan = latest.channel.trim().ifEmpty { "public" }
+        val localChan = currentChannel.trim().ifEmpty { "public" }
+        // Strict channel isolation: a public release never prompts or overwrites a non-public channel install, and vice versa.
+        if (!remoteChan.equals(localChan, ignoreCase = true)) return false
+        if (latest.versionCode > 0 && latest.versionCode != currentVersionCode) {
+            return latest.versionCode > currentVersionCode
         }
-        val currentVer = BuildConfig.VERSION_NAME.substringBefore('-')
+        val currentVer = currentVersionName.substringBefore('-')
         val remoteVer = latest.version.trimStart('v', 'V').substringBefore('-')
         if (remoteVer == currentVer) return false
         return isNewer(remoteVer, currentVer)
@@ -117,7 +127,9 @@ object UpdateChecker {
             val sha = rawSha.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }?.removePrefix("sha256:")
             val notesUrl = json.optString("notes_url", apkUrl ?: KokohoHubClient.DEFAULT_HUB_URL)
             val notes = json.optString("notes", "")
-            return Latest(ver, apkUrl, notesUrl, size, sha, vCode, notes)
+            val fallbackChan = ver.substringAfter('-', "").lowercase(Locale.US).ifBlank { "public" }
+            val chan = json.optString("channel", fallbackChan)
+            return Latest(ver, apkUrl, notesUrl, size, sha, vCode, notes, chan)
         }
 
         // 2. Fallback compatibility with GitHub release JSON format
@@ -150,7 +162,10 @@ object UpdateChecker {
     private fun fetchFromHub(context: Context): Latest {
         val base = KokohoHubClient.hubUrl(context)
         val pkg = Uri.encode(context.packageName)
-        val url = "$base/v1/update/latest?pkg=$pkg&vc=${BuildConfig.VERSION_CODE}"
+        val manifestPath = BuildConfig.UPDATE_MANIFEST_PATH.trim().ifEmpty { "/v1/update/latest" }
+        val cleanPath = if (manifestPath.startsWith("/")) manifestPath else "/$manifestPath"
+        val sep = if ('?' in cleanPath) '&' else '?'
+        val url = "$base$cleanPath${sep}pkg=$pkg&vc=${BuildConfig.VERSION_CODE}&ch=${Uri.encode(BuildConfig.RELEASE_CHANNEL)}"
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000
             readTimeout = 10_000

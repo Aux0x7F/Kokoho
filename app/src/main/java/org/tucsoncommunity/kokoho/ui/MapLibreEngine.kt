@@ -44,6 +44,8 @@ import org.maplibre.android.style.sources.GeoJsonSource
 internal class MapLibreEngine(private val context: Context) : MapEngine {
 
     companion object {
+        /** Passive stationary hold duration for dropping a map point (longer than stock 400ms to prevent accidental drops while panning). */
+        const val POINT_DROP_HOLD_MS = 750L
         /** OpenFreeMap: OpenStreetMap vector tiles, free, no account, no key, no cookies. */
         const val LIGHT_STYLE = "https://tiles.openfreemap.org/styles/liberty"
         /** A navy night map (like Waze's), lifted further in [nightTweaks]: OpenFreeMap's "dark" is near black. */
@@ -56,9 +58,9 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
         /** Style properties whose value is a plain array, not an expression. */
         private val ARRAY_PROPERTIES = setOf("text-font", "text-offset", "icon-offset", "line-dasharray", "text-variable-anchor", "text-translate", "icon-translate", "circle-translate", "fill-translate", "line-translate")
 
-        /** MapLibre's one-time set-up, with the renderer [MapSafety] allows: Vulkan where the phone has it, else OpenGL. */
+        /** MapLibre's one-time set-up: always force OpenGL since MapLibre Vulkan surface recreation crashes on app switch. */
         internal fun start(context: Context) {
-            MapLibre.getInstance(context.applicationContext, null, WellKnownTileServer.MapLibre, MapSafety.renderer(context))
+            MapLibre.getInstance(context.applicationContext, null, WellKnownTileServer.MapLibre, org.maplibre.android.RenderingEngine.Type.OPENGL)
         }
 
         /** A style JSON value as MapLibre wants it: expressions, float numbers, typed arrays. */
@@ -97,12 +99,14 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
     override fun onSaveInstanceState(out: Bundle) = view.onSaveInstanceState(out)
     override fun onDestroy() { map = null; view.onDestroy() }
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun whenReady(ready: () -> Unit) {
         view.getMapAsync { m ->
             map = m
             m.uiSettings.isCompassEnabled = false
             m.uiSettings.isLogoEnabled = false
             m.uiSettings.isAttributionEnabled = false // the credit line on the map instead
+            m.uiSettings.isRotateGesturesEnabled = false // disable two-finger rotate
             m.uiSettings.isTiltGesturesEnabled = true
             m.addOnCameraMoveStartedListener { reason ->
                 if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) onUserGesture?.invoke()
@@ -114,9 +118,42 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
                 onClick?.invoke(p.x, p.y)
                 false
             }
-            m.addOnMapLongClickListener { at ->
-                onLongClick?.invoke(at.latitude, at.longitude)
-                onLongClick != null
+            // Passive ~750ms stationary single-finger hold detector for dropping a point without interfering with MapLibre gestures.
+            val touchSlop = android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+            var downX = 0f
+            var downY = 0f
+            var holdPending = false
+            val holdRunnable = Runnable {
+                if (!holdPending) return@Runnable
+                holdPending = false
+                val handler = onLongClick ?: return@Runnable
+                val latLng = runCatching { m.projection.fromScreenLocation(PointF(downX, downY)) }.getOrNull() ?: return@Runnable
+                view.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                handler.invoke(latLng.latitude, latLng.longitude)
+            }
+            view.setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        downX = ev.x
+                        downY = ev.y
+                        holdPending = true
+                        view.removeCallbacks(holdRunnable)
+                        view.postDelayed(holdRunnable, POINT_DROP_HOLD_MS)
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        if (holdPending && (kotlin.math.abs(ev.x - downX) > touchSlop || kotlin.math.abs(ev.y - downY) > touchSlop)) {
+                            holdPending = false
+                            view.removeCallbacks(holdRunnable)
+                        }
+                    }
+                    android.view.MotionEvent.ACTION_POINTER_DOWN,
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        holdPending = false
+                        view.removeCallbacks(holdRunnable)
+                    }
+                }
+                false // always pass event through to MapLibre
             }
             ready()
         }
@@ -134,52 +171,56 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
     }
 
     /**
-     * The night map, made easier to read at a glance: residential areas drawn near-white in
-     * OpenFreeMap's navy style go navy, roads lighter than the ground (as in Waze at night), and
-     * 3D buildings, which the style hasn't got.
+     * High-contrast dark tactical basemap tweaks on OpenFreeMap's vector tiles:
+     *  - Deep navy-slate ground (`#121824`) so semi-transparent agency bubbles & labels stand out cleanly.
+     *  - Distinctly lighter street hierarchy (`#3A4B6E` minor roads, `#64748B` major arterials,
+     *    `#94A3B8` motorways with `#1E293B` casings) so streets are effortlessly readable through 50% bubbles.
+     *  - Crisp bright street & place labels (`#F1F5F9` / `#FFFFFF` with `#0B0F17` halo).
      */
     private fun nightTweaks(style: Style) {
-        // Ground a little lighter, water deeper, and nature green (the style has no green at all).
-        style.getLayer("background")?.setProperties(PropertyFactory.backgroundColor("#4D5977"))
-        style.getLayer("water")?.setProperties(PropertyFactory.fillColor("#2C3B60"))
-        style.getLayer("landuse_residential")?.setProperties(PropertyFactory.fillColor("#58647F"), PropertyFactory.fillOpacity(0.45f))
-        style.getLayer("park")?.setProperties(PropertyFactory.fillColor("#3E6E52"), PropertyFactory.fillOpacity(0.7f))
-        style.getLayer("park_outline")?.setProperties(PropertyFactory.lineColor("#4F8463"))
-        style.getLayer("landcover_wood")?.setProperties(PropertyFactory.fillColor("#3A6650"),
+        style.getLayer("background")?.setProperties(PropertyFactory.backgroundColor("#121824"))
+        style.getLayer("water")?.setProperties(PropertyFactory.fillColor("#0A192F"))
+        style.getLayer("waterway")?.setProperties(PropertyFactory.lineColor("#112240"), PropertyFactory.lineOpacity(0.85f))
+        style.getLayer("landuse_residential")?.setProperties(PropertyFactory.fillColor("#182132"), PropertyFactory.fillOpacity(0.65f))
+        style.getLayer("park")?.setProperties(PropertyFactory.fillColor("#132A23"), PropertyFactory.fillOpacity(0.75f))
+        style.getLayer("park_outline")?.setProperties(PropertyFactory.lineColor("#1F4538"))
+        style.getLayer("landcover_wood")?.setProperties(PropertyFactory.fillColor("#132A23"),
             PropertyFactory.fillOpacity(Expression.interpolate(Expression.linear(), Expression.zoom(),
-                Expression.stop(8, 0.4f), Expression.stop(12, 0.7f))))
-        style.getLayer("building")?.setProperties(PropertyFactory.fillColor("#5F6B8A"), PropertyFactory.fillOpacity(0.6f))
+                Expression.stop(8, 0.35f), Expression.stop(12, 0.65f))))
+        style.getLayer("building")?.setProperties(PropertyFactory.fillColor("#1E293B"), PropertyFactory.fillOpacity(0.75f))
         addPlaceLabels(style)
         if (style.getLayer("night-oneway") == null) NightLabels.layers.forEach { runCatching { addLayerTo(style, JSONObject(it)) } }
-        // Labels: the style's grey-blue text with faint halos disappears on the ground; near-white on a dark outline instead.
+        // High-contrast labels: bright white/slate on a strong dark halo so street names never wash out
         for (layer in style.layers) {
             if (layer !is SymbolLayer || layer.id.startsWith("rf-") || layer.id.startsWith("night-shield")) continue
             val road = layer.id.contains("highway") || layer.id.contains("water") || layer.id.contains("path")
             layer.setProperties(
-                PropertyFactory.textColor(if (road) "#D3DCEC" else "#EEF3FA"),
-                PropertyFactory.textHaloColor("#1C2436"),
-                PropertyFactory.textHaloWidth(1.6f),
-                PropertyFactory.textHaloBlur(0.3f),
+                PropertyFactory.textColor(if (road) "#E2E8F0" else "#F8FAFC"),
+                PropertyFactory.textHaloColor("#090D16"),
+                PropertyFactory.textHaloWidth(2.0f),
+                PropertyFactory.textHaloBlur(0.25f),
                 PropertyFactory.textOpacity(1f))
         }
         if (style.getLayer(GRASS) == null) {
-            // Grass, meadows and farmland, which the night style doesn't draw: a fainter green, under the woods.
             val grass = FillLayer(GRASS, "openmaptiles").withSourceLayer("landcover").withProperties(
-                PropertyFactory.fillColor("#41694F"), PropertyFactory.fillOpacity(0.45f)
+                PropertyFactory.fillColor("#152C24"), PropertyFactory.fillOpacity(0.45f)
             ).withFilter(Expression.Converter.convert("""["match", ["get", "class"], ["grass", "farmland"], true, false]"""))
             if (style.getLayer("landcover_wood") != null) style.addLayerBelow(grass, "landcover_wood") else style.addLayerAbove(grass, "water")
         }
-        style.getLayer("highway_minor")?.setProperties(PropertyFactory.lineColor("#6A7899"))
-        style.getLayer("highway_major_inner")?.setProperties(PropertyFactory.lineColor("#8190B3"))
-        style.getLayer("highway_major_subtle")?.setProperties(PropertyFactory.lineColor("#8190B3"))
-        style.getLayer("highway_motorway_inner")?.setProperties(PropertyFactory.lineColor("#9AA8CB"))
-        style.getLayer("highway_motorway_subtle")?.setProperties(PropertyFactory.lineColor("#9AA8CB"))
+        style.getLayer("highway_path")?.setProperties(PropertyFactory.lineColor("#334155"), PropertyFactory.lineOpacity(0.85f))
+        style.getLayer("highway_minor")?.setProperties(PropertyFactory.lineColor("#3B4D6B"), PropertyFactory.lineOpacity(0.95f))
+        style.getLayer("highway_major_casing")?.setProperties(PropertyFactory.lineColor("#0B0F17"))
+        style.getLayer("highway_major_inner")?.setProperties(PropertyFactory.lineColor("#647899"))
+        style.getLayer("highway_major_subtle")?.setProperties(PropertyFactory.lineColor("#526484"), PropertyFactory.lineOpacity(0.9f))
+        style.getLayer("highway_motorway_casing")?.setProperties(PropertyFactory.lineColor("#0F172A"))
+        style.getLayer("highway_motorway_inner")?.setProperties(PropertyFactory.lineColor("#8BA0C2"))
+        style.getLayer("highway_motorway_subtle")?.setProperties(PropertyFactory.lineColor("#7589AB"))
         if (style.getLayer(BUILDINGS) == null) {
             val buildings = FillExtrusionLayer(BUILDINGS, "openmaptiles").withSourceLayer("building").withProperties(
-                PropertyFactory.fillExtrusionColor("#36425F"),
+                PropertyFactory.fillExtrusionColor("#1E293B"),
                 PropertyFactory.fillExtrusionHeight(Expression.get("render_height")),
                 PropertyFactory.fillExtrusionBase(Expression.get("render_min_height")),
-                PropertyFactory.fillExtrusionOpacity(0.8f)
+                PropertyFactory.fillExtrusionOpacity(0.72f)
             ).apply { minZoom = 14f }
             val firstLabel = style.layers.firstOrNull { it is SymbolLayer }?.id
             if (firstLabel != null) style.addLayerBelow(buildings, firstLabel) else style.addLayer(buildings)

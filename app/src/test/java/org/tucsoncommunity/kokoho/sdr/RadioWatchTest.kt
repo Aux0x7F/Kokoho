@@ -143,11 +143,29 @@ class RadioWatchTest {
             targets = listOf(RadioWatch.Target(806_812_500L, "Dispatch"))
         )
         val t = learn(w, 8)
-        val ev = w.analyze(center, psd(center, tower to 40, radio to 42, 806_812_500L to 20), rate, t)
+        val ev = w.analyze(center, psd(center, tower to 40, radio to 42, 806_812_500L to 26), rate, t)
         assertTrue(ev.none { it.freqHz == radio })                 // excluded
         val target = ev.single { it.target != null }
         assertEquals("Dispatch", target.target!!.label)
         assertEquals(RadioWatch.Kind.TARGET, target.band.kind)
+    }
+
+    @Test
+    fun continuousSpurOnWatchedTargetIsLearnedAndSuppressed() {
+        val w = RadioWatch()
+        val spurHz = 806_812_500L
+        w.config = RadioWatch.Config(
+            targets = listOf(RadioWatch.Target(spurHz, "ICE-TAC-ORA"))
+        )
+        var t = 1_000L
+        // Continuous carrier present during the learning window (>= 40% busy) must be suppressed.
+        repeat(8) {
+            assertTrue(w.analyze(center, psd(center, tower to 40, spurHz to 38), rate, t).isEmpty())
+            w.sweepDone()
+            t += 30_000L
+        }
+        val ev = w.analyze(center, psd(center, tower to 40, spurHz to 45), rate, t)
+        assertTrue(ev.none { it.freqHz == spurHz })
     }
 
     @Test

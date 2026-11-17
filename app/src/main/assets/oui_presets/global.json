@@ -1648,30 +1648,6 @@
     "category": "PUBLIC_SAFETY"
   },
   {
-    "prefix": "00:40:29",
-    "label": "Compex vehicle / agency WiFi access point",
-    "source": "IEEE MA-L (Compex); listed by OffGridPete/Fieldwatch. Common chip/module maker: a clue, not proof",
-    "confidence": "candidate",
-    "score": 35,
-    "category": "PUBLIC_SAFETY"
-  },
-  {
-    "prefix": "00:80:48",
-    "label": "Compex vehicle / agency WiFi access point",
-    "source": "IEEE MA-L (Compex Incorporated); listed by OffGridPete/Fieldwatch. Common chip/module maker: a clue, not proof",
-    "confidence": "candidate",
-    "score": 35,
-    "category": "PUBLIC_SAFETY"
-  },
-  {
-    "prefix": "04:F0:21",
-    "label": "Compex vehicle / agency WiFi access point",
-    "source": "IEEE MA-L (Compex Systems Pte Ltd); listed by OffGridPete/Fieldwatch. Common chip/module maker: a clue, not proof",
-    "confidence": "candidate",
-    "score": 35,
-    "category": "PUBLIC_SAFETY"
-  },
-  {
     "prefix": "00:40:9D",
     "label": "DigiBoard (Digi) fleet telematics gateway",
     "source": "IEEE MA-L (DigiBoard); listed by MaxwellDPS/Flock-You-Android. Common chip/module maker: a clue, not proof",

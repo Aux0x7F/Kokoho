@@ -47,6 +47,9 @@ object P25Frame {
     fun stripStatus(frame: IntArray): IntArray =
         frame.filterIndexed { i, _ -> (i + SYNC_DIBITS + 1) % 36 != 0 }.toIntArray()
 
+    fun stripStatus(frame: FloatArray): FloatArray =
+        frame.filterIndexed { i, _ -> (i + SYNC_DIBITS + 1) % 36 != 0 }.toFloatArray()
+
     // ---- NID: 16 bits (NAC, DUID), 47 BCH parity bits, 1 parity bit ----
 
     /** BCH(63,16,23) generator, octal 6331141367235453 (GF(64) from x^6+x+1; it corrects 11 errors). */
@@ -61,19 +64,50 @@ object P25Frame {
 
     private val codewords: LongArray by lazy { LongArray(1 shl 16) { nidCodeword(it) } }
 
-    /** The NID from the first 32 dibits; null when more than 11 bits are wrong. */
-    fun nid(d: IntArray): Nid? {
+    /**
+     * The NID from the first 32 dibits; null when more than 11 bits are wrong (or 15 with [nac] known: the same
+     * 16-codeword subcode has minimum distance 23, so 7 false-alarm bits stay as far away as 11 across all 65,536).
+     * With [soft] symbols, the two bits of each dibit are weighted by how clean its slice was.
+     */
+    fun nid(d: IntArray, soft: FloatArray? = null, nac: Int? = null): Nid? {
         if (d.size < NID_DIBITS) return null
         var v = 0L
         for (i in 0 until NID_DIBITS) v = v shl 2 or d[i].toLong()
         val received = v ushr 1 // the 64th bit is a plain parity bit
-        var best = -1; var bestErr = 64
+        val w = if (soft != null && soft.size >= NID_DIBITS) bitWeights(soft) else null
+        val range = if (nac != null) (nac shl 4) until ((nac + 1) shl 4) else codewords.indices
+        val maxErr = if (nac != null) 15 else 11
+        var best = -1; var bestErr = 64; var bestCost = Float.MAX_VALUE
         val cw = codewords
-        for (info in cw.indices) {
-            val e = java.lang.Long.bitCount(cw[info] xor received)
-            if (e < bestErr) { bestErr = e; best = info; if (e == 0) break }
+        for (info in range) {
+            val diff = cw[info] xor received
+            val e = java.lang.Long.bitCount(diff)
+            if (w == null) {
+                if (e < bestErr) { bestErr = e; best = info; if (e == 0) break }
+            } else if (e <= maxErr) {
+                val c = softCost(diff, w)
+                if (c < bestCost) { bestCost = c; bestErr = e; best = info }
+            }
         }
-        return if (bestErr <= 11) Nid(best shr 4, best and 0xf, bestErr) else null
+        return if (best >= 0 && bestErr <= maxErr) Nid(best shr 4, best and 0xf, bestErr) else null
+    }
+
+    /** Confidence (0.1..1) of each of the 63 NID bits from its symbol's slice distance to the nearest boundary. */
+    private fun bitWeights(soft: FloatArray): FloatArray = FloatArray(63) { b ->
+        val s = soft[b / 2]
+        // High bit (sign): boundary at 0; low bit (inner / outer): boundaries at -2 and +2.
+        val margin = if (b % 2 == 0) kotlin.math.abs(s) else kotlin.math.abs(kotlin.math.abs(s) - 2f)
+        margin.coerceIn(0.1f, 1f)
+    }
+
+    private fun softCost(diff: Long, w: FloatArray): Float {
+        var x = diff; var c = 0f
+        while (x != 0L) {
+            val bit = 62 - java.lang.Long.numberOfLeadingZeros(x)
+            c += w[bit]
+            x = x xor (1L shl bit)
+        }
+        return c
     }
 
     // ---- Trunking blocks ----
@@ -114,9 +148,28 @@ object P25Frame {
 
     /**
      * The block's 96 bits divided by x^16+x^12+x^5+1 leave all ones when it is intact (the sender appends the
-     * inverted CRC-CCITT of the first 10 bytes).
+     * inverted CRC-CCITT of the first 10 bytes). Corrects a single bit error in place when [fixOne] is on.
      */
-    fun crcOk(b: ByteArray): Boolean = remainder(b) == 0xffff
+    fun crcOk(b: ByteArray, fixOne: Boolean = true): Boolean {
+        val syn = remainder(b) xor 0xffff
+        if (syn == 0) return true
+        if (!fixOne) return false
+        val bit = SINGLE_BIT[syn] ?: return false
+        b[bit / 8] = (b[bit / 8].toInt() xor (1 shl (7 - bit % 8))).toByte()
+        return true
+    }
+
+    /** Syndrome -> bit index (0..95, MSB first) for every 1-bit error in a 96-bit block (all 96 syndromes are distinct). */
+    private val SINGLE_BIT: Map<Int, Int> by lazy {
+        HashMap<Int, Int>(128).also { m ->
+            val z = ByteArray(12)
+            for (bit in 0 until 96) {
+                z[bit / 8] = (1 shl (7 - bit % 8)).toByte()
+                m[remainder(z)] = bit
+                z[bit / 8] = 0
+            }
+        }
+    }
 
     /** Remainder of [b] (bits MSB first) divided by the CCITT polynomial. */
     fun remainder(b: ByteArray): Int {

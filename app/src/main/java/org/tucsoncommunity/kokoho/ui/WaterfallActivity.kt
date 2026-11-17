@@ -39,11 +39,22 @@ class WaterfallActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityWaterfallBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.root.applySystemBarInsets()
-        binding.root.setBackgroundColor(org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this))
-        title = "Radio waterfall"
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        val bg = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this)
+        val header = KokohoJourneyUi.wrapActivityWithSubjourneyHeader(
+            activity = this,
+            contentView = binding.root,
+            title = "Radio Waterfall",
+            bgColorArgb = bg,
+            menuItemsProvider = {
+                listOf(
+                    KokohoJourneyUi.SubjourneyMenuItem("Tune Frequency…") { askFrequency() },
+                    KokohoJourneyUi.SubjourneyMenuItem("Run Antenna Check") { antennaCheck() }
+                )
+            }
+        )
+        val shell = header.root.parent as View
+        setContentView(shell)
+        shell.applySystemBarInsets()
         binding.waterfall.onTap = { hz -> zoom(hz) }
         binding.tuneButton.setOnClickListener { askFrequency() }
         binding.sweepButton.setOnClickListener { SdrRadio.tuneHz = null; refresh() }

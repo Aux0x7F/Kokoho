@@ -37,20 +37,121 @@ class P25Demod(offsetHz: Double, private val frameDibits: Int = FRAME_DIBITS, pr
     // Channel low-pass at 48 kS/s.
     private val firR = DoubleArray(TAPS.size); private val firI = DoubleArray(TAPS.size); private var firAt = 0
 
-    // Discriminator.
+    // Discriminator (C4FM) and 1-symbol differential phase detector (CQPSK / LSM pi/4-DQPSK).
     private var lastR = 0.0; private var lastI = 0.0
     private var afcSum = 0.0; private var afcN = 0
+    private var fastDcHz = 0.0
+    private val delayR = DoubleArray(SPS); private val delayI = DoubleArray(SPS); private var delayAt = 0
 
-    // Symbol filter (a symbol-long moving average) and the history the sync search looks back over.
+    // C4FM symbol filter (a symbol-long moving average).
     private val box = DoubleArray(SPS); private var boxAt = 0; private var boxSum = 0.0
-    private val hist = DoubleArray(HIST); private var n = 0L
 
     private class Collect(val start: Long, val dc: Double, val level: Double, size: Int) {
         val dibits = IntArray(size); var got = 0
     }
-    private val collecting = ArrayList<Collect>()
-    private var lastSync = Long.MIN_VALUE / 2
-    private var best = 0.0; private var bestAt = -1L
+
+    private var sampleClock = 0L
+    private var lastCountedSync = Long.MIN_VALUE / 2
+    private var lastGoodEmitStart = Long.MIN_VALUE / 2
+    private var lastAnyEmitStart = Long.MIN_VALUE / 2
+    private var pendingBadStart = -1L
+    private var pendingBadDibits: IntArray? = null
+    private var pendingBadDeadline = -1L
+
+    private inner class SymbolPath(private val isCqpsk: Boolean) {
+        private val hist = DoubleArray(HIST)
+        private var n = 0L
+        private val collecting = ArrayList<Collect>()
+        private var lastSync = Long.MIN_VALUE / 2
+        private var best = 0.0
+        private var bestAt = -1L
+
+        private fun at(back: Int) = hist[((n - back) % HIST).toInt().let { if (it < 0) it + HIST else it }]
+
+        fun step(v: Double) {
+            hist[(n % HIST).toInt()] = v
+            if (collecting.isNotEmpty()) {
+                val it = collecting.iterator()
+                while (it.hasNext()) {
+                    val c = it.next()
+                    if ((n - c.start) % SPS != 0L) continue
+                    c.dibits[c.got++] = slice((v - c.dc) / c.level)
+                    if (c.got == c.dibits.size) {
+                        it.remove()
+                        onPathFrame(isCqpsk, c.start, c.dibits)
+                    }
+                }
+            }
+            if (n >= SYNC.size * SPS) {
+                var dot = 0.0; var energy = 0.0
+                for (s in SYNC.indices) {
+                    val x = at((SYNC.size - 1 - s) * SPS)
+                    dot += x * SYNC[s]; energy += x * x
+                }
+                val corr = if (energy > 0) dot / sqrt(energy * SYNC_ENERGY) else 0.0
+                if (corr > SYNC_CORR && corr > best) { best = corr; bestAt = n }
+                if (bestAt >= 0 && n - bestAt >= SPS / 2) {
+                    if (bestAt - lastSync > SYNC.size * SPS) found(bestAt)
+                    best = 0.0; bestAt = -1
+                }
+            }
+            n++
+        }
+
+        private fun found(end: Long) {
+            lastSync = end
+            var plus = 0.0; var minus = 0.0; var np = 0; var nm = 0
+            for (s in SYNC.indices) {
+                val x = at((n - end).toInt() + (SYNC.size - 1 - s) * SPS)
+                if (SYNC[s] > 0) { plus += x; np++ } else { minus += x; nm++ }
+            }
+            val hi = plus / np; val lo = minus / nm
+            val level = (hi - lo) / 2
+            if (level <= 0) return
+            if (kotlin.math.abs(end - lastCountedSync) > 4 * SPS) {
+                syncs++
+                lastCountedSync = end
+            }
+            val c = Collect(end, (hi + lo) / 2, level, frameDibits)
+            var t = end + SPS
+            while (t <= n && c.got < frameDibits) {
+                c.dibits[c.got++] = slice((at((n - t).toInt()) - c.dc) / c.level)
+                t += SPS
+            }
+            collecting += c
+        }
+    }
+
+    private val c4fmPath = SymbolPath(isCqpsk = false)
+    private val cqpskPath = SymbolPath(isCqpsk = true)
+
+    private fun onPathFrame(isCqpsk: Boolean, start: Long, dibits: IntArray) {
+        if (kotlin.math.abs(start - lastGoodEmitStart) <= 6 * SPS) return
+        val hasValidNid = dibits.size >= 33 && P25Frame.nid(P25Frame.stripStatus(dibits)) != null
+        if (hasValidNid) {
+            if (pendingBadDibits != null && kotlin.math.abs(start - pendingBadStart) <= 6 * SPS) {
+                pendingBadDibits = null
+                pendingBadStart = -1L
+            }
+            lastGoodEmitStart = start
+            lastAnyEmitStart = start
+            onFrame(dibits)
+            return
+        }
+        if (!isCqpsk) {
+            val prevBad = pendingBadDibits
+            if (prevBad != null && kotlin.math.abs(pendingBadStart - lastAnyEmitStart) > 6 * SPS) {
+                lastAnyEmitStart = pendingBadStart
+                onFrame(prevBad)
+            }
+            pendingBadStart = start
+            pendingBadDibits = dibits
+            pendingBadDeadline = sampleClock + 4 * SPS
+        } else if (pendingBadDibits == null && kotlin.math.abs(start - lastAnyEmitStart) > 6 * SPS) {
+            lastAnyEmitStart = start
+            onFrame(dibits)
+        }
+    }
 
     /** Unsigned 8-bit I/Q as the dongle delivers it: [count] complex samples from [buf]. */
     fun feed(buf: ByteArray, count: Int) {
@@ -80,71 +181,50 @@ class P25Demod(offsetHz: Double, private val frameDibits: Int = FRAME_DIBITS, pr
         var yr = 0.0; var yi = 0.0; var j = firAt
         for (t in TAPS) { yr += t * firR[j]; yi += t * firI[j]; if (--j < 0) j = TAPS.size - 1 }
         if (++firAt == TAPS.size) firAt = 0
-        // FM discriminator: the phase step between samples, in Hz.
+
+        // 1. C4FM discriminator: 1-sample phase step in Hz + 10-sample moving average.
         val hz = atan2(yi * lastR - yr * lastI, yr * lastR + yi * lastI) * CHANNEL_RATE / (2 * PI)
         lastR = yr; lastI = yi
+        fastDcHz += 0.003 * (hz.coerceIn(-2400.0, 2400.0) - fastDcHz)
         afc(hz)
         boxSum += hz - box[boxAt]; box[boxAt] = hz; if (++boxAt == SPS) boxAt = 0
-        symbolSample(boxSum / SPS)
+        c4fmPath.step(boxSum / SPS)
+
+        // 2. CQPSK / LSM (pi/4-DQPSK) detector: 1-symbol (SPS-sample) differential phase, de-rotated by residual carrier offset.
+        val dr = delayR[delayAt]; val di = delayI[delayAt]
+        delayR[delayAt] = yr; delayI[delayAt] = yi
+        if (++delayAt == SPS) delayAt = 0
+        val ur = yr * dr + yi * di
+        val ui = yi * dr - yr * di
+        val thetaF = 2.0 * PI * fastDcHz / SYMBOL_RATE
+        val cr = cos(thetaF); val ci = sin(thetaF)
+        val cqpskSym = atan2(ui * cr - ur * ci, ur * cr + ui * ci) / (PI / 4.0)
+        cqpskPath.step(cqpskSym)
+
+        sampleClock++
+        val bad = pendingBadDibits
+        if (bad != null && sampleClock >= pendingBadDeadline) {
+            val badStart = pendingBadStart
+            pendingBadDibits = null
+            pendingBadStart = -1L
+            if (kotlin.math.abs(badStart - lastGoodEmitStart) > 6 * SPS &&
+                kotlin.math.abs(badStart - lastAnyEmitStart) > 6 * SPS
+            ) {
+                lastAnyEmitStart = badStart
+                onFrame(bad)
+            }
+        }
     }
 
-    /** C4FM averages to zero over random data: what's left is the channel being off centre. */
+    /** C4FM / CQPSK averages to zero over random data: what's left is the channel being off centre. */
     private fun afc(hz: Double) {
         afcSum += hz.coerceIn(-3000.0, 3000.0)
         if (++afcN < AFC_SAMPLES) return
-        offsetHz += AFC_GAIN * afcSum / afcN
+        val deltaHz = AFC_GAIN * afcSum / afcN
+        offsetHz += deltaHz
+        fastDcHz -= deltaHz
         afcSum = 0.0; afcN = 0
         setStep()
-    }
-
-    private fun at(back: Int) = hist[((n - back) % HIST).toInt().let { if (it < 0) it + HIST else it }]
-
-    private fun symbolSample(v: Double) {
-        hist[(n % HIST).toInt()] = v
-        // Dibits for the frames being collected: one every SPS samples after their sync.
-        if (collecting.isNotEmpty()) {
-            val it = collecting.iterator()
-            while (it.hasNext()) {
-                val c = it.next()
-                if ((n - c.start) % SPS != 0L) continue
-                c.dibits[c.got++] = slice((v - c.dc) / c.level)
-                if (c.got == c.dibits.size) { it.remove(); onFrame(c.dibits) }
-            }
-        }
-        // Sync search: the last 24 symbols against the pattern, normalized.
-        if (n >= SYNC.size * SPS) {
-            var dot = 0.0; var energy = 0.0
-            for (s in SYNC.indices) {
-                val x = at((SYNC.size - 1 - s) * SPS)
-                dot += x * SYNC[s]; energy += x * x
-            }
-            val corr = if (energy > 0) dot / sqrt(energy * SYNC_ENERGY) else 0.0
-            if (corr > SYNC_CORR && corr > best) { best = corr; bestAt = n }
-            // The peak is past: that sample is the sync's last symbol.
-            if (bestAt >= 0 && n - bestAt >= SPS / 2) {
-                if (bestAt - lastSync > SYNC.size * SPS) found(bestAt)
-                best = 0.0; bestAt = -1
-            }
-        }
-        n++
-    }
-
-    private fun found(end: Long) {
-        lastSync = end
-        var plus = 0.0; var minus = 0.0; var np = 0; var nm = 0
-        for (s in SYNC.indices) {
-            val x = at((n - end).toInt() + (SYNC.size - 1 - s) * SPS)
-            if (SYNC[s] > 0) { plus += x; np++ } else { minus += x; nm++ }
-        }
-        val hi = plus / np; val lo = minus / nm
-        val level = (hi - lo) / 2
-        if (level <= 0) return
-        syncs++
-        val c = Collect(end, (hi + lo) / 2, level, frameDibits)
-        // Samples already past since the sync's end: catch up those dibits from the history.
-        var t = end + SPS
-        while (t <= n && c.got < frameDibits) { c.dibits[c.got++] = slice((at((n - t).toInt()) - c.dc) / c.level); t += SPS }
-        collecting += c
     }
 
     companion object {

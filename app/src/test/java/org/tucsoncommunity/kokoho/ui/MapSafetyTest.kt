@@ -50,7 +50,7 @@ class MapSafetyTest {
     @Test
     fun aCleanStartChangesNothing() {
         assertEquals(MapSafety.Recovery.NONE, MapSafety.recover(ctx))
-        assertNull("MapLibre chooses (Vulkan where it exists)", MapSafety.renderer(ctx))
+        assertEquals("always forces OpenGL to avoid Vulkan app-switch crashes", RenderingEngine.Type.OPENGL, MapSafety.renderer(ctx))
         assertEquals(setOf("map", "list"), Prefs.viewPanes(ctx))
     }
 
@@ -102,7 +102,7 @@ class MapSafetyTest {
     fun aMapboxCrashCannotBeHelpedByOpenGl() {
         MapSafety.arm(ctx, MapEngine.Provider.MAPBOX); newProcess()
         assertEquals(MapSafety.Recovery.MAP_OFF, MapSafety.recover(ctx))
-        assertNull("MapLibre's renderer was not to blame", MapSafety.renderer(ctx))
+        assertEquals("OpenGL is always selected regardless of provider", RenderingEngine.Type.OPENGL, MapSafety.renderer(ctx))
         assertEquals(setOf("list"), Prefs.viewPanes(ctx))
     }
 
@@ -113,7 +113,7 @@ class MapSafetyTest {
         assertFalse(MapSafety.crashedLastTime(ctx))
         assertEquals(MapSafety.Recovery.NONE, MapSafety.recover(ctx))
         assertEquals(setOf("map", "list"), Prefs.viewPanes(ctx))
-        assertNull(MapSafety.renderer(ctx))
+        assertEquals(RenderingEngine.Type.OPENGL, MapSafety.renderer(ctx))
     }
 
     @Test

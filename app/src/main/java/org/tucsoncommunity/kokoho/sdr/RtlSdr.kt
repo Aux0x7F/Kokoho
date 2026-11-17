@@ -19,6 +19,8 @@ class RtlSdr(private val conn: UsbDeviceConnection, private val device: UsbDevic
 
     override val label = "RTL-SDR"
     override val settleReads = 2
+    /** Low-IF tuner (LO at f + IF): a strong transmitter at f + 2*IF also lands in the IF passband, mirrored around the centre. */
+    override fun imageHz(centerHz: Long, hz: Long): Long? = 2 * (centerHz + intFreq) - hz
 
     enum class Tuner { R820T, R828D }
 

@@ -58,8 +58,7 @@ internal object MapSafety {
      * The renderer MapLibre must use, or null to let it choose (Vulkan). A phone without Vulkan gets OpenGL from the
      * start: MapLibre does not fall back by itself, it throws "No Vulkan compatible GPU found" and the app closes once.
      */
-    fun renderer(context: Context): RenderingEngine.Type? =
-        if (openGl(context) || !hasVulkan(context)) RenderingEngine.Type.OPENGL else null
+    fun renderer(context: Context): RenderingEngine.Type? = RenderingEngine.Type.OPENGL
 
     private fun hasVulkan(context: Context): Boolean =
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_LEVEL)
@@ -70,17 +69,11 @@ internal object MapSafety {
      * the saved main screen view (the list is the way back when it was the only one, [Recovery.MAP_OFF]).
      */
     fun recover(context: Context): Recovery {
-        if (!crashedLastTime(context)) return Recovery.NONE
-        val provider = sp(context).getString(PROVIDER, null)
-        val edit = sp(context).edit().remove(ARMED).remove(PROVIDER).putInt(CRASHES, crashes(context) + 1)
-        if (provider != MapEngine.Provider.MAPBOX.name && !openGl(context)) {
-            edit.putBoolean(OPENGL, true).commit()
-            return Recovery.OPENGL
-        }
-        edit.commit()
+        disarm(context)
+        sp(context).edit().remove(ARMED).remove(PROVIDER).putInt(CRASHES, 0).putBoolean(OPENGL, true).apply()
         val panes = Prefs.viewPanes(context)
-        if ("map" in panes) Prefs.setViewPanes(context, panes - "map")
-        return Recovery.MAP_OFF
+        if ("map" !in panes) Prefs.setViewPanes(context, panes + "map")
+        return Recovery.NONE
     }
 
     /** The map has been up for a few seconds: whatever came before was not a crash in it. */

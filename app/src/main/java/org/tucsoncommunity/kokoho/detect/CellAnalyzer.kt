@@ -62,7 +62,9 @@ class CellAnalyzer(private val knownAreas: MutableMap<String, Int> = LinkedHashM
         /** True when GPS shows you haven't moved (speed < ~1 m/s, < 50 m over a few minutes). */
         val stationary: Boolean?,
         /** A phone call is going on (or just ended): networks without 4G calling drop to 2G/3G for it. */
-        val inCall: Boolean = false
+        val inCall: Boolean = false,
+        /** Foreign MCCs (e.g. "334" Mexico Sonora) verified against nearby (<35 km) cataloged border towers. */
+        val borderCatalogedMccs: Set<String> = emptySet()
     )
 
     data class Anomaly(val key: String, val title: String, val detail: String, val confidence: Int)
@@ -136,7 +138,7 @@ class CellAnalyzer(private val knownAreas: MutableMap<String, Int> = LinkedHashM
     private fun foreignCountry(serving: Cell, ctx: Context): Anomaly? {
         val simMcc = ctx.simOperator?.take(3) ?: return null
         val mcc = serving.mcc ?: return null
-        if (mcc in TEST_MCC || mcc == simMcc || ctx.roaming || simMcc in SHARED_COUNTRY[mcc].orEmpty()) return null
+        if (mcc in TEST_MCC || mcc == simMcc || ctx.roaming || mcc in ctx.borderCatalogedMccs || simMcc in SHARED_COUNTRY[mcc].orEmpty()) return null
         return Anomaly(
             "foreign:${serving.key}", "Unexpected network country code",
             "Your cell announces country code $mcc, but your SIM is from $simMcc and the phone " +
@@ -202,6 +204,9 @@ class CellAnalyzer(private val knownAreas: MutableMap<String, Int> = LinkedHashM
 
     /** Switched to a cell that shows no neighbours, where several were visible just before. */
     private fun isolated(serving: Cell, window: List<Seen>): Anomaly? {
+        val id = serving.idKey
+        // A cell already recorded in knownAreas from a prior session with the same area code isn't a new cell.
+        if (id != null && id !in firstSeen && serving.area != null && knownAreas[id] == serving.area) return null
         val start = runStart(window) { it.registered?.key == serving.key }
         val run = window.subList(start, window.size)
         if (run.any { it.neighbours > 0 } || window.last().time - run.first().time > RECENT_MS) return null

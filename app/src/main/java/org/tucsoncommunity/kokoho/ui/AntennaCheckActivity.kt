@@ -55,11 +55,17 @@ class AntennaCheckActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityAntennaCheckBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.root.applySystemBarInsets()
-        binding.root.setBackgroundColor(org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this))
-        title = "Antenna check"
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        val bg = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this)
+        binding.root.setBackgroundColor(bg)
+        val header = KokohoJourneyUi.wrapActivityWithSubjourneyHeader(
+            activity = this,
+            contentView = binding.root,
+            title = "Antenna check",
+            bgColorArgb = bg
+        )
+        val shell = header.root.parent as View
+        setContentView(shell)
+        shell.applySystemBarInsets()
         binding.apList.layoutManager = LinearLayoutManager(this)
         binding.apList.adapter = adapter
         binding.changeButton.setOnClickListener { pick(null) }

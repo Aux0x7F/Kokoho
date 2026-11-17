@@ -1,5 +1,6 @@
 package org.tucsoncommunity.kokoho.posture
 
+import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
@@ -8,8 +9,12 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
 import android.graphics.Paint
+import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.util.Base64
@@ -61,36 +66,106 @@ class KokohoViews(
 
     enum class Tab(val title: String) {
         MONITOR("Monitor"),
-        MAP("Map"),
-        UTILITY("Utility")
+        MAP("Map")
     }
 
     var currentTab: Tab = Tab.MONITOR
         private set
 
+    enum class SharingIndicatorMode {
+        PULSING_RED_DOT,
+        PAUSED_BARS,
+        DISABLED_BARS
+    }
+
+    private class SharingIndicatorDrawable(private val density: Float) : Drawable() {
+        var mode: SharingIndicatorMode = SharingIndicatorMode.PAUSED_BARS
+        var pulseFraction: Float = 1.0f
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val barRect = RectF()
+        private val sizePx = (15f * density).toInt().coerceAtLeast(12)
+
+        override fun getIntrinsicWidth(): Int = sizePx
+        override fun getIntrinsicHeight(): Int = sizePx
+
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            if (b.isEmpty) return
+            val cx = b.exactCenterX()
+            val cy = b.exactCenterY()
+            val half = minOf(b.width(), b.height()) / 2f
+            when (mode) {
+                SharingIndicatorMode.PULSING_RED_DOT -> {
+                    val f = pulseFraction.coerceIn(0f, 1f)
+                    // Soft breathing red halo
+                    paint.style = Paint.Style.FILL
+                    paint.color = Color.argb((32 + (110 * f).toInt()).coerceIn(0, 255), 0xFF, 0x17, 0x44)
+                    canvas.drawCircle(cx, cy, half * (0.68f + 0.30f * f), paint)
+                    // Crisp bright red core dot
+                    paint.color = Color.argb((95 + (160 * f).toInt()).coerceIn(0, 255), 0xFF, 0x2B, 0x4E)
+                    canvas.drawCircle(cx, cy, half * 0.54f, paint)
+                }
+                SharingIndicatorMode.PAUSED_BARS, SharingIndicatorMode.DISABLED_BARS -> {
+                    paint.style = Paint.Style.FILL
+                    paint.color = if (mode == SharingIndicatorMode.PAUSED_BARS) {
+                        0xEEFFFFFF.toInt()
+                    } else {
+                        0x88FFFFFF.toInt()
+                    }
+                    val barW = (half * 0.34f).coerceAtLeast(1.8f)
+                    val barH = half * 1.18f
+                    val gap = (half * 0.24f).coerceAtLeast(1.5f)
+                    val r = barW / 2f
+                    barRect.set(cx - gap - barW, cy - barH / 2f, cx - gap, cy + barH / 2f)
+                    canvas.drawRoundRect(barRect, r, r, paint)
+                    barRect.set(cx + gap, cy - barH / 2f, cx + gap + barW, cy + barH / 2f)
+                    canvas.drawRoundRect(barRect, r, r, paint)
+                }
+            }
+        }
+
+        override fun setAlpha(alpha: Int) {
+            paint.alpha = alpha
+        }
+
+        override fun setColorFilter(colorFilter: ColorFilter?) {
+            paint.colorFilter = colorFilter
+        }
+
+        @Suppress("OVERRIDE_DEPRECATION")
+        override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+    }
+
     private val density = activity.resources.displayMetrics.density
     private fun dp(v: Int): Int = (v * density).toInt()
+    private val sharingIndicatorDrawable = SharingIndicatorDrawable(density)
+    private var sharePulseAnimator: ValueAnimator? = null
+
+    val isSharingPulsingRed: Boolean
+        get() = sharingIndicatorDrawable.mode == SharingIndicatorMode.PULSING_RED_DOT &&
+            (sharePulseAnimator?.isStarted == true)
+
+    val isSharingShowingPause: Boolean
+        get() = sharingIndicatorDrawable.mode == SharingIndicatorMode.PAUSED_BARS ||
+            sharingIndicatorDrawable.mode == SharingIndicatorMode.DISABLED_BARS
 
     private val topHeaderBar: LinearLayout
     private val headerLogo: ImageView
     private val headerTitle: TextView
     private val headerSubtitle: TextView
     val shareToggleButton: MaterialButton
-    val scanToggleButton: MaterialButton
+    val menuButton: MaterialButton
 
     private val tabRow: LinearLayout
     private val tabButtons = LinkedHashMap<Tab, TextView>()
 
     private val monitorContainer: LinearLayout
+    private val bluetoothNoticePill: MaterialButton
     private val postureBadge: TextView
     val postureHeadline: TextView
     val postureDistance: TextView
     private val agencyStackContainer: LinearLayout
     val bottomConfidenceBar: TextView
-
-    private val utilityContainer: ScrollView
-    private val logsContainer: ScrollView
-    private val logsText: TextView
 
     private var latestSnapshot: PostureSnapshot? = null
     private var runningState: Boolean = ScanForegroundService.isRunning
@@ -152,13 +227,26 @@ class KokohoViews(
             cornerRadius = dp(999)
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(12), 0, dp(12), 0)
+            setPadding(dp(11), 0, dp(13), 0)
+            icon = sharingIndicatorDrawable
+            iconTint = null
+            iconSize = dp(15)
+            iconPadding = dp(6)
+            iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
                 marginEnd = dp(8)
             }
+            addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(v: View) {
+                    syncSharePillState()
+                }
+                override fun onViewDetachedFromWindow(v: View) {
+                    stopSharePulse()
+                }
+            })
             setOnClickListener {
                 if (!KokohoSignatures.isContributionAllowedInSettings(activity)) {
                     Toast.makeText(
@@ -171,29 +259,43 @@ class KokohoViews(
                     KokohoSignatures.setSharingActive(activity, next)
                     syncSharePillState()
                     val msg = if (next) {
-                        "Sharing ON (derived locations only)"
+                        "Sharing ON"
                     } else {
-                        "Sharing OFF (local-only mode)"
+                        "Sharing paused (local-only mode)"
                     }
                     Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
                 }
             }
         }
 
-        scanToggleButton = MaterialButton(activity).apply {
+        menuButton = MaterialButton(activity).apply {
             minHeight = dp(38)
             minimumHeight = dp(38)
+            minWidth = dp(42)
+            minimumWidth = dp(42)
             insetTop = 0
             insetBottom = 0
             cornerRadius = dp(999)
-            textSize = 12.5f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(14), 0, dp(16), 0)
-            iconSize = dp(16)
-            iconPadding = dp(6)
+            text = ""
+            contentDescription = "Menu"
+            setPadding(dp(11), 0, dp(11), 0)
+            icon = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.VectorIconDrawable(
+                activity,
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.VectorIconKind.SANDWICH_MENU
+            )
+            iconTint = null
+            iconSize = dp(20)
+            iconPadding = 0
             iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            backgroundTintList = ColorStateList.valueOf(0x7712161F)
+            strokeColor = ColorStateList.valueOf(0x99FFFFFF.toInt())
+            strokeWidth = dp(1)
             setOnClickListener {
-                binding.startStopButton.performClick()
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.showRootSandwichMenu(activity) {
+                    syncSdrTargets()
+                    updatePosture()
+                    onFilterChanged()
+                }
             }
         }
 
@@ -204,7 +306,7 @@ class KokohoViews(
             addView(headerLogo)
             addView(titleCol)
             addView(shareToggleButton)
-            addView(scanToggleButton)
+            addView(menuButton)
         }
 
         // 2. 3-Category Segmented Tab Bar (Monitor | Map | Utility)
@@ -338,16 +440,11 @@ class KokohoViews(
             }
             visibility = View.GONE
             setOnClickListener {
-                val primaryGroup = latestSnapshot?.monitorGroups?.firstOrNull()
-                if (primaryGroup != null) {
-                    showDistinctAgentsDialog(primaryGroup, System.currentTimeMillis())
-                } else {
-                    val primary = latestSnapshot?.primaryThreat ?: return@setOnClickListener
-                    activity.startActivity(
-                        Intent(activity, DeviceDetailActivity::class.java)
-                            .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${primary.uuid}")
-                    )
-                }
+                val primary = latestSnapshot?.primaryThreat ?: return@setOnClickListener
+                activity.startActivity(
+                    Intent(activity, DeviceDetailActivity::class.java)
+                        .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${primary.uuid}")
+                )
             }
         }
 
@@ -367,70 +464,130 @@ class KokohoViews(
             )
         }
 
+        bluetoothNoticePill = MaterialButton(activity).apply {
+            text = "Turn On Bluetooth for Bodycam & Cruiser BLE"
+            isAllCaps = false
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            cornerRadius = dp(999)
+            backgroundTintList = ColorStateList.valueOf(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.HIGHLIGHT_AMBER)
+            setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.SURFACE_DARK)
+            strokeColor = ColorStateList.valueOf(Color.WHITE)
+            strokeWidth = dp(1)
+            visibility = View.GONE
+            setOnClickListener {
+                runCatching {
+                    activity.startActivity(Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                }.onFailure {
+                    runCatching { activity.startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) }
+                }
+            }
+        }
+
         monitorContainer = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            addView(
+                FrameLayout(activity).apply {
+                    setPadding(dp(16), dp(6), dp(16), 0)
+                    addView(
+                        bluetoothNoticePill,
+                        FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            Gravity.CENTER_HORIZONTAL
+                        )
+                    )
+                }
+            )
             addView(heroScroll)
             addView(bottomFooterWrapper)
         }
 
-        // 4. Build UTILITY View
-        utilityContainer = buildUtilityView()
-
-        // 5. Build LOGS View
-        val logsPair = buildLogsView()
-        logsContainer = logsPair.first
-        logsText = logsPair.second
-
         binding.contentArea.addView(monitorContainer)
-        binding.contentArea.addView(utilityContainer)
-        binding.contentArea.addView(logsContainer)
 
         syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
     }
 
+    private fun startSharePulse() {
+        if (sharePulseAnimator?.isStarted == true) return
+        sharePulseAnimator = ValueAnimator.ofFloat(0.18f, 1.0f).apply {
+            duration = 1_150L
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            addUpdateListener { anim ->
+                sharingIndicatorDrawable.pulseFraction = (anim.animatedValue as? Float) ?: 1.0f
+                sharingIndicatorDrawable.invalidateSelf()
+                shareToggleButton.invalidate()
+            }
+            start()
+        }
+    }
+
+    private fun stopSharePulse() {
+        sharePulseAnimator?.cancel()
+        sharePulseAnimator = null
+    }
+
+    private var lastShareVisualKey = ""
+
     fun syncSharePillState() {
         val allowedInSettings = KokohoSignatures.isContributionAllowedInSettings(activity)
         val sharingNow = KokohoSignatures.isSharingActive(activity)
+        val shareKey = "$allowedInSettings|$sharingNow|$runningState"
+        if (shareKey == lastShareVisualKey) return
+        lastShareVisualKey = shareKey
         when {
             !allowedInSettings -> {
-                shareToggleButton.text = "Share Off"
+                stopSharePulse()
+                sharingIndicatorDrawable.mode = SharingIndicatorMode.DISABLED_BARS
+                sharingIndicatorDrawable.invalidateSelf()
+                shareToggleButton.text = "Share"
                 shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x33455A64)
-                shareToggleButton.strokeColor = ColorStateList.valueOf(0x44FFFFFF)
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0x55FFFFFF)
                 shareToggleButton.strokeWidth = dp(1)
-                shareToggleButton.setTextColor(0x99FFFFFF.toInt())
-                shareToggleButton.alpha = 0.50f
+                shareToggleButton.setTextColor(0xAAFFFFFF.toInt())
+                shareToggleButton.alpha = 0.55f
+                shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
                     "Contribution disabled — enable in Settings > Privacy"
                 )
             }
             sharingNow -> {
-                shareToggleButton.text = "Sharing"
-                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0xFF00796B.toInt())
-                shareToggleButton.strokeColor = ColorStateList.valueOf(0xCCFFFFFF.toInt())
+                sharingIndicatorDrawable.mode = SharingIndicatorMode.PULSING_RED_DOT
+                startSharePulse()
+                sharingIndicatorDrawable.invalidateSelf()
+                shareToggleButton.text = "Stop"
+                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0xD912161F.toInt())
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0xFFFF6B6B.toInt())
                 shareToggleButton.strokeWidth = dp(1)
                 shareToggleButton.setTextColor(Color.WHITE)
                 shareToggleButton.alpha = 1.0f
+                shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
-                    "Tap to pause sharing observations"
+                    "Sharing active — tap Stop to pause sharing"
                 )
             }
             else -> {
+                stopSharePulse()
+                sharingIndicatorDrawable.mode = SharingIndicatorMode.PAUSED_BARS
+                sharingIndicatorDrawable.invalidateSelf()
                 shareToggleButton.text = "Share"
-                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x44000000)
-                shareToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
+                shareToggleButton.backgroundTintList = ColorStateList.valueOf(0x7712161F)
+                shareToggleButton.strokeColor = ColorStateList.valueOf(0x99FFFFFF.toInt())
                 shareToggleButton.strokeWidth = dp(1)
                 shareToggleButton.setTextColor(Color.WHITE)
-                shareToggleButton.alpha = 0.90f
+                shareToggleButton.alpha = 0.96f
+                shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
-                    "Tap to share derived observations"
+                    "Sharing off — tap Share to contribute observations"
                 )
             }
         }
@@ -445,32 +602,25 @@ class KokohoViews(
         (binding.filterChips.parent as? View)?.visibility = View.GONE
         syncSharePillState()
 
-        val auxStatus = if (KokohoSignatures.isAuxnetEnabled(activity)) {
-            "Auxnet ${KokohoHubClient.statusLabel}"
+        val btOn = org.tucsoncommunity.kokoho.util.Permissions.isBluetoothEnabled(activity)
+        bluetoothNoticePill.visibility = if (!btOn) View.VISIBLE else View.GONE
+
+        val auxStatus = if (KokohoSignatures.isSharingActive(activity)) {
+            "Sharing live"
         } else {
-            "Offline mode"
+            "Local private"
         }
 
-        if (running) {
-            scanToggleButton.text = "Stop"
-            scanToggleButton.setIconResource(R.drawable.ic_car_stop)
-            scanToggleButton.backgroundTintList = ColorStateList.valueOf(0xFFC62828.toInt())
-            scanToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
-            scanToggleButton.strokeWidth = dp(1)
-            scanToggleButton.setTextColor(Color.WHITE)
-            scanToggleButton.iconTint = ColorStateList.valueOf(Color.WHITE)
-            headerSubtitle.text = "Scanning · $auxStatus"
+        val nextSubtitle = if (running) {
+            val tempoSuffix = latestSnapshot?.sectorTempoText?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+            "Monitoring · $auxStatus$tempoSuffix"
         } else {
-            scanToggleButton.text = "Scan"
-            scanToggleButton.setIconResource(R.drawable.ic_car_play)
-            scanToggleButton.backgroundTintList = ColorStateList.valueOf(0xFF2E7D32.toInt())
-            scanToggleButton.strokeColor = ColorStateList.valueOf(0x88FFFFFF.toInt())
-            scanToggleButton.strokeWidth = dp(1)
-            scanToggleButton.setTextColor(Color.WHITE)
-            scanToggleButton.iconTint = ColorStateList.valueOf(Color.WHITE)
-            headerSubtitle.text = "Standby · Tap Scan to monitor"
+            "Starting sensors · $auxStatus"
         }
-        updatePosture()
+        if (headerSubtitle.text?.toString() != nextSubtitle) {
+            headerSubtitle.text = nextSubtitle
+        }
+        applySurfaceThemeColors()
     }
 
     fun syncSdrTargets() {
@@ -489,39 +639,30 @@ class KokohoViews(
                 binding.radarPane.visibility = View.GONE
                 binding.listFrame.visibility = View.GONE
                 monitorContainer.visibility = View.VISIBLE
-                utilityContainer.visibility = View.GONE
-                logsContainer.visibility = View.GONE
+                latestSnapshot?.let { updatePosture(System.currentTimeMillis(), it) }
             }
             Tab.MAP -> {
                 monitorContainer.visibility = View.GONE
-                utilityContainer.visibility = View.GONE
-                logsContainer.visibility = View.GONE
                 onSwitchPanes(setOf("map"))
-            }
-            Tab.UTILITY -> {
-                onSwitchPanes(emptySet())
-                binding.mapPane.visibility = View.GONE
-                binding.radarPane.visibility = View.GONE
-                binding.listFrame.visibility = View.GONE
-                monitorContainer.visibility = View.GONE
-                utilityContainer.visibility = View.VISIBLE
-                logsContainer.visibility = View.GONE
             }
         }
         applySurfaceThemeColors()
     }
 
+    private var lastAppliedThemeKey = ""
+
     private fun applySurfaceThemeColors() {
         val snapColor = (latestSnapshot?.color ?: PostureColor.GREEN).colorArgb
+        val themeKey = "$snapColor|${currentTab.name}"
+        if (themeKey == lastAppliedThemeKey) return
+        lastAppliedThemeKey = themeKey
 
         binding.root.setBackgroundColor(snapColor)
         monitorContainer.setBackgroundColor(snapColor)
-        utilityContainer.setBackgroundColor(snapColor)
-        logsContainer.setBackgroundColor(snapColor)
         binding.listFrame.setBackgroundColor(snapColor)
         headerLogo.imageTintList = ColorStateList.valueOf(Color.WHITE)
         headerTitle.setTextColor(Color.WHITE)
-        headerSubtitle.setTextColor(0xDDFFFFFF.toInt())
+        headerSubtitle.setTextColor(0xEEFFFFFF.toInt())
 
         for ((t, btn) in tabButtons) {
             val selected = t == currentTab
@@ -538,13 +679,28 @@ class KokohoViews(
         }
     }
 
-    fun updatePosture(nowMs: Long = System.currentTimeMillis()) {
+    fun updatePosture(nowMs: Long = System.currentTimeMillis(), precomputed: PostureSnapshot? = null) {
         syncSharePillState()
         if (ScanForegroundService.isRunning && KokohoSignatures.isAuxnetEnabled(activity)) {
             KokohoHubClient.start(activity)
         }
-        val snap = KokohoPostureEngine.evaluate(activity, nowMs)
+        val snap = precomputed ?: KokohoPostureEngine.evaluate(activity, nowMs)
         latestSnapshot = snap
+        if (ScanForegroundService.isRunning && !snap.sectorTempoText.isNullOrBlank()) {
+            val baseSub = headerSubtitle.text?.toString()?.substringBefore(" · Sector Tempo").orEmpty()
+            if (baseSub.startsWith("Scanning")) {
+                val nextSub = "$baseSub · ${snap.sectorTempoText}"
+                if (headerSubtitle.text?.toString() != nextSub) {
+                    headerSubtitle.text = nextSub
+                }
+            }
+        }
+
+        // While the Map tab is active, skip hidden Monitor view inflation/layout churn so Map panning stays at 120 FPS.
+        if (currentTab == Tab.MAP) {
+            applySurfaceThemeColors()
+            return
+        }
 
         postureHeadline.text = snap.headline
         val groups = snap.monitorGroups
@@ -629,28 +785,66 @@ class KokohoViews(
      * Tapping an agent opens [DeviceDetailActivity].
      */
     fun showDistinctAgentsDialog(group: AgencyMonitorGroup, nowMs: Long = System.currentTimeMillis()) {
-        val scroll = ScrollView(activity)
-        val container = LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            setBackgroundColor(0xFF121822.toInt())
+        if (group.distinctUnits.size == 1) {
+            val single = group.distinctUnits.first()
+            activity.startActivity(
+                Intent(activity, DeviceDetailActivity::class.java)
+                    .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${single.uuid}")
+            )
+            return
         }
-        scroll.addView(container)
-
+        val dialog = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.createCustomModal(activity)
+        val outer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            background = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.cardDrawable(
+                activity,
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.SURFACE_DARK,
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.BORDER_STRONG,
+                18
+            )
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+        val headerRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, 0, dp(10))
+        }
         val headerTv = TextView(activity).apply {
-            text = "${group.agency.friendlyLabel} — ${group.totalDistinctCount} Distinct ${if (group.totalDistinctCount == 1) "Agent / Unit" else "Agents / Units"}"
+            text = "${group.agency.friendlyLabel} — ${group.totalDistinctCount} Distinct ${if (group.totalDistinctCount == 1) "Detection" else "Detections"}"
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
-            setPadding(dp(4), dp(2), dp(4), dp(10))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        container.addView(headerTv)
+        val closeBtn = android.widget.ImageButton(activity).apply {
+            contentDescription = "Close"
+            background = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.pillDrawable(
+                activity,
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.SURFACE_ELEVATED,
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.BORDER_SUBTLE
+            )
+            setImageDrawable(
+                org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.VectorIconDrawable(
+                    activity,
+                    org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.VectorIconKind.CLOSE_X
+                )
+            )
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
+            setOnClickListener { dialog.dismiss() }
+        }
+        headerRow.addView(headerTv)
+        headerRow.addView(closeBtn)
+        outer.addView(headerRow)
 
-        var dialogRef: AlertDialog? = null
+        val scroll = ScrollView(activity)
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scroll.addView(container)
+        outer.addView(scroll)
 
-        for ((idx, unit) in group.distinctUnits.withIndex()) {
-            val witness = KokohoSignatures.getWitnessReport(activity, unit.uuid)
-            val customLabel = KokohoSignatures.getCustomEntityLabel(activity, unit.uuid)
+        for (unit in group.distinctUnits) {
+            val witness = KokohoSignatures.getWitnessReport(activity, unit.uuid, approvedOnly = false)
 
             val row = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -658,8 +852,8 @@ class KokohoViews(
                 setPadding(dp(12), dp(10), dp(12), dp(10))
                 background = GradientDrawable().apply {
                     cornerRadius = dp(10).toFloat()
-                    setColor(0xFF1E2634.toInt())
-                    setStroke(dp(1), 0x44FFFFFF)
+                    setColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.SURFACE_CARD)
+                    setStroke(dp(1), 0x66FFFFFF)
                 }
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -668,7 +862,7 @@ class KokohoViews(
                     bottomMargin = dp(8)
                 }
                 setOnClickListener {
-                    dialogRef?.dismiss()
+                    dialog.dismiss()
                     activity.startActivity(
                         Intent(activity, DeviceDetailActivity::class.java)
                             .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:${unit.uuid}")
@@ -689,18 +883,7 @@ class KokohoViews(
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
 
-            val primaryTitle = when {
-                witness != null && (witness.agentName.isNotBlank() || witness.badgeNumber.isNotBlank()) -> {
-                    listOfNotNull(
-                        witness.agentName.takeIf { it.isNotBlank() },
-                        witness.badgeNumber.takeIf { it.isNotBlank() }?.let { "Badge #$it" },
-                        witness.vehicleNumber.takeIf { it.isNotBlank() }?.let { "Veh $it" }
-                    ).joinToString(" · ")
-                }
-                !customLabel.isNullOrBlank() -> customLabel
-                else -> "${group.agency.friendlyLabel} Unit #${idx + 1}"
-            }
-
+            val primaryTitle = KokohoSignatures.formatHighestOrderTitle(unit, witness)
             val hwLine = unit.hardwareIdentifier
                 ?: unit.evidenceSources.firstOrNull()?.facetKey
                 ?: unit.uuid.take(8)
@@ -717,15 +900,15 @@ class KokohoViews(
             }
             val idTv = TextView(activity).apply {
                 text = hwLine
-                textSize = 12f
+                textSize = 13f
                 typeface = Typeface.MONOSPACE
-                setTextColor(0xFF93C5FD.toInt())
+                setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.HIGHLIGHT_AMBER)
                 setPadding(0, dp(2), 0, 0)
             }
             val metaTv = TextView(activity).apply {
                 text = "$accStr$altExtra · $ageStr · ${unit.combinedConfidence}% conf"
-                textSize = 12.5f
-                setTextColor(0xDDFFFFFF.toInt())
+                textSize = 13f
+                setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.INK_SECONDARY)
                 setPadding(0, dp(2), 0, 0)
             }
 
@@ -738,11 +921,8 @@ class KokohoViews(
             container.addView(row)
         }
 
-        dialogRef = AlertDialog.Builder(activity)
-            .setView(scroll)
-            .setNegativeButton("Close", null)
-            .create()
-        dialogRef.show()
+        dialog.setContentView(outer)
+        dialog.show()
     }
 
     private fun buildUtilityView(): ScrollView {

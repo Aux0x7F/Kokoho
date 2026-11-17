@@ -314,7 +314,7 @@ object DeviceIntel {
         Regex("zebra tech|honeywell|datalogic", RegexOption.IGNORE_CASE) to "Rugged scanner / printer",
         Regex("garmin", RegexOption.IGNORE_CASE) to "Garmin wearable / GPS",
         Regex("motorola solutions|harris corp|kenwood", RegexOption.IGNORE_CASE) to "Two-way radio / public-safety gear",
-        Regex("axon", RegexOption.IGNORE_CASE) to "Axon body cam / TASER",
+        Regex("\\baxon\\b(?!\\s+networks)", RegexOption.IGNORE_CASE) to "Axon body cam / TASER",
         Regex("zepcam", RegexOption.IGNORE_CASE) to "Zepcam body camera",
         // Home alarm panels and their makers (Qolsys IQ Panel, 2GIG, Resideo / Honeywell Home, Alarm.com, Ajax).
         Regex("^qolsys|^nortek security|^2gig|^resideo|^alarm\\.com|^ajax systems|^tyco safety|^dsc ", RegexOption.IGNORE_CASE) to "Alarm / security panel",
@@ -600,7 +600,7 @@ object DeviceIntel {
         "^askey" to "Askey", "^sercomm" to "Sercomm", "^hitron" to "Hitron", "^ubee" to "Ubee", "^calix" to "Calix",
         "^actiontec" to "Actiontec", "^2wire|^pace americas" to "2Wire / Pace", "^compal broadband" to "Compal Broadband",
         "^castlenet" to "CastleNet", "^nokia (solutions|shanghai)|^alcatel-lucent shanghai" to "Nokia", "^avm (audiovisuelles|gmbh)" to "AVM (FRITZ!Box)",
-        "^huawei technologies" to "Huawei", "^zte corporation" to "ZTE"
+        "^huawei technologies" to "Huawei", "^zte corporation" to "ZTE", "^axon networks" to "Axon Networks"
     ).map { (re, name) -> Regex(re, RegexOption.IGNORE_CASE) to name }
 
     /** Makers of home routers and mesh systems sold in stores. */

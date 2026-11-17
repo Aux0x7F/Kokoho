@@ -27,17 +27,16 @@ class WaterfallView @JvmOverloads constructor(context: Context, attrs: Attribute
     var onTap: ((Long) -> Unit)? = null
 
     private val density = resources.displayMetrics.density
-    private val textColor = TypedValue().let { tv ->
-        context.theme.resolveAttribute(android.R.attr.textColorSecondary, tv, true)
-        if (tv.resourceId != 0) context.getColor(tv.resourceId) else tv.data
-    }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = textColor
-        textSize = resources.getDimension(org.tucsoncommunity.kokoho.R.dimen.text_caption)
+        color = KokohoJourneyUi.HIGHLIGHT_AMBER
+        textSize = 13.5f * density
+        typeface = android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
     }
-    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = textColor; strokeWidth = 1.5f * density; style = Paint.Style.STROKE }
-    private val peakPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = textColor; alpha = 90; strokeWidth = 1f * density; style = Paint.Style.STROKE }
-    private val gapPaint = Paint().apply { color = textColor; alpha = 140; strokeWidth = 1f * density }
+    private val labelBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE60B111E.toInt(); style = Paint.Style.FILL }
+    private val spectrumBgPaint = Paint().apply { color = 0xFF090E17.toInt() }
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.0f * density; style = Paint.Style.STROKE }
+    private val peakPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = KokohoJourneyUi.HIGHLIGHT_AMBER; alpha = 190; strokeWidth = 1.4f * density; style = Paint.Style.STROKE }
+    private val gapPaint = Paint().apply { color = 0xAAFFFFFF.toInt(); strokeWidth = 1.2f * density }
     private val bitmapPaint = Paint().apply { isFilterBitmap = false }
     private val blackPaint = Paint().apply { color = Color.BLACK }
 
@@ -154,6 +153,8 @@ class WaterfallView @JvmOverloads constructor(context: Context, attrs: Attribute
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val top = waterTop
+        canvas.drawRect(0f, 0f, w, spectrumH, spectrumBgPaint)
+        canvas.drawRect(0f, spectrumH, w, top, labelBgPaint)
         canvas.drawRect(0f, top, w, height.toFloat(), blackPaint)
         val bmp = bitmap
         if (bmp != null && rows > 0) {

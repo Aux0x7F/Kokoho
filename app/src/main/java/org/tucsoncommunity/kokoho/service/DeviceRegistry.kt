@@ -79,7 +79,7 @@ object DeviceRegistry {
         val remoteId: RemoteId.Info?,
         val following: Boolean,
         val known: KnownDeviceEntity?,
-        /** Latest raw observation (detail screen only). */
+        /** Latest raw observation. */
         val advert: Advert?,
         val history: List<Sample>,
         val path: List<GeoSample>,
@@ -88,7 +88,11 @@ object DeviceRegistry {
         /** Flagged devices only: pinpointed from readings at many spots (see [Locator]), when you moved enough around it. */
         val located: Locator.Estimate? = null,
         /** Where the device says it is (a V2X vehicle's own GPS): exact, so it wins over any estimate. */
-        val broadcast: GeoSample? = null
+        val broadcast: GeoSample? = null,
+        /** An access point's power-on time (ms since epoch) from its 802.11 beacon TSF clock; null unless heard as a beacon. */
+        val upSince: Long? = null,
+        /** Where YOUR phone was at the latest observation ([lastSeen]) of this device. */
+        val lastPosition: GeoSample? = null
     ) {
         val best: Hit? get() = hits.firstOrNull()
         /** Where to put it on a map: the pinpointed spot when there is one, else where YOUR phone heard it strongest. */
@@ -128,6 +132,7 @@ object DeviceRegistry {
         var following = false
         var known: KnownDeviceEntity? = null
         var bestPosition: GeoSample? = null
+        var lastPosition: GeoSample? = null
         var fingerprint: String? = null
         /** Patrol-kit role (see [PatrolCluster.roleOf]) - sticky once known. */
         var role: String? = null
@@ -206,6 +211,7 @@ object DeviceRegistry {
                 else t.smoothRssi + RSSI_SMOOTHING * (a.rssi - t.smoothRssi)
             t.rssi = t.smoothRssi.roundToInt()
             if (location != null && (a.rssi >= t.bestRssi || t.bestPosition == null)) t.bestPosition = location
+            if (location != null) t.lastPosition = location
             if (a.rssi > t.bestRssi) t.bestRssi = a.rssi
             // By GPS where the signal says nothing about how far it is from here; NaN when unknown.
             fun from(p: GeoSample?) = if (p != null && here != null) metersBetween(here.lat, here.lon, p.lat, p.lon) else Double.NaN
@@ -352,7 +358,16 @@ object DeviceRegistry {
             val members = tracks.values.filterNot { WhitelistCache.contains(it.mac) }.mapNotNull { t ->
                 synchronized(t) {
                     t.role?.let { role ->
-                        PatrolCluster.Member(t.mac, role, t.firstSeen, t.lastSeen, t.history.map { it.time to it.rssi })
+                        val spanMs = t.lastSeen - t.firstSeen
+                        val movedM = if (t.readings.size >= 2) {
+                            metersBetween(t.readings.first.lat, t.readings.first.lon, t.readings.last.lat, t.readings.last.lon)
+                        } else if (t.bestPosition != null && t.lastPosition != null) {
+                            metersBetween(t.bestPosition!!.lat, t.bestPosition!!.lon, t.lastPosition!!.lat, t.lastPosition!!.lon)
+                        } else {
+                            0.0
+                        }
+                        val briefFastPassBy = spanMs < 35_000L && movedM >= 180.0
+                        PatrolCluster.Member(t.mac, role, t.firstSeen, t.lastSeen, t.history.map { it.time to it.rssi }, briefFastPassBy)
                     }
                 }
             }
@@ -527,12 +542,14 @@ object DeviceRegistry {
         remoteId = t.remoteId,
         following = t.following,
         known = t.known,
-        advert = if (full) t.advert else null,
+        advert = t.advert,
         history = if (full) t.history.toList() else emptyList(),
         path = if (full) t.path.toList() else emptyList(),
         bestPosition = t.bestPosition,
         located = t.located,
-        broadcast = t.broadcast
+        broadcast = t.broadcast,
+        upSince = t.upSince ?: t.advert?.wifi?.upSince,
+        lastPosition = t.lastPosition
     )
 
     /**

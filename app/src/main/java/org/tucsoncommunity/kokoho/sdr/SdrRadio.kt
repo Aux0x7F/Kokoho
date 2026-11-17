@@ -215,12 +215,16 @@ object SdrRadio {
         p25Hold = null
     }
 
+    fun isRunning(): Boolean = !stop && runningDevice != null
+
     @Synchronized
     private fun halt(newStatus: String) {
         stop = true
         worker = null
         runningDevice = null
         status = newStatus
+        RadioLog.clear()
+        org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.onSdrDisconnected()
     }
 
     /** "RTL-SDR unplugged" stays a little, then leaves the hardware status (unless it came back). */
@@ -319,6 +323,8 @@ object SdrRadio {
                 if (gone(name) || result.getOrNull() == true) {
                     org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: ${if (net) "can't reach it" else "unplugged or not answering"}")
                     status = if (net) "$deviceLabel: can't connect, retrying" else UNPLUGGED
+                    RadioLog.clear()
+                    org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.onSdrDisconnected()
                     if (!net) clearUnpluggedSoon()
                     // Plugged back in (it gets a new name), only stuck, or the network server may be back: try again shortly.
                     appContext?.let { main.postDelayed({ if (receiver != null) connect(it) }, if (net) NET_RETRY_MS else 3_000L) }
@@ -356,7 +362,12 @@ object SdrRadio {
                 status = "$deviceLabel · idle: no scan ticked in Settings › RTL-SDR radio"
                 Thread.sleep(500); continue
             }
-            val turn = turnMs[m] ?: 60_000L
+            val defaultTurnMs = if (m == Mode.P25 && Mode.SWEEP in active && p25Hold == null && p25Listen == Listen.OFF) {
+                6_000L // Cap P25 trunking probe to <= 6s per cycle so RadioWatch sweeps >= 90% of the time
+            } else {
+                54_000L
+            }
+            val turn = turnMs[m] ?: if (active.size > 1) defaultTurnMs else 60_000L
             if (active.size > 1) org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: turn: ${m.label} for ${turn / 1000} s")
             mode = m; turnEnd = System.currentTimeMillis() + turn
             when (m) {
@@ -543,6 +554,11 @@ object SdrRadio {
             val lock = known ?: hunt.hunt(stop)
             if (lock == null) {
                 if (stop()) break
+                if (active.size > 1 && p25Hold == null) {
+                    org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: P25 - no control channel decoded (${hunt.tried} channels tried), yielding turn to ${next()?.label ?: "other scans"}")
+                    status = "$deviceLabel · P25 · no control channel · yielding turn"
+                    break
+                }
                 org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: P25 - no control channel decoded (${hunt.tried} channels tried), looking again in ${P25_RETRY_MS / 1000} s")
                 status = "$deviceLabel · P25 · no control channel heard here · looking again shortly" + turnNote()
                 val until = System.currentTimeMillis() + P25_RETRY_MS

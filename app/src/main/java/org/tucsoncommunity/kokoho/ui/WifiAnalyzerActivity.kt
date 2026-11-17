@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -49,15 +50,23 @@ class WifiAnalyzerActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityWifiAnalyzerBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.root.applySystemBarInsets()
-        title = "WiFi channels"
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
-
         val spectrum = intent.getBooleanExtra(EXTRA_SPECTRUM, false)
+        val headerTitle = if (spectrum) "WiFi spectrum" else "WiFi channels"
+        val bg = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this)
+        binding.root.setBackgroundColor(bg)
+        val header = KokohoJourneyUi.wrapActivityWithSubjourneyHeader(
+            activity = this,
+            contentView = binding.root,
+            title = headerTitle,
+            bgColorArgb = bg,
+            menuItemsProvider = KokohoJourneyUi.optionsMenuBridge(this)
+        )
+        val shell = header.root.parent as View
+        setContentView(shell)
+        shell.applySystemBarInsets()
+
         binding.modeGroup.check(if (spectrum) binding.modeSpectrum.id else binding.modeChannels.id)
         binding.chart.mode = if (spectrum) WifiChartView.Mode.SPECTRUM else WifiChartView.Mode.CHANNELS
-        if (spectrum) title = "WiFi spectrum"
         binding.modeGroup.addOnButtonCheckedListener { _, id, checked ->
             if (!checked) return@addOnButtonCheckedListener
             val s = id == binding.modeSpectrum.id

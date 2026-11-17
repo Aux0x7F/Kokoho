@@ -94,6 +94,7 @@ class P25Hunt(private val sdr: SdrDevice, private val readAhead: Boolean = false
             }
             fails = 0
             demod.feed(buf, n / 2); samples += n / 2
+            if (samples >= EARLY_EXIT_S * P25Demod.SAMPLE_RATE && demod.syncs == 0) break
         }
         val drift = "frequency loop moved %+.0f Hz in %.2f s".format(demod.offsetHz - OFFSET_HZ, samples.toDouble() / P25Demod.SAMPLE_RATE)
         if (st.good < MIN_BLOCKS) { log("$head $st, $drift - not a control channel"); return null }
@@ -178,6 +179,8 @@ class P25Hunt(private val sdr: SdrDevice, private val readAhead: Boolean = false
         private const val OFFSET_HZ = 250_000L
         /** A control channel sends a frame every ~75 ms: this long without two good blocks, it isn't one. */
         private const val TRIAL_S = 0.8
+        /** Non-P25 carriers produce zero syncs within ~4.5 frame periods (0.35 s): exit early to speed hunting. */
+        private const val EARLY_EXIT_S = 0.35
         private const val MIN_BLOCKS = 2
         private const val MAX_TRIES = 12
         const val LOST_S = 3.0

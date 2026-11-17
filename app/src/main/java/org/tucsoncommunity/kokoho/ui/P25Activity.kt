@@ -42,7 +42,8 @@ class P25Activity : AppCompatActivity() {
     private var watched = P25Log.Watched()
     private val header by lazy {
         TextView(this).apply {
-            textSize = 12f; alpha = 0.8f
+            textSize = 13f
+            setTextColor(KokohoJourneyUi.INK_SECONDARY)
             val p = (8 * resources.displayMetrics.density).toInt(); setPadding(0, p, 0, p)
         }
     }

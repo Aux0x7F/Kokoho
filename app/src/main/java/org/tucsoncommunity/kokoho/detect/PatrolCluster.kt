@@ -21,7 +21,9 @@ object PatrolCluster {
         val firstSeen: Long,
         val lastSeen: Long,
         /** RSSI samples (time ms, dBm), roughly one per second. */
-        val samples: List<Pair<Long, Int>>
+        val samples: List<Pair<Long, Int>>,
+        /** True when heard only briefly (< 35 s) while the observer drove >= 180 m past a roadside spot. */
+        val briefHighSpeedPassBy: Boolean = false
     )
 
     class Group(val members: List<Member>, val roles: Set<String>, val correlated: Boolean) {
@@ -56,7 +58,7 @@ object PatrolCluster {
     private val DUAL_USE_ROLES = setOf(ROLE_RADIO, ROLE_ROUTER)
 
     private val ROLE_BY_VENDOR = listOf(
-        Regex("axon|taser", RegexOption.IGNORE_CASE) to "Axon / TASER gear",
+        Regex("\\baxon\\b(?!\\s+networks)|taser", RegexOption.IGNORE_CASE) to "Axon / TASER gear",
         Regex("motorola solutions|harris corp|l3harris", RegexOption.IGNORE_CASE) to ROLE_RADIO,
         Regex("cradlepoint|sierra wireless|peplink|inseego", RegexOption.IGNORE_CASE) to ROLE_ROUTER,
         Regex("zebra|ruggedjet|pocketjet", RegexOption.IGNORE_CASE) to ROLE_PRINTER,
@@ -77,6 +79,9 @@ object PatrolCluster {
 
     /** The patrol-kit role of a device, or null if it's ordinary. */
     fun roleOf(allHits: List<Hit>, vendor: String?, name: String?): String? {
+        if (!name.isNullOrBlank() && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isNonFlockIgnoredInfraOrRetail("", name)) {
+            return null
+        }
         val hits = allHits.filter { it.source != SOURCE }
         hits.firstOrNull { it.category == Category.BODY_CAM }?.let { return "body camera" }
         hits.firstOrNull { it.category == Category.ALPR }?.let { return "plate reader" }
@@ -106,6 +111,7 @@ object PatrolCluster {
         for (i in live.indices) for (j in i + 1 until live.size) {
             val a = live[i]; val b = live[j]
             if (a.role == b.role) continue
+            if (a.briefHighSpeedPassBy || b.briefHighSpeedPassBy) continue
             val m = motion(a.samples, b.samples, now)
             val together = when (m) {
                 is Motion.Moving -> m.r >= MIN_CORRELATION

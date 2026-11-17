@@ -40,12 +40,20 @@ class DetectionLogActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityLogBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        binding.root.applySystemBarInsets()
-        binding.root.setBackgroundColor(org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this))
+        val bg = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.currentPostureColorArgb(this)
+        binding.root.setBackgroundColor(bg)
         (binding.filterChips.parent as? View)?.visibility = View.GONE
-        title = if (falseAlerts) "False alerts" else "Logs"
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        val headerTitle = if (falseAlerts) "False alerts" else "Logs"
+        val header = KokohoJourneyUi.wrapActivityWithSubjourneyHeader(
+            activity = this,
+            contentView = binding.root,
+            title = headerTitle,
+            bgColorArgb = bg,
+            menuItemsProvider = KokohoJourneyUi.optionsMenuBridge(this)
+        )
+        val shell = header.root.parent as View
+        setContentView(shell)
+        shell.applySystemBarInsets()
 
         adapter = DetectionAdapter(
             onClick = { DeviceActions.openDetection(this, it) },

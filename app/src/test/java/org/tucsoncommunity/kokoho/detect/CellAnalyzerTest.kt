@@ -102,6 +102,25 @@ class CellAnalyzerTest {
         repeat(3) { i -> an.analyze(listOf(modern(), modern(false, id = 2), modern(false, id = 3)), ctx(i * 15_000L)) }
         an.analyze(listOf(modern(id = 7)), ctx(45_000))
         assertEquals(35, an.analyze(listOf(modern(id = 7)), ctx(60_000)).of("isolated").single().confidence)
+
+        // A cell already recorded in knownAreas from a prior session with the same area code isn't a new cell on handover.
+        val knownFromYesterday = LinkedHashMap<String, Int>().apply { put("LTE 311-480 5933334", 5893) }
+        val anKnown = CellAnalyzer(knownFromYesterday)
+        repeat(3) { i ->
+            anKnown.analyze(
+                listOf(
+                    Cell(Rat.LTE, true, "311", "480", 5893, 1001L, -85),
+                    Cell(Rat.LTE, false, "311", "480", 5893, 1002L, -90),
+                    Cell(Rat.LTE, false, "311", "480", 5893, 1003L, -92)
+                ),
+                ctx(i * 15_000L, sim = "311480")
+            )
+        }
+        anKnown.analyze(listOf(Cell(Rat.LTE, true, "311", "480", 5893, 5933334L, -82)), ctx(45_000L, sim = "311480"))
+        assertTrue(
+            anKnown.analyze(listOf(Cell(Rat.LTE, true, "311", "480", 5893, 5933334L, -82)), ctx(60_000L, sim = "311480"))
+                .of("isolated").isEmpty()
+        )
     }
 
     @Test

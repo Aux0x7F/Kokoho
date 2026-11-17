@@ -15,8 +15,11 @@ import android.net.wifi.aware.WifiAwareManager
 import android.net.wifi.aware.WifiAwareSession
 import android.os.Build
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.VisibleForTesting
+import androidx.core.content.ContextCompat
 import org.tucsoncommunity.kokoho.detect.Advert
 
 /**
@@ -25,70 +28,166 @@ import org.tucsoncommunity.kokoho.detect.Advert
  * Apache-2.0: written anew here). A passive subscription to the "org.opendroneid.remoteid"
  * service: listen only, nothing is published or sent to the drone.
  *
- * Each discovery's service info is [message counter][message pack], the same bytes that follow
- * the OUI and type in a Remote ID WiFi beacon, so each one is handed on as a WiFi advert carrying
- * that vendor element and goes through the usual WiFi Remote ID decoding. Wi-Fi Aware gives no
- * address or signal strength: each peer gets a stable made-up local address, and a nominal signal.
+ * Hardened against Android 14–17 `HalDevMgr` concurrency rejections (`ifaceType=4` when STA +
+ * AP_BRIDGE hotspot are active concurrently):
+ *  - Runs all `WifiAwareManager` Binder IPC on a dedicated background [HandlerThread] (never on the UI thread).
+ *  - Enforces single-flight [attaching] state + minimum attach cooldown ([MIN_ATTACH_GAP_MS]) +
+ *    circuit-breaker backoff ([CONCURRENCY_BLOCKED_RETRY_MS]) so state broadcast oscillations
+ *    (`ACTION_WIFI_AWARE_STATE_CHANGED`) can never leak Binder stubs or stall Map rendering.
  */
 class NanRemoteId(private val context: Context, private val onAdvert: (Advert) -> Unit) {
 
-    private val handler = Handler(Looper.getMainLooper())
+    private var workerThread: HandlerThread? = null
+    private var workerHandler: Handler? = null
     private var session: WifiAwareSession? = null
     private var subscription: SubscribeDiscoverySession? = null
-    private var running = false
+    @Volatile private var running = false
     private var receiverOn = false
+    private var attaching = false
+    private var consecutiveFailures = 0
+    private var retryMs = INITIAL_RETRY_MS
+    private var nextAllowedAttachElapsedMs = 0L
+
     /** Made-up addresses per peer (peer handles only mean something within a subscription). */
     private val peers = HashMap<Int, String>()
 
-    private val stateReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) { if (running) { close(); attach() } }
+    private val reattach = Runnable {
+        if (running && session == null && !attaching) {
+            attach()
+        }
     }
 
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (!running) return
+            workerHandler?.post { onAwareStateChanged() }
+        }
+    }
+
+    @Synchronized
     fun start() {
         if (running || !supported(context)) return
         running = true
+        consecutiveFailures = 0
+        retryMs = INITIAL_RETRY_MS
+        nextAllowedAttachElapsedMs = 0L
+        val ht = HandlerThread("kokoho-nan-rid").apply { start() }
+        val h = Handler(ht.looper)
+        workerThread = ht
+        workerHandler = h
         runCatching {
-            androidx.core.content.ContextCompat.registerReceiver(context, stateReceiver,
-                IntentFilter(WifiAwareManager.ACTION_WIFI_AWARE_STATE_CHANGED), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+            ContextCompat.registerReceiver(
+                context,
+                stateReceiver,
+                IntentFilter(WifiAwareManager.ACTION_WIFI_AWARE_STATE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
             receiverOn = true
         }
-        attach()
+        h.post { attach() }
     }
 
+    @Synchronized
     fun stop() {
         running = false
-        handler.removeCallbacks(reattach)
-        if (receiverOn) { runCatching { context.unregisterReceiver(stateReceiver) }; receiverOn = false }
-        close()
+        if (receiverOn) {
+            runCatching { context.unregisterReceiver(stateReceiver) }
+            receiverOn = false
+        }
+        val h = workerHandler
+        val ht = workerThread
+        workerHandler = null
+        workerThread = null
+        if (h != null && ht != null) {
+            h.removeCallbacksAndMessages(null)
+            h.post {
+                attaching = false
+                close()
+                runCatching { ht.quitSafely() }
+            }
+        } else {
+            attaching = false
+            close()
+        }
+    }
+
+    private fun onAwareStateChanged() {
+        if (!running) return
+        val mgr = context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager ?: return
+        if (!mgr.isAvailable) {
+            attaching = false
+            close()
+            return
+        }
+        // Only attempt attach if we do not already have an active or in-flight session;
+        // attach() strictly enforces nextAllowedAttachElapsedMs so state broadcast storms never spin.
+        if (session == null && !attaching) {
+            attach()
+        }
     }
 
     private fun close() {
-        runCatching { subscription?.close() }; subscription = null
-        runCatching { session?.close() }; session = null
+        runCatching { subscription?.close() }
+        subscription = null
+        runCatching { session?.close() }
+        session = null
         peers.clear()
     }
 
-    @SuppressLint("MissingPermission") // location (and nearby-WiFi on 13+) checked by the caller and on attach
+    @SuppressLint("MissingPermission")
     private fun attach() {
+        val h = workerHandler ?: return
+        if (!running || session != null || attaching) return
         val mgr = context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager ?: return
-        if (!mgr.isAvailable) return // WiFi off: the state broadcast retries
+        if (!mgr.isAvailable) return
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val waitMs = nextAllowedAttachElapsedMs - nowElapsed
+        if (waitMs > 0L) {
+            h.removeCallbacks(reattach)
+            h.postDelayed(reattach, waitMs)
+            return
+        }
+
+        attaching = true
+        nextAllowedAttachElapsedMs = nowElapsed + MIN_ATTACH_GAP_MS
         try {
             mgr.attach(object : AttachCallback() {
                 override fun onAttached(s: WifiAwareSession) {
-                    if (!running) { s.close(); return }
-                    close() // a second attach must not leave the first session open
+                    attaching = false
+                    if (!running) {
+                        runCatching { s.close() }
+                        return
+                    }
+                    close()
                     session = s
                     subscribe(s)
                 }
-                override fun onAttachFailed() { retry("attach failed") }
-            }, handler)
+
+                override fun onAttachFailed() {
+                    attaching = false
+                    close()
+                    retry("attach failed")
+                }
+
+                override fun onAwareSessionTerminated() {
+                    attaching = false
+                    close()
+                    retry("aware session ended")
+                }
+            }, h)
         } catch (e: SecurityException) {
+            attaching = false
             Log.w(TAG, "Wi-Fi Aware not allowed: ${e.message}")
+        } catch (t: Throwable) {
+            attaching = false
+            retry("attach error: ${t.javaClass.simpleName}")
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun subscribe(s: WifiAwareSession) {
+        val h = workerHandler ?: return
         val config = SubscribeConfig.Builder()
             .setServiceName(SERVICE)
             .setSubscribeType(SubscribeConfig.SUBSCRIBE_TYPE_PASSIVE)
@@ -96,32 +195,62 @@ class NanRemoteId(private val context: Context, private val onAdvert: (Advert) -
         try {
             s.subscribe(config, object : DiscoverySessionCallback() {
                 override fun onSubscribeStarted(sub: SubscribeDiscoverySession) {
-                    subscription = sub; retryMs = RETRY_MS
+                    subscription = sub
+                    consecutiveFailures = 0
+                    retryMs = INITIAL_RETRY_MS
                     Log.i(TAG, "Listening for drone Remote ID over Wi-Fi Aware")
-                    org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus("Wi-Fi Aware", "Wi-Fi Aware: listening for drone Remote ID")
+                    org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus(
+                        "Wi-Fi Aware",
+                        "Wi-Fi Aware: listening for drone Remote ID"
+                    )
                 }
-                override fun onSessionConfigFailed() { retry("subscription refused") }
+
+                override fun onSessionConfigFailed() {
+                    close()
+                    retry("subscription refused")
+                }
+
                 override fun onServiceDiscovered(peer: PeerHandle, info: ByteArray?, filter: List<ByteArray>?) {
                     info?.let { onInfo(peer, it) }
                 }
-                override fun onSessionTerminated() { subscription = null; retry("session ended") }
-            }, handler)
+
+                override fun onSessionTerminated() {
+                    subscription = null
+                    close()
+                    retry("session ended")
+                }
+            }, h)
         } catch (e: SecurityException) {
             Log.w(TAG, "Wi-Fi Aware subscribe not allowed: ${e.message}")
+        } catch (t: Throwable) {
+            close()
+            retry("subscribe error: ${t.javaClass.simpleName}")
         }
     }
 
-    private var retryMs = RETRY_MS
-    private val reattach = Runnable { if (running) { close(); attach() } }
-
-    /** Wi-Fi Aware let go ([why]): attach again shortly, a little later each time it fails, so listening never just stops. */
     private fun retry(why: String) {
-        Log.w(TAG, "Wi-Fi Aware: $why")
         if (!running) return
-        org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus("Wi-Fi Aware", "Wi-Fi Aware: $why, trying again")
-        handler.removeCallbacks(reattach)
-        handler.postDelayed(reattach, retryMs)
+        val h = workerHandler ?: return
+        consecutiveFailures++
+        val delayMs = computeBackoffMs(consecutiveFailures, retryMs)
         retryMs = (retryMs * 2).coerceAtMost(MAX_RETRY_MS)
+        nextAllowedAttachElapsedMs = SystemClock.elapsedRealtime() + delayMs
+
+        if (consecutiveFailures == 1) {
+            Log.w(TAG, "Wi-Fi Aware: $why (retrying in ${delayMs / 1000}s)")
+            org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus(
+                "Wi-Fi Aware",
+                "Wi-Fi Aware: $why (retrying in ${delayMs / 1000}s)"
+            )
+        } else if (consecutiveFailures == CIRCUIT_BREAKER_FAILURES) {
+            Log.i(TAG, "Wi-Fi Aware interface busy ($why x$consecutiveFailures, e.g. Wi-Fi hotspot active); backing off ${delayMs / 60_000}m")
+            org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus(
+                "Wi-Fi Aware",
+                "Wi-Fi Aware paused (Wi-Fi radio busy with hotspot/concurrency; re-checking every ${delayMs / 60_000}m)"
+            )
+        }
+        h.removeCallbacks(reattach)
+        h.postDelayed(reattach, delayMs)
     }
 
     private fun onInfo(peer: PeerHandle, info: ByteArray) {
@@ -138,8 +267,20 @@ class NanRemoteId(private val context: Context, private val onAdvert: (Advert) -
         private const val NAN_MHZ = 2437
         /** No signal strength comes with a discovery. */
         private const val NOMINAL_RSSI = -75
-        private const val RETRY_MS = 5_000L
-        private const val MAX_RETRY_MS = 60_000L
+        internal const val MIN_ATTACH_GAP_MS = 30_000L
+        internal const val INITIAL_RETRY_MS = 30_000L
+        internal const val MAX_RETRY_MS = 120_000L
+        internal const val CIRCUIT_BREAKER_FAILURES = 3
+        internal const val CONCURRENCY_BLOCKED_RETRY_MS = 10 * 60_000L
+
+        @VisibleForTesting
+        internal fun computeBackoffMs(consecutiveFailures: Int, currentRetryMs: Long): Long {
+            return if (consecutiveFailures >= CIRCUIT_BREAKER_FAILURES) {
+                CONCURRENCY_BLOCKED_RETRY_MS
+            } else {
+                currentRetryMs.coerceIn(MIN_ATTACH_GAP_MS, MAX_RETRY_MS)
+            }
+        }
 
         fun supported(context: Context): Boolean =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -148,8 +289,19 @@ class NanRemoteId(private val context: Context, private val onAdvert: (Advert) -
         /** A WiFi advert carrying [info] as a Remote ID vendor element (OUI FA:0B:BC, type 0x0D). */
         internal fun advert(mac: String, info: ByteArray, now: Long): Advert {
             val ie = byteArrayOf(0xFA.toByte(), 0x0B, 0xBC.toByte(), 0x0D) + info
-            return Advert(mac = mac, source = Advert.Source.WIFI, rssi = NOMINAL_RSSI, name = null,
-                wifi = Advert.WifiInfo(NAN_MHZ, "", org.tucsoncommunity.kokoho.detect.DeviceIntel.WIFI_AWARE, listOf(221 to ie)), timestamp = now)
+            return Advert(
+                mac = mac,
+                source = Advert.Source.WIFI,
+                rssi = NOMINAL_RSSI,
+                name = null,
+                wifi = Advert.WifiInfo(
+                    NAN_MHZ,
+                    "",
+                    org.tucsoncommunity.kokoho.detect.DeviceIntel.WIFI_AWARE,
+                    listOf(221 to ie)
+                ),
+                timestamp = now
+            )
         }
 
         /** A locally administered address for a peer, stable while its handle is. */

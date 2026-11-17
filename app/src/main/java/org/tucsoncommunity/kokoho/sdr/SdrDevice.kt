@@ -28,4 +28,6 @@ interface SdrDevice {
     /** Reads unsigned 8-bit I/Q into [buf]; bytes read, or a negative value on error. */
     fun read(buf: ByteArray, len: Int): Int
     fun read(buf: ByteArray): Int = read(buf, buf.size)
+    /** Where the tuner's image of a signal at [hz] is in the sky when tuned to [centerHz]; null for a zero-IF tuner. */
+    fun imageHz(centerHz: Long, hz: Long): Long? = null
 }

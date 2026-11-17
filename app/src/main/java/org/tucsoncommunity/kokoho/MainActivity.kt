@@ -268,12 +268,11 @@ class MainActivity : AppCompatActivity() {
                 if (chosen.isNotEmpty()) {
                     panes.setPanes(chosen)
                     applyViewMode()
-                    render()
+                    renderAsync()
                 }
             },
             onFilterChanged = {
-                render()
-                kokohoViews.updatePosture()
+                renderAsync()
             }
         )
 
@@ -318,11 +317,18 @@ class MainActivity : AppCompatActivity() {
         }
         supportActionBar?.hide()
         if (!Prefs.onboardingDone(this)) Prefs.setOnboardingDone(this)
+        org.tucsoncommunity.kokoho.posture.KokohoDirectory.preloadAsync(this)
         applyViewMode()
         observeDevices()
         updateStatus()
         lifecycleScope.launch { Favorites.load(this@MainActivity); org.tucsoncommunity.kokoho.data.DeviceNames.load(this@MainActivity) }
-        if (savedInstanceState == null) org.tucsoncommunity.kokoho.util.CrashLog.offerAfterCrash(this)
+        if (savedInstanceState == null) {
+            org.tucsoncommunity.kokoho.util.CrashLog.offerAfterCrash(this)
+            // Always-on scanning: automatically start foreground sensor scanning on launch
+            if (!demoMode && !ScanForegroundService.isRunning) {
+                requestPermissionsAndStart()
+            }
+        }
     }
 
     override fun onResume() {
@@ -330,6 +336,9 @@ class MainActivity : AppCompatActivity() {
         // Back from the full screen map: show the filter picked there.
         org.tucsoncommunity.kokoho.ui.DeviceFilter.parse(Prefs.mapFilter(this)).let { f ->
             if (f != filter) filterChips[f]?.let { it.isChecked = true; scrollToChip(it) }
+        }
+        if (!demoMode && !ScanForegroundService.isRunning && Permissions.missingRequired(this).isEmpty()) {
+            startScanning()
         }
         updateStatus()
         // Check self-hosted Kokoho update endpoint on startup (no camera location popup).
@@ -735,23 +744,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Rebuilds the live list / radar once a second while the screen is visible. */
+    /** Rebuilds the live list / posture off the UI thread so MapLibre never drops frames. */
     private fun observeDevices() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                // A new or cleared Waze report redraws the list at once, not at the next tick.
                 val stopWaze = org.tucsoncommunity.kokoho.online.WazePolice.addListener {
                     runOnUiThread {
                         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@runOnUiThread
-                        // The answer to a pull-down check ends the spinner.
                         if (binding.refreshSwipe.isRefreshing && org.tucsoncommunity.kokoho.online.WazePolice.latestAt >= refreshAskedAt) binding.refreshSwipe.isRefreshing = false
-                        render()
+                        renderAsync()
                     }
                 }
                 try {
                     while (true) {
-                        render()
-                        delay(REFRESH_MS)
+                        val now = System.currentTimeMillis()
+                        val appCtx = applicationContext
+                        val snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(appCtx, now)
+                        }
+                        render(precomputedSnap = snap, now = now)
+                        val onMap = ::kokohoViews.isInitialized &&
+                            kokohoViews.currentTab == org.tucsoncommunity.kokoho.posture.KokohoViews.Tab.MAP
+                        delay(if (onMap) 2_000L else REFRESH_MS)
                     }
                 } finally {
                     stopWaze()
@@ -760,8 +774,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun render() {
-        val now = System.currentTimeMillis()
+    private var asyncRenderJob: kotlinx.coroutines.Job? = null
+
+    private fun renderAsync() {
+        if (asyncRenderJob?.isActive == true) return
+        asyncRenderJob = lifecycleScope.launch {
+            val now = System.currentTimeMillis()
+            val appCtx = applicationContext
+            val snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(appCtx, now)
+            }
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                render(precomputedSnap = snap, now = now)
+            }
+        }
+    }
+
+    private fun render(
+        precomputedSnap: org.tucsoncommunity.kokoho.posture.PostureSnapshot? = null,
+        now: Long = System.currentTimeMillis()
+    ) {
+        val onMapTab = ::kokohoViews.isInitialized &&
+            kokohoViews.currentTab == org.tucsoncommunity.kokoho.posture.KokohoViews.Tab.MAP
+        val kokohoSnap = precomputedSnap ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this, now)
+
+        if (onMapTab) {
+            updateStatus()
+            kokohoViews.updatePosture(now, kokohoSnap)
+            (binding.filterChips.parent as? View)?.visibility = View.GONE
+            refreshMuteButton()
+            panes.update(kokohoSnap.primaryThreat?.posture?.colorArgb)
+            return
+        }
+
         // Ordinary devices leave the list and radar soon after they're out of range (LiveWindow).
         val bleMs = Prefs.liveBleSec(this) * 1000L
         val wifiMs = Prefs.liveWifiSec(this) * 1000L
@@ -787,10 +832,9 @@ class MainActivity : AppCompatActivity() {
         flaggedCount = all.count { org.tucsoncommunity.kokoho.ui.DeviceFilter.FLAGGED.matches(it) } + aircraft.count { it.hit != null }
         updateBanner(flagged, threshold)
         updateStatus()
-        if (::kokohoViews.isInitialized) kokohoViews.updatePosture(now)
+        if (::kokohoViews.isInitialized) kokohoViews.updatePosture(now, kokohoSnap)
         (binding.filterChips.parent as? View)?.visibility = View.GONE
 
-        val kokohoSnap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this, now)
         val activeThreats = kokohoSnap.activeThreats
         shownDevices = emptyList()
 

@@ -74,27 +74,64 @@ class CellMonitor(private val context: Context) {
         val cells = infos.mapNotNull(::toCell)
         if (cells.isEmpty()) return emptyList()
         val now = System.currentTimeMillis()
-        CellTowerStore.record(context, cells, lastFix(), now)
+        val fix = lastFix()
+        CellTowerStore.record(context, cells, fix, now)
+        org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.ensureLoaded(context)
+        val verifiedBorderMccs = HashSet<String>(2)
         // A call (or one that just ended): networks without 4G calling drop to 2G/3G for it.
         // The audio mode tells without the phone-state permission.
         if (audio?.mode == android.media.AudioManager.MODE_IN_CALL) lastCallAt = now
-        val ctx = CellAnalyzer.Context(
-            time = now,
-            simOperator = runCatching { tm.simOperator }.getOrNull()?.takeIf { it.length >= 5 },
-            roaming = runCatching { tm.isNetworkRoaming }.getOrDefault(false),
-            stationary = stationary(now),
-            inCall = now - lastCallAt < CALL_GRACE_MS
-        )
         return synchronized(knownAreas) {
             if (forgetCells) { knownAreas.clear(); forgetCells = false }
+            // On-demand O(log N) lookup against 162,000+ Arizona & Sonora OpenCelliD / MLS cells:
+            // Only trust a cataloged cell when GPS confirms we are within 35 km of its real tower (or no GPS fix yet).
+            for (c in cells) {
+                val id = c.idKey ?: continue
+                val ref = org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupAzCell(c.rat.name, c.mcc, c.mnc, c.cellId)
+                    ?: continue
+                val withinTowerRange = if (fix != null && ref.lat != null && ref.lon != null) {
+                    DeviceRegistry.metersBetween(fix.latitude, fix.longitude, ref.lat, ref.lon) <= 35_000.0
+                } else {
+                    true
+                }
+                if (withinTowerRange) {
+                    if (id !in knownAreas) {
+                        val effectiveArea = if (ref.isFieldSurvey) {
+                            ref.area
+                        } else {
+                            c.area?.takeIf { it !in CellAnalyzer.RESERVED_AREA } ?: ref.area
+                        }
+                        if (effectiveArea !in CellAnalyzer.RESERVED_AREA) {
+                            knownAreas[id] = effectiveArea
+                        }
+                    }
+                    if (c.mcc == "334" && fix != null && ref.lat != null && ref.lon != null) {
+                        verifiedBorderMccs.add("334")
+                    }
+                }
+            }
+            val ctx = CellAnalyzer.Context(
+                time = now,
+                simOperator = runCatching { tm.simOperator }.getOrNull()?.takeIf { it.length >= 5 },
+                roaming = runCatching { tm.isNetworkRoaming }.getOrDefault(false),
+                stationary = stationary(now),
+                inCall = now - lastCallAt < CALL_GRACE_MS,
+                borderCatalogedMccs = verifiedBorderMccs
+            )
             analyzer.analyze(cells, ctx).also { if (++checks % SAVE_EVERY == 0) saveKnownAreas() }
         }
     }
 
     private val knownFile get() = java.io.File(context.filesDir, "known_cells.txt")
 
-    /** "RAT mcc-mnc cellId<TAB>area" per line, oldest first. */
+    /** "RAT mcc-mnc cellId<TAB>area" per line, oldest first, pre-seeded with field-surveyed AZ cells. */
     private fun loadKnownAreas(): MutableMap<String, Int> = LinkedHashMap<String, Int>().also { map ->
+        runCatching {
+            org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.ensureLoaded(context)
+            for ((k, cellRef) in org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.fieldSurveyCells()) {
+                map[k] = cellRef.area
+            }
+        }
         runCatching {
             knownFile.takeIf { it.exists() }?.forEachLine { line ->
                 val tab = line.lastIndexOf('\t')

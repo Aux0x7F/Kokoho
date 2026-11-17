@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.core.content.edit
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.launch
 import org.tucsoncommunity.kokoho.sdr.FreqNames
 import org.tucsoncommunity.kokoho.sdr.RadioWatch
 import org.tucsoncommunity.kokoho.util.Units
@@ -28,20 +29,22 @@ enum class KokohoAgency(
     val fullName: String,
     val isDhs: Boolean,
     val defaultEnabled: Boolean,
-    val priorityRank: Int
+    val priorityRank: Int,
+    val mapColorArgb: Int,
+    val mapColorHex: String
 ) {
-    DHS_ICE("DHS_ICE", "ICE", "ICE", "ICE (ERO Tactical)", isDhs = true, defaultEnabled = true, priorityRank = 1),
-    DHS_AMO("DHS_AMO", "DHS Air", "DHS Air", "DHS Air (AMO & Spy Planes)", isDhs = true, defaultEnabled = true, priorityRank = 2),
-    DHS_CBP("DHS_CBP", "CBP", "CBP", "CBP (Border Patrol)", isDhs = true, defaultEnabled = true, priorityRank = 3),
-    DHS_HSI("DHS_HSI", "HSI", "HSI", "HSI (Investigations)", isDhs = true, defaultEnabled = true, priorityRank = 4),
-    DHS_FPS("DHS_FPS", "FPS", "FPS", "FPS (Federal Protective)", isDhs = true, defaultEnabled = false, priorityRank = 5),
-    DHS_INTEROP("DHS_INTEROP", "Federal Interop", "Federal Interop", "Federal Interop", isDhs = true, defaultEnabled = false, priorityRank = 5),
+    DHS_ICE("DHS_ICE", "ICE", "ICE", "ICE (ERO Tactical)", isDhs = true, defaultEnabled = true, priorityRank = 1, mapColorArgb = 0xFFEF4444.toInt(), mapColorHex = "#EF4444"),
+    DHS_AMO("DHS_AMO", "DHS Air", "DHS Air", "DHS Air (AMO & Spy Planes)", isDhs = true, defaultEnabled = true, priorityRank = 2, mapColorArgb = 0xFFEC4899.toInt(), mapColorHex = "#EC4899"),
+    DHS_CBP("DHS_CBP", "CBP", "CBP", "CBP (Border Patrol)", isDhs = true, defaultEnabled = true, priorityRank = 3, mapColorArgb = 0xFFF97316.toInt(), mapColorHex = "#F97316"),
+    DHS_HSI("DHS_HSI", "HSI", "HSI", "HSI (Investigations)", isDhs = true, defaultEnabled = true, priorityRank = 4, mapColorArgb = 0xFFEAB308.toInt(), mapColorHex = "#EAB308"),
+    DHS_FPS("DHS_FPS", "FPS", "FPS", "FPS (Federal Protective)", isDhs = true, defaultEnabled = false, priorityRank = 5, mapColorArgb = 0xFFA855F7.toInt(), mapColorHex = "#A855F7"),
+    DHS_INTEROP("DHS_INTEROP", "Federal Interop", "Federal Interop", "Federal Interop", isDhs = true, defaultEnabled = true, priorityRank = 8, mapColorArgb = 0xFFFF7043.toInt(), mapColorHex = "#FF7043"),
 
-    SHERIFF("SHERIFF", "Sheriff", "Sheriff", "Sheriff (PCSO / County)", isDhs = false, defaultEnabled = false, priorityRank = 6),
-    POLICE("POLICE", "Police", "Police", "Police (TPD / Municipal)", isDhs = false, defaultEnabled = false, priorityRank = 6),
-    DRONE("DRONE", "Drone", "Tactical Drone", "Pro / Enterprise / Military Drones", isDhs = false, defaultEnabled = true, priorityRank = 6),
-    FIRE("FIRE", "Fire", "Fire", "Fire (TFD / Wildland)", isDhs = false, defaultEnabled = false, priorityRank = 7),
-    SAR("SAR", "SAR", "SAR", "SAR (Search & Rescue)", isDhs = false, defaultEnabled = false, priorityRank = 7);
+    SHERIFF("SHERIFF", "Sheriff", "Sheriff", "Sheriff (PCSO / County)", isDhs = false, defaultEnabled = false, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
+    POLICE("POLICE", "Police", "Police", "Police (TPD / Municipal)", isDhs = false, defaultEnabled = false, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
+    DRONE("DRONE", "Drone", "Tactical Drone", "Pro / Enterprise / Military Drones", isDhs = false, defaultEnabled = true, priorityRank = 6, mapColorArgb = 0xFF06B6D4.toInt(), mapColorHex = "#06B6D4"),
+    FIRE("FIRE", "Fire", "Fire", "Fire (TFD / Wildland)", isDhs = false, defaultEnabled = false, priorityRank = 7, mapColorArgb = 0xFF10B981.toInt(), mapColorHex = "#10B981"),
+    SAR("SAR", "SAR", "SAR", "SAR (Search & Rescue)", isDhs = false, defaultEnabled = false, priorityRank = 7, mapColorArgb = 0xFF10B981.toInt(), mapColorHex = "#10B981");
 
     companion object {
         val DHS_AGENCIES = entries.filter { it.isDhs }
@@ -73,7 +76,8 @@ enum class KokohoAgency(
 }
 
 /**
- * Verified Witness Report for a specific agent/unit (`targetKey` or `entityUuid`).
+ * Witness Report for a specific agent/unit (`targetKey` or `entityUuid`).
+ * Submissions start as `PENDING` manual review and become `APPROVED` after server moderation.
  */
 data class WitnessReportRecord(
     val targetKey: String,
@@ -85,20 +89,52 @@ data class WitnessReportRecord(
     val vehicleNumber: String = "",
     val notes: String = "",
     val photoDataUrl: String? = null,
-    val updatedAtMs: Long = System.currentTimeMillis()
-)
+    val updatedAtMs: Long = System.currentTimeMillis(),
+    val status: String = "APPROVED",
+    /** "LE", "FALSE_POSITIVE", or "BUG" */
+    val reportKind: String = "LE",
+    /** "AGENT", "VEHICLE", "ACCESSORY", "DEVICE", or "BUG" */
+    val subjectKind: String = "AGENT",
+    val personId: String? = null,
+    val titleOrRole: String = "",
+    val email: String = "",
+    val phone: String = "",
+    val suiteOrAddress: String = "",
+    val managedBy: String = "",
+    val plateNumber: String = "",
+    val vehicleDescription: String = "",
+    val accessoryKind: String = "",
+    val photoDataUrls: List<String>? = null,
+    val lat: Double? = null,
+    val lon: Double? = null
+) {
+    val isApproved: Boolean
+        get() = status.isBlank() || status.equals("APPROVED", ignoreCase = true)
+
+    fun allPhotos(): List<String> {
+        val list = ArrayList<String>()
+        photoDataUrls?.filter { it.isNotBlank() }?.let { list.addAll(it) }
+        if (!photoDataUrl.isNullOrBlank() && photoDataUrl !in list) {
+            list.add(0, photoDataUrl)
+        }
+        return list
+    }
+}
 
 object KokohoSignatures {
 
     private const val PREFS = "kokoho_agency_prefs"
     private const val KEY_ENABLED_AGENCIES = "enabled_agencies_v2"
+    private const val KEY_MAP_VISIBLE_AGENCIES = "map_visible_agencies_v1"
+    private const val KEY_MAP_LOCATIONS_VISIBLE = "map_locations_visible_v1"
+    private const val KEY_LOCATIONS_ALARM_ENABLED = "locations_alarm_enabled_v1"
     private const val KEY_IMPERIAL_UNITS = "imperial_units"
     private const val KEY_AUXNET_ENABLED = "auxnet_enabled"
     private const val KEY_CONTRIBUTE_OBSERVATIONS = "contribute_observations"
     private const val KEY_SHARING_ACTIVE_PILL = "sharing_active_pill"
     private const val KEY_PUSH_NOTIFICATIONS = "push_notifications"
     private const val KEY_SIGNAL_DECAY_MINUTES = "signal_decay_minutes"
-    private const val KEY_MAP_TIME_WINDOW = "map_time_window"
+    private const val KEY_MAP_TIME_WINDOW = "map_time_window_v2"
     private const val KEY_ADSB_ENABLED = "adsb_enabled"
     private const val KEY_DRONE_ENABLED = "drone_detection_enabled"
     private const val KEY_ENABLED_AIRCRAFT_AGENCIES = "enabled_aircraft_agencies"
@@ -193,7 +229,27 @@ object KokohoSignatures {
             }
         }
         loadWitnessCache(context)
+        KokohoReferenceTables.ensureLoaded(context)
         loaded = true
+        runRetroactiveCleanupV116IfNeeded(context)
+    }
+
+    private fun runRetroactiveCleanupV116IfNeeded(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean("retroactive_cleanup_v116_done", false)) return
+        prefs.edit { putBoolean("retroactive_cleanup_v116_done", true) }
+        val appCtx = context.applicationContext
+        runCatching {
+            appCtx.getSharedPreferences("map_safety", Context.MODE_PRIVATE).edit { clear() }
+            val panes = org.tucsoncommunity.kokoho.util.Prefs.viewPanes(appCtx)
+            if ("map" !in panes) org.tucsoncommunity.kokoho.util.Prefs.setViewPanes(appCtx, panes + "map")
+        }
+        runCatching { org.tucsoncommunity.kokoho.data.AlertLog.purgeErroneousV116(appCtx) }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            runCatching {
+                org.tucsoncommunity.kokoho.data.AppDatabase.getInstance(appCtx).detectionDao().purgeErroneousRecordsV116()
+            }
+        }
     }
 
     fun getEnabledAgencies(context: Context): Set<KokohoAgency> {
@@ -202,12 +258,28 @@ object KokohoSignatures {
         if (saved == null) {
             return KokohoAgency.entries.filter { it.defaultEnabled }.toSet()
         }
-        return saved.mapNotNull { KokohoAgency.fromCode(it) }.toSet()
+        val parsed = saved.mapNotNull { KokohoAgency.fromCode(it) }.toMutableSet()
+        if (!prefs.getBoolean("fed_interop_restored_v109", false)) {
+            if (parsed.any { it.isDhs }) {
+                parsed.add(KokohoAgency.DHS_INTEROP)
+            }
+            prefs.edit {
+                putBoolean("fed_interop_restored_v109", true)
+                putStringSet(KEY_ENABLED_AGENCIES, parsed.map { it.id }.toSet())
+            }
+        }
+        return parsed
     }
 
     fun setEnabledAgencies(context: Context, agencies: Set<KokohoAgency>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putStringSet(KEY_ENABLED_AGENCIES, agencies.map { it.id }.toSet())
+        }
+        runCatching {
+            if (org.tucsoncommunity.kokoho.sdr.SdrRadio.isRunning()) {
+                org.tucsoncommunity.kokoho.sdr.SdrRadio.config =
+                    org.tucsoncommunity.kokoho.sdr.SdrRadio.config.copy(targets = watchedTargetsForEnabled(context))
+            }
         }
     }
 
@@ -224,7 +296,7 @@ object KokohoSignatures {
     fun setMasterDhs(context: Context, enabled: Boolean): Set<KokohoAgency> {
         val current = getEnabledAgencies(context).toMutableSet()
         if (enabled) {
-            // Enable primary DHS operational branches by default; keep FPS and Federal Interop opt-in
+            // Enable primary DHS operational branches by default; keep FPS opt-in
             current.addAll(KokohoAgency.DHS_AGENCIES.filter { it.defaultEnabled })
         } else {
             current.removeAll(KokohoAgency.DHS_AGENCIES.toSet())
@@ -232,6 +304,83 @@ object KokohoSignatures {
         setEnabledAgencies(context, current)
         return current
     }
+
+    // ---- Independent Map Eye (Visibility) vs Monitor Alarm Filters ----
+
+    private val DEFAULT_MAP_VISIBLE_AGENCIES: Set<KokohoAgency> = setOf(
+        KokohoAgency.DHS_ICE,
+        KokohoAgency.DHS_AMO,
+        KokohoAgency.DHS_CBP,
+        KokohoAgency.DHS_HSI,
+        KokohoAgency.DHS_INTEROP,
+        KokohoAgency.POLICE,
+        KokohoAgency.SHERIFF,
+        KokohoAgency.DRONE
+    )
+
+    fun getMapVisibleAgencies(context: Context): Set<KokohoAgency> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getStringSet(KEY_MAP_VISIBLE_AGENCIES, null)
+        if (saved == null) {
+            return (getEnabledAgencies(context) + DEFAULT_MAP_VISIBLE_AGENCIES).toSet()
+        }
+        return saved.mapNotNull { KokohoAgency.fromCode(it) }.toSet()
+    }
+
+    fun setMapVisibleAgencies(context: Context, agencies: Set<KokohoAgency>) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putStringSet(KEY_MAP_VISIBLE_AGENCIES, agencies.map { it.id }.toSet())
+        }
+        runCatching {
+            if (org.tucsoncommunity.kokoho.sdr.SdrRadio.isRunning()) {
+                org.tucsoncommunity.kokoho.sdr.SdrRadio.config =
+                    org.tucsoncommunity.kokoho.sdr.SdrRadio.config.copy(targets = watchedTargetsForEnabled(context))
+            }
+        }
+    }
+
+    fun toggleAgencyMapVisible(context: Context, agency: KokohoAgency): Set<KokohoAgency> {
+        val current = getMapVisibleAgencies(context).toMutableSet()
+        if (agency in current) current.remove(agency) else current.add(agency)
+        setMapVisibleAgencies(context, current)
+        return current
+    }
+
+    fun isDhsMasterMapVisible(context: Context): Boolean =
+        getMapVisibleAgencies(context).any { it.isDhs }
+
+    fun setDhsMasterMapVisible(context: Context, visible: Boolean): Set<KokohoAgency> {
+        val current = getMapVisibleAgencies(context).toMutableSet()
+        if (visible) {
+            current.addAll(KokohoAgency.DHS_AGENCIES.filter { it.defaultEnabled })
+        } else {
+            current.removeAll(KokohoAgency.DHS_AGENCIES.toSet())
+        }
+        setMapVisibleAgencies(context, current)
+        return current
+    }
+
+    fun isMapLocationsVisible(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MAP_LOCATIONS_VISIBLE, true)
+
+    fun setMapLocationsVisible(context: Context, visible: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_LOCATIONS_VISIBLE, visible)
+        }
+    }
+
+    fun isLocationsAlarmEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_LOCATIONS_ALARM_ENABLED, false)
+
+    fun setLocationsAlarmEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_LOCATIONS_ALARM_ENABLED, enabled)
+        }
+    }
+
+    /** Union of Alarm-enabled and Map-visible agencies so sensors evaluate anything either alerted or drawn on the map. */
+    fun getEvaluatedAgencies(context: Context): Set<KokohoAgency> =
+        getEnabledAgencies(context) + getMapVisibleAgencies(context)
 
     // ---- Pro / Enterprise / Military Drone Detection Toggle ----
 
@@ -381,10 +530,12 @@ object KokohoSignatures {
         }
     }
 
-    fun getWitnessReport(context: Context, keyOrUuid: String): WitnessReportRecord? {
+    fun getWitnessReport(context: Context, keyOrUuid: String, approvedOnly: Boolean = false): WitnessReportRecord? {
         ensureLoaded(context)
         val norm = normalizeEntityId(keyOrUuid)
-        return witnessCache[norm]
+        val rec = witnessCache[norm] ?: return null
+        if (approvedOnly && !rec.isApproved) return null
+        return rec
     }
 
     fun getAllWitnessReports(context: Context): List<WitnessReportRecord> {
@@ -395,10 +546,15 @@ object KokohoSignatures {
     fun saveWitnessReport(context: Context, report: WitnessReportRecord, syncRemote: Boolean = true) {
         ensureLoaded(context)
         val normKey = normalizeEntityId(report.targetKey)
-        val cleaned = report.copy(targetKey = normKey, updatedAtMs = System.currentTimeMillis())
+        val newStatus = if (syncRemote) "PENDING" else report.status.ifBlank { "APPROVED" }
+        val cleaned = report.copy(
+            targetKey = normKey,
+            updatedAtMs = System.currentTimeMillis(),
+            status = newStatus
+        )
         witnessCache[normKey] = cleaned
         cleaned.entityUuid?.let { witnessCache[normalizeEntityId(it)] = cleaned }
-        if (cleaned.agentName.isNotBlank() || cleaned.badgeNumber.isNotBlank()) {
+        if (cleaned.isApproved && (cleaned.agentName.isNotBlank() || cleaned.badgeNumber.isNotBlank())) {
             val summary = listOfNotNull(
                 cleaned.agentName.takeIf { it.isNotBlank() },
                 cleaned.badgeNumber.takeIf { it.isNotBlank() }?.let { "Badge #$it" },
@@ -409,8 +565,8 @@ object KokohoSignatures {
             }
         }
         persistWitnessCache(context)
-        if (syncRemote && isContributeObservationsEnabled(context)) {
-            KokohoHubClient.submitWitnessReport(cleaned)
+        if (syncRemote) {
+            KokohoHubClient.submitWitnessReport(cleaned, context)
         }
     }
 
@@ -421,9 +577,10 @@ object KokohoSignatures {
         for (r in reports) {
             val norm = normalizeEntityId(r.targetKey)
             val existing = witnessCache[norm]
-            if (existing == null || r.updatedAtMs > existing.updatedAtMs) {
-                witnessCache[norm] = r
-                r.entityUuid?.let { witnessCache[normalizeEntityId(it)] = r }
+            val approvedIncoming = r.copy(targetKey = norm, status = r.status.ifBlank { "APPROVED" })
+            if (existing == null || approvedIncoming.isApproved || approvedIncoming.updatedAtMs >= existing.updatedAtMs) {
+                witnessCache[norm] = approvedIncoming
+                approvedIncoming.entityUuid?.let { witnessCache[normalizeEntityId(it)] = approvedIncoming }
                 changed = true
             }
         }
@@ -485,22 +642,98 @@ object KokohoSignatures {
         prefs.edit { putStringSet(KEY_WATCHED_ENTITIES, next) }
     }
 
-    // ---- Map Time Window ("30m", "24h", "All Time") & Signal Opacity ----
+    // ---- Map Time Window ("30m", "3h", "24h", "1wk", "All Time"), Gravity Clustering & Color Mixing ----
 
     enum class MapTimeWindow(val id: String, val label: String, val windowMs: Long) {
         MIN_30("30M", "30m", 30 * 60_000L),
+        HOURS_3("3H", "3h", 3 * 60 * 60_000L),
         HOURS_24("24H", "24h", 24 * 60 * 60_000L),
+        WEEK_1("1W", "1wk", 7L * 24 * 60 * 60_000L),
         ALL_TIME("ALL", "All Time", 3650L * 24 * 60 * 60_000L);
 
         companion object {
+            /** Rolling duration windows exposed in the Map UI (`30m`, `3h`, `24h`). */
+            val ROLLING_UI_WINDOWS = listOf(MIN_30, HOURS_3, HOURS_24)
+
             fun fromId(id: String?): MapTimeWindow =
-                entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: ALL_TIME
+                entries.firstOrNull { it.id.equals(id, ignoreCase = true) }?.let {
+                    if (it == WEEK_1 || it == ALL_TIME) HOURS_24 else it
+                } ?: MIN_30
         }
+    }
+
+    /**
+     * Zoom-adaptive proximity merge threshold (meters) for collapsing nearby centroids into
+     * a single group-gravity bubble. Ungroups more aggressively at street/building breakpoints,
+     * and returns `0.0` at `zoom >= 15.5` so zooming way in splits all detections into their
+     * respective pucks at each center, regardless of actual precision.
+     */
+    fun zoomGravityMergeRadiusM(zoom: Double): Double = when {
+        zoom < 10.0 -> 650.0
+        zoom < 11.0 -> 360.0
+        zoom < 12.0 -> 180.0
+        zoom < 13.0 -> 85.0
+        zoom < 14.0 -> 38.0
+        zoom < 15.0 -> 16.0
+        zoom < 15.5 -> 6.0
+        else -> 0.0
+    }
+
+    /**
+     * Blends agency map colors weighted by each agency's colocated gravity mass [agencyWeights]
+     * relative to a cluster's center of gravity.
+     * Note: `DHS_INTEROP` (`Federal Interop`) is never used as the primary attested agency color
+     * when any specific agency (`DHS_ICE`, `DHS_CBP`, `DHS_HSI`, `SHERIFF`, `POLICE`, etc.) is present.
+     */
+    fun mixAgencyColorsArgb(agencyWeights: Map<KokohoAgency, Double>): Int {
+        val allPositive = agencyWeights.filter { it.value > 1e-6 }
+        if (allPositive.isEmpty()) return KokohoAgency.DHS_CBP.mapColorArgb
+        val specificPositive = allPositive.filterKeys { it != KokohoAgency.DHS_INTEROP }
+        val positive = if (specificPositive.isNotEmpty()) specificPositive else allPositive
+        if (positive.size == 1) return positive.keys.first().mapColorArgb
+
+        var totalWeight = 0.0
+        var sumR = 0.0
+        var sumG = 0.0
+        var sumB = 0.0
+        var maxOrigChannel = 0.0
+
+        for ((agency, w) in positive) {
+            val c = agency.mapColorArgb
+            val r = ((c ushr 16) and 0xFF).toDouble()
+            val g = ((c ushr 8) and 0xFF).toDouble()
+            val b = (c and 0xFF).toDouble()
+            sumR += r * w
+            sumG += g * w
+            sumB += b * w
+            totalWeight += w
+            val peak = maxOf(r, g, b)
+            if (peak > maxOrigChannel) maxOrigChannel = peak
+        }
+        if (totalWeight <= 0.0) return positive.keys.first().mapColorArgb
+
+        var rMix = sumR / totalWeight
+        var gMix = sumG / totalWeight
+        var bMix = sumB / totalWeight
+
+        // Preserve vibrant brightness so complementary agency blends don't wash out into muddy grey
+        val mixPeak = maxOf(rMix, gMix, bMix)
+        if (mixPeak in 1.0..(maxOrigChannel - 1.0)) {
+            val boost = (0.35 + 0.65 * (maxOrigChannel / mixPeak)).coerceIn(1.0, 1.35)
+            rMix = (rMix * boost).coerceIn(0.0, 255.0)
+            gMix = (gMix * boost).coerceIn(0.0, 255.0)
+            bMix = (bMix * boost).coerceIn(0.0, 255.0)
+        }
+
+        val ri = (rMix + 0.5).toInt().coerceIn(0, 255)
+        val gi = (gMix + 0.5).toInt().coerceIn(0, 255)
+        val bi = (bMix + 0.5).toInt().coerceIn(0, 255)
+        return (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
     }
 
     fun getMapTimeWindow(context: Context): MapTimeWindow {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_MAP_TIME_WINDOW, MapTimeWindow.ALL_TIME.id)
+            .getString(KEY_MAP_TIME_WINDOW, MapTimeWindow.MIN_30.id)
         return MapTimeWindow.fromId(raw)
     }
 
@@ -525,19 +758,67 @@ object KokohoSignatures {
     fun signalDecayMs(context: Context): Long =
         signalDecayMinutes(context) * 60_000L
 
-    /** Total map visibility lifetime governed by the active MapTimeWindow (30m, 24h, or All Time). */
+    /** Total map visibility lifetime governed by the active rolling MapTimeWindow (`30m`, `3h`, or `24h`). */
     fun mapMaxVisibilityMs(context: Context): Long =
         getMapTimeWindow(context).windowMs
 
-    /** Computes opacity multiplier [0.18 .. 1.0] for a map detection of age [ageMs]. */
-    fun mapStalenessOpacity(context: Context, ageMs: Long): Float {
-        val solidMs = signalDecayMs(context)
-        if (ageMs <= solidMs) return 1.0f
-        val over = (ageMs - solidMs).toFloat()
-        val frac = (over / MAP_FADE_SPAN_MS.toFloat()).coerceIn(0f, 1f)
-        val floor = if (getMapTimeWindow(context) == MapTimeWindow.MIN_30) 0.18f else 0.42f
-        return (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+    /**
+     * Rolling confidence-centroid radius projection across `30m`, `3h`, and `24h`:
+     *  - Expands linearly from `1.00x` to `1.25x` (`+25%`) over the first `30m` without observation.
+     *  - Holds that `1.25x` expanded centroid radius across `3h` and `24h`.
+     */
+    fun projectRollingRadiusM(
+        window: MapTimeWindow,
+        ageMs: Long,
+        baseRadiusM: Int,
+        isPinpointed: Boolean = false
+    ): Int {
+        if (isPinpointed) return baseRadiusM.coerceAtLeast(15)
+        val clampedBase = baseRadiusM.coerceAtLeast(20)
+        val thirtyMinMs = 30 * 60_000.0
+        val expandFrac = (ageMs.coerceAtLeast(0L).toDouble() / thirtyMinMs).coerceIn(0.0, 1.0)
+        return kotlin.math.round(clampedBase * (1.0 + 0.25 * expandFrac)).toInt().coerceAtLeast(20)
     }
+
+    /**
+     * Window-specific rolling opacity curve (`30m` vs `3h` vs `24h`):
+     *  - `30m`: fades continuously across `0..30m` (`1.00 -> 0.16`).
+     *  - `3h`: stays full (`1.00`) across `0..150m` (`2h 30m`), fading over the last `30m` (`150m..180m`).
+     *  - `24h`: stays full (`1.00`) across `0..23h`, fading over the last `1h` (`23h..24h`).
+     */
+    fun mapWindowOpacity(window: MapTimeWindow, ageMs: Long): Float {
+        val age = ageMs.coerceAtLeast(0L)
+        if (age > window.windowMs) return 0f
+        val floor = 0.16f
+        return when (window) {
+            MapTimeWindow.MIN_30 -> {
+                val frac = (age.toFloat() / (30 * 60_000f)).coerceIn(0f, 1f)
+                (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+            }
+            MapTimeWindow.HOURS_3 -> {
+                val fadeStart = 150 * 60_000L
+                val fadeSpan = 30 * 60_000f
+                if (age <= fadeStart) 1.0f
+                else {
+                    val frac = ((age - fadeStart).toFloat() / fadeSpan).coerceIn(0f, 1f)
+                    (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+                }
+            }
+            MapTimeWindow.HOURS_24, MapTimeWindow.WEEK_1, MapTimeWindow.ALL_TIME -> {
+                val fadeStart = 23L * 60 * 60_000L
+                val fadeSpan = 60 * 60_000f
+                if (age <= fadeStart) 1.0f
+                else {
+                    val frac = ((age - fadeStart).toFloat() / fadeSpan).coerceIn(0f, 1f)
+                    (1.0f - (1.0f - floor) * frac).coerceIn(floor, 1.0f)
+                }
+            }
+        }
+    }
+
+    /** Computes opacity multiplier [0.16 .. 1.0] for a map detection of age [ageMs] in the active rolling window. */
+    fun mapStalenessOpacity(context: Context, ageMs: Long): Float =
+        mapWindowOpacity(getMapTimeWindow(context), ageMs)
 
     /**
      * Computes map opacity combining temporal staleness with multi-detection corroboration (1 -> 3+ detections)
@@ -622,111 +903,576 @@ object KokohoSignatures {
         return current
     }
 
-    private val DHS_AIR_TOKEN_REGEX = Regex("\\b(CUSTOMS|BORDER|HOMELAND|CBP|OMAHA|ICE|HSI|AMO|CIRCLING|MILITARY)\\b|AIRCRAFT CIRCLING OVERHEAD")
+    private val HELICOPTER_AIRFRAME_REGEX = Regex(
+        "\\b(AS50|AS350|H125|EC120|EC130|EC135|EC45|H145|B06|B206|B407|B412|B429|MD500|MD520|MD600|R22|R44|R66|S76|AW139|AW119|UH-?1|HELI|HELICOPTER|ROTORCRAFT|CHOPPER|EUROCPTR|AIRBUS HELI|BELL 206|BELL 407)\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val FIXED_WING_AIRFRAME_REGEX = Regex(
+        "\\b(PC-?12|PILATUS|C140|C150|C152|C170|C172|C177|C182|C206|C208|C210|CESSNA|SKYHAWK|SKYLANE|STATIONAIR|CENTURION|CARAVAN|PIPER|PA-?[0-9]{2}|P28[A-Z]|TOMAHAWK|CHEROKEE|ARCHER|WARRIOR|SEMINOLE|SENECA|COMANCHE|NAVAJO|CHEYENNE|BEECH|BONANZA|BARON|B350|BE20|BE30|KING ?AIR|MOONEY|M20[A-Z]?|CIRRUS|SR20|SR22|DIAMOND|DA20|DA40|DA42|DA62|VULCANAIR|PARTENAVIA|P68|DASH-?8|DHC-?8|P-?3|ORION|MQ-?9|SPY PLANE|FIXED[- ]WING)\\b",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun isHelicopterAirframe(
+        type: String?,
+        category: String?,
+        labelOrDetail: String?,
+        agency: KokohoAgency? = null,
+        hex: String? = null
+    ): Boolean {
+        if (category.equals("A7", ignoreCase = true)) return true
+        KokohoReferenceTables.lookupAircraft(hex)?.let { ref ->
+            if (ref.airframeKind == 'H') return true
+            if (ref.airframeKind == 'F' || ref.airframeKind == 'G') return false
+        }
+        val combined = listOfNotNull(type, labelOrDetail).joinToString(" ")
+        if (combined.isNotBlank() && HELICOPTER_AIRFRAME_REGEX.containsMatchIn(combined)) return true
+        // DHS Air (DHS_AMO) defaults to helicopter classification & symbol unless explicitly fixed-wing
+        if (agency == KokohoAgency.DHS_AMO || category.equals("DHS_AMO", ignoreCase = true)) {
+            if (combined.isBlank() || !FIXED_WING_AIRFRAME_REGEX.containsMatchIn(combined)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Heuristic filter for the misidentified "all-flights-at-the-same-time" ADS-B session and any
+     * downstream records (`entities`, `tracks`, `active_objects`):
+     * Genuine tactical air detections carry specific attribution (tail number `N...`, aircraft model,
+     * circling turn metric, or `CALL:` / `ALERT:ORBITING` / `OUI:AIR` / `RF:CHAN:` facets).
+     * Unattributed `adsb:icao:*` / `DHS_AMO` records with a bare generic label (`"DHS Air"`, `"ADS-B Aircraft"`)
+     * or stationary `avgVelocityMps < 2.0` are filtered out.
+     */
+    fun isAnomalousUnattributedAirRecord(
+        primaryKey: String?,
+        category: String?,
+        label: String?,
+        facets: List<String> = emptyList(),
+        avgVelocityMps: Double? = null
+    ): Boolean {
+        val pkLow = primaryKey?.trim()?.lowercase().orEmpty()
+        val catUp = category?.trim()?.uppercase().orEmpty()
+        val isAir = catUp == "DHS_AMO" || pkLow.startsWith("adsb:") || pkLow.startsWith("icao:") || pkLow.startsWith("air:")
+        if (!isAir) return false
+        if (avgVelocityMps != null && catUp == "DHS_AMO" && avgVelocityMps in 0.0001..1.99) return true
+        val hasSpecificFacet = facets.any { f ->
+            val u = f.trim().uppercase()
+            u.startsWith("CALL:") || u.startsWith("ALERT:ORBITING") || u.startsWith("OUI:AIR") || u.startsWith("RF:CHAN:")
+        }
+        if (hasSpecificFacet) return false
+        val lblLow = label?.trim()?.lowercase().orEmpty()
+        val isBareLabel = lblLow.isEmpty() ||
+            lblLow == "dhs air" ||
+            lblLow == "dhs_amo" ||
+            lblLow == "ads-b aircraft" ||
+            lblLow == "aircraft"
+        return isBareLabel
+    }
+
+    private val DHS_AIR_TOKEN_REGEX = Regex("\\b(CUSTOMS|BORDER|HOMELAND|CBP|OMAHA|ICE|HSI|AMO)\\b")
+    private val CIRCLING_AIR_TOKEN_REGEX = Regex("\\bCIRCLING\\b|AIRCRAFT CIRCLING OVERHEAD")
+    private val COMMERCIAL_AIRLINE_REGEX = Regex(
+        "\\b(SOUTHWEST|AMERICAN|UNITED|DELTA|JETBLUE|ALASKA|FRONTIER|SPIRIT|ALLEGIANT|FEDEX|UPS|SKYWEST|ENVOY|MESA|REPUBLIC|AIRWAYS|AIRLINES|EXPRESSJET|HORIZON|SUN COUNTRY)\\b"
+    )
+    private val EXCLUDED_MILITARY_OR_GLIDER_AIR_REGEX = Regex(
+        "(MOTOR)?GLIDER|\\b(GLID|SAILPLANE|ASK-?21|DG-?1000|TG-?1[0-9]|G-?10[23]|L-?13|L-?23|BLANIK|PA-?38|PA38|TOMAHAWK|PA-?44|PA44|SEMINOLE|PA-?24|PA24|COMANCHE|P28[A-Z]|PA-?28|PA28|CHEROKEE|ARCHER|WARRIOR|DAKOTA|C140|C150|C152|C170|C172|C177|CARDINAL|CESSNA 15[02]|CESSNA 17[027]|SKYHAWK|CUTLASS|DA20|DA40|SR20|AA-?5|CHEETAH|TIGER|M20[A-Z]?|MOONEY|RV-[0-9]{1,2}|UH-?72|LUH-?72|LAKOTA|UH-?60|MH-?60|HH-?60|S-?70|BLACK ?HAWK|CH-?47|AH-?64|EC-?145|BK-?117|T-?38|T-?6|KC-?135|KC-?46|C-?130|C-?20|C-?12|C-?17|C-?5|E-?3|B-?52|V-?22|A-?10|F-?35|F-?16|USAF|AIR FORCE|ARMY|NAVY|MARINES|NATIONAL GUARD)\\b"
+    )
+    private val SHELL_OR_SURVEILLANCE_AIR_OWNER_REGEX = Regex(
+        "\\b(LLC|INC|CORP|CORPORATION|TRUST|TRUSTEE|LEASING|HOLDINGS|AVIATION|AERIAL|RESEARCH|SYSTEMS|SOLUTIONS|SERVICES|CONTRACTING|OBRERO|PXW|FVX|DYNAMIC|SIERRA NEVADA|LASAI|TENAX|STRAIGHT FLIGHT)\\b"
+    )
+    private val SURVEILLANCE_AIRFRAME_MODEL_REGEX = Regex(
+        "\\b(PC-?12|PILATUS|C182|C206|C208|C210|SKYLANE|STATIONAIR|CARAVAN|B350|BE20|BE30|KING ?AIR|DASH-?8|DHC-?8|P68|DA42|DA62|P-?3|ORION|MQ-?9)\\b"
+    )
     private val SHERIFF_AIR_TOKEN_REGEX = Regex("\\b(SHERIFF|PCSO|COCHISE|MARICOPA|PINAL)\\b|PIMA COUNTY")
     private val SAR_AIR_TOKEN_REGEX = Regex("\\b(RESCUE|SAR)\\b|SEARCH AND RESCUE")
-    private val FIRE_AIR_TOKEN_REGEX = Regex("\\b(FIRE|USFS|FORESTRY|BLM)\\b|FOREST SERVICE")
+    private val FIRE_AIR_TOKEN_REGEX = Regex("\\b(FIRE|USFS|FORESTRY|BLM|AT-?802|TANKER)\\b|FOREST SERVICE|AIR TRACTOR")
     private val POLICE_AIR_TOKEN_REGEX =
-        Regex("\\b(POLICE|TPD|TUCSON|TROOPER|DPS|FBI|DEA|MARSHALS|ATF|GOVERNMENT)\\b|HIGHWAY PATROL|STATE POLICE|PUBLIC SAFETY")
+        Regex("\\b(POLICE|TPD|TUCSON|TROOPER|DPS|FBI|DEA|MARSHALS|ATF)\\b|HIGHWAY PATROL|STATE POLICE|PUBLIC SAFETY")
 
     /**
      * Classifies an ADS-B aircraft owner/callsign/registration/behavior into a [KokohoAgency].
-     * Unlisted / hex-only aircraft circling overhead (`Aircraft circling overhead`) ALWAYS classify
-     * as [KokohoAgency.DHS_AMO] ("DHS Air") so hidden spy planes are never dropped.
+     * Ordinary commercial, civil, glider, and non-LE US military flights return null so only genuine
+     * LE/DHS/SAR/Fire or verified circling surveillance aircraft appear on the tactical radar.
      */
     fun classifyAircraftAgency(
         owner: String?,
         registration: String?,
         callsign: String?,
-        hitLabel: String?
+        hitLabel: String?,
+        type: String? = null,
+        hex: String? = null,
+        speedKt: Double? = null,
+        isCircling: Boolean = false
     ): KokohoAgency? {
-        val combined = listOfNotNull(owner, registration, callsign, hitLabel).joinToString(" ").uppercase()
-        if (combined.isBlank()) return KokohoAgency.DHS_AMO
+        if (speedKt != null && speedKt < 15.0) return null
+        val ref = KokohoReferenceTables.lookupAircraft(hex)
+        val combined = listOfNotNull(
+            owner,
+            ref?.owner?.takeIf { owner.isNullOrBlank() },
+            registration,
+            ref?.registration?.takeIf { registration.isNullOrBlank() },
+            callsign,
+            hitLabel,
+            type,
+            ref?.icaoType?.takeIf { type.isNullOrBlank() }
+        ).joinToString(" ").uppercase()
+        if (combined.isBlank() && ref == null) return null
+        val explicitPolice = POLICE_AIR_TOKEN_REGEX.containsMatchIn(combined)
+        val explicitSheriff = SHERIFF_AIR_TOKEN_REGEX.containsMatchIn(combined)
+        val explicitSar = SAR_AIR_TOKEN_REGEX.containsMatchIn(combined)
+        val explicitFire = FIRE_AIR_TOKEN_REGEX.containsMatchIn(combined)
+        val explicitDhs = DHS_AIR_TOKEN_REGEX.containsMatchIn(combined)
+        val explicitLeOrCivic = explicitPolice || explicitSheriff || explicitSar || explicitFire || explicitDhs
+
+        // Authoritative FAA + plane-alert-db reference lookup:
+        //  - Immediately exclude Medevac (`MED`), Flight Schools / Primary Trainers (`TRN`), Airlines (`AIR`), & Non-LE Military (`MIL`)
+        //  - Immediately resolve verified LE / DHS / Covert FBI-DHS Shell / PIA aircraft (`LE`, `GOV`) even when offline!
+        if (!explicitLeOrCivic && ref != null) {
+            if (ref.isExcludedNonThreat) return null
+            if (ref.isExplicitLeOrGov && ref.agencyHint != null) return ref.agencyHint
+        }
+
+        // Exclude USAF pilot training gliders, Army/Guard Blackhawk & Lakota, commercial airliners,
+        // and uncorroborated military hexes (AE*) unless explicitly an LE/DHS/Fire/SAR airframe.
+        if (!explicitLeOrCivic) {
+            if (COMMERCIAL_AIRLINE_REGEX.containsMatchIn(combined)) return null
+            if (EXCLUDED_MILITARY_OR_GLIDER_AIR_REGEX.containsMatchIn(combined)) return null
+            if (!hex.isNullOrBlank() && hex.trim().uppercase().startsWith("AE")) return null
+            if (hitLabel?.contains("Military", ignoreCase = true) == true) return null
+        }
+
+        val circlingFlag = isCircling || (!hitLabel.isNullOrBlank() && CIRCLING_AIR_TOKEN_REGEX.containsMatchIn(combined))
         return when {
-            SHERIFF_AIR_TOKEN_REGEX.containsMatchIn(combined) -> KokohoAgency.SHERIFF
-            SAR_AIR_TOKEN_REGEX.containsMatchIn(combined) -> KokohoAgency.SAR
-            FIRE_AIR_TOKEN_REGEX.containsMatchIn(combined) -> KokohoAgency.FIRE
-            DHS_AIR_TOKEN_REGEX.containsMatchIn(combined) -> KokohoAgency.DHS_AMO
-            POLICE_AIR_TOKEN_REGEX.containsMatchIn(combined) -> KokohoAgency.POLICE
-            owner.isNullOrBlank() && registration.isNullOrBlank() -> KokohoAgency.DHS_AMO
-            else -> KokohoAgency.DHS_AMO
+            explicitSheriff -> KokohoAgency.SHERIFF
+            explicitSar -> KokohoAgency.SAR
+            explicitFire -> KokohoAgency.FIRE
+            explicitDhs -> KokohoAgency.DHS_AMO
+            explicitPolice -> KokohoAgency.POLICE
+            combined.contains("GOVERNMENT") -> KokohoAgency.POLICE
+            circlingFlag -> {
+                val ownerClean = (owner ?: ref?.owner).orEmpty().trim().uppercase()
+                val isMaskedOrShell = ownerClean.isEmpty() ||
+                    (registration.isNullOrBlank() && ref?.registration.isNullOrBlank()) ||
+                    ref?.registrantKind == 'P' ||
+                    ownerClean.contains("BLOCKED") ||
+                    ownerClean.contains("PRIV") ||
+                    ownerClean.contains("LADD") ||
+                    ownerClean.contains("PIA") ||
+                    SHELL_OR_SURVEILLANCE_AIR_OWNER_REGEX.containsMatchIn(ownerClean) ||
+                    SURVEILLANCE_AIRFRAME_MODEL_REGEX.containsMatchIn(combined) ||
+                    HELICOPTER_AIRFRAME_REGEX.containsMatchIn(combined) ||
+                    ref?.airframeKind == 'H'
+                if (isMaskedOrShell) KokohoAgency.DHS_AMO else KokohoAgency.POLICE
+            }
+            else -> null
         }
     }
 
+    /** Dual-use national calling repeater-output / direct-simplex frequencies (`8CALL90/D`, `7CALL50/D`) that require >= 40 dB SNR to reject distant hilltop repeaters. */
+    private val DUAL_USE_CALLING_FREQS_HZ = longArrayOf(851_012_500L, 769_243_750L)
+
+    fun isDualUseRepeaterSimplexHz(hz: Long): Boolean =
+        DUAL_USE_CALLING_FREQS_HZ.any { abs(it - hz) <= 6_250L }
+
     /**
      * Matches an RF frequency in Hz (and optional P25 NAC) against the curated signature catalog.
-     * By default (`includeRepeaters = false`), solidly excludes `REPEATER` downlinks and `CONTROL_CHANNEL` trunks.
+     * By default (`includeRepeaters = false`), solidly excludes `REPEATER` downlinks and `CONTROL_CHANNEL` trunks,
+     * and enforces `snrDb >= 40` on dual-use repeater/simplex calling channels (`851.0125 MHz`) when `snrDb` is supplied.
      */
     fun matchFrequency(
         hz: Long,
         nacHex: String? = null,
         toleranceHz: Long = 6_250L,
-        includeRepeaters: Boolean = false
+        includeRepeaters: Boolean = false,
+        snrDb: Int? = null
     ): RfChannelSig? {
+        if (!includeRepeaters && snrDb != null && snrDb < 40 && isDualUseRepeaterSimplexHz(hz)) {
+            return null
+        }
         val candidates = rfChannels.filter {
             (includeRepeaters || it.isAlertableDirectOrMobile) && abs(it.hz - hz) <= toleranceHz
         }
-        if (candidates.isEmpty()) return null
-        if (!nacHex.isNullOrBlank()) {
-            val clean = nacHex.trim().removePrefix("$").removePrefix("0x").uppercase()
-            candidates.firstOrNull { it.nac?.uppercase() == clean }?.let { return it }
+        if (candidates.isNotEmpty()) {
+            if (!nacHex.isNullOrBlank()) {
+                val clean = nacHex.trim().removePrefix("$").removePrefix("0x").uppercase()
+                candidates.firstOrNull { it.nac?.uppercase() == clean }?.let { return it }
+            }
+            return candidates.minByOrNull { abs(it.hz - hz) }
         }
-        return candidates.minByOrNull { abs(it.hz - hz) }
-    }
-
-    /**
-     * Matches close-range (`snrDb >= 32`) transmissions inside the NTIA Exclusive Federal VHF
-     * (`162.025–173.9875 MHz`, excluding NOAA weather `162.390–162.560 MHz` and known repeaters)
-     * or NTIA Exclusive Federal UHF (`406.100–420.000 MHz`) allocations.
-     */
-    fun matchCloseRangeFederalBand(hz: Long, snrDb: Int, toleranceHz: Long = 6_250L): RfChannelSig? {
-        // First check if it's already in the catalog (including repeaters)
-        val exactAny = rfChannels.firstOrNull { abs(it.hz - hz) <= toleranceHz }
-        if (exactAny != null) {
-            // If it's a known repeater or control channel, do NOT treat it as simplex
-            return if (exactAny.isAlertableDirectOrMobile) exactAny else null
-        }
-        if (snrDb < 32) return null
-        // Exclude NOAA Weather Radio (162.400 - 162.550 MHz)
-        if (hz in 162_385_000L..162_565_000L) return null
-        val mhzStr = "%.4f".format(java.util.Locale.US, hz / 1_000_000.0)
+        // Fallback to DHS NIFOG & FCC ULS Arizona reference table (`az_fcc_rf.tsv.gz`, ±1.2 kHz VHF 2.5 kHz splinter half-step)
+        val azRef = KokohoReferenceTables.lookupAzRf(hz, minOf(toleranceHz, 1_200L)) ?: return null
         return when {
-            hz in 162_025_000L..173_987_500L -> RfChannelSig(
-                hz = hz,
-                nac = null,
-                mode = "P25",
-                alpha = "FED-VHF-$mhzStr",
-                description = "NTIA Federal VHF Close Tactical Simplex ($mhzStr MHz)",
-                agency = "DHS_ICE",
-                role = "DIRECT_TACTICAL"
+            azRef.cls == "NIFOG_TAC" -> RfChannelSig(
+                hz = azRef.freqHz, nac = null, mode = azRef.mode,
+                alpha = azRef.callsign, description = azRef.licensee,
+                agency = azRef.agency, role = "DIRECT_TACTICAL"
             )
-            hz in 406_100_000L..420_000_000L -> RfChannelSig(
-                hz = hz,
-                nac = null,
-                mode = "P25",
-                alpha = "FED-UHF-$mhzStr",
-                description = "NTIA Federal UHF Close Tactical Simplex ($mhzStr MHz)",
-                agency = "DHS_FPS",
-                role = "DIRECT_TACTICAL"
+            azRef.cls == "NIFOG_IN" || azRef.cls == "PS_MOB" -> RfChannelSig(
+                hz = azRef.freqHz, nac = null, mode = azRef.mode,
+                alpha = azRef.callsign, description = azRef.licensee,
+                agency = azRef.agency, role = "MOBILE_INPUT"
+            )
+            includeRepeaters && (azRef.cls == "PS_REP" || azRef.cls == "NIFOG_REP") -> RfChannelSig(
+                hz = azRef.freqHz, nac = null, mode = azRef.mode,
+                alpha = azRef.callsign, description = azRef.licensee,
+                agency = azRef.agency, role = "REPEATER"
             )
             else -> null
         }
     }
 
-    /** Matches a P25 talkgroup ID against the curated talkgroup ranges (PCWIN TPD/PCSO/Fire/SAR & Federal). */
-    fun matchTalkgroup(tg: Int): TalkgroupSig? =
-        talkgroups.firstOrNull { tg in it.minTg..it.maxTg }
+    /**
+     * Matches close-range Federal / Tactical Interop radio transmissions (`DHS_INTEROP`) when not already
+     * matched to a specific agency channel in `rfChannels`:
+     *  - NTIA Federal VHF (`162.025–173.9875 MHz`, excluding NOAA Weather `162.400–162.550 MHz`) or
+     *    NTIA Federal UHF (`406.125–419.9875 MHz`) with `snrDb >= 32`
+     *  - High-SNR close-range VHF (`151.0–159.475 MHz`) or UHF (`451.0–469.9875 MHz`, excluding FRS `462.550–462.725` / `467.550–467.725`)
+     *    tactical handheld/mobile transmissions with `snrDb >= 36`
+     * Never matches known repeaters or control channels in `rfChannels`, and never outranks specific agencies.
+     */
+    fun matchCloseRangeFederalBand(
+        hz: Long,
+        snrDb: Int,
+        toleranceHz: Long = 6_250L,
+        enabledAgencies: Set<KokohoAgency>? = null
+    ): RfChannelSig? {
+        if (enabledAgencies == null || KokohoAgency.DHS_INTEROP !in enabledAgencies) return null
+        // Exclude NOAA Weather Radio (162.400 - 162.550 MHz) and FRS consumer walkie-talkies
+        if (hz in 162_395_000L..162_555_000L) return null
+        if (hz in 462_545_000L..462_730_000L || hz in 467_545_000L..467_730_000L) return null
+        // If this frequency is already in rfChannels (e.g., as a suppressed REPEATER or CONTROL_CHANNEL), do not synthesize
+        val existingCatalog = rfChannels.firstOrNull { abs(it.hz - hz) <= toleranceHz }
+        if (existingCatalog != null) {
+            return if (existingCatalog.isAlertableDirectOrMobile) existingCatalog else null
+        }
+        // Suppress any frequency licensed as AZ commercial/business (`IG_COMM`) or fixed repeater (`PS_REP`) in FCC ULS
+        val azRef = KokohoReferenceTables.lookupAzRf(hz, minOf(toleranceHz, 1_200L))
+        if (azRef != null && azRef.isSuppressedCommercialOrRepeater) return null
+        val inNtiaFedBand = (hz in 162_025_000L..173_987_500L) || (hz in 406_125_000L..419_987_500L)
+        if (!inNtiaFedBand || snrDb < 36) return null
+        val mhzStr = "%.4f".format(java.util.Locale.US, hz / 1_000_000.0)
+        return RfChannelSig(
+            hz = hz,
+            nac = null,
+            mode = "P25",
+            alpha = "FED-NTIA-$mhzStr",
+            description = "Federal Interop Tactical ($mhzStr MHz)",
+            agency = "DHS_INTEROP",
+            role = "DIRECT_TACTICAL"
+        )
+    }
+
+    /**
+     * Matches close-range (`snrDb >= 30`) public-safety mobile radio uplinks in the
+     * 700 MHz (`799–805 MHz`) and 800 MHz rebanded (`806–813.9 MHz`) bands.
+     * When the frequency is not explicitly cataloged in `rfChannels`, biases attribution toward
+     * [primaryPresenceAgency] if a dominant agency presence is already attested in the colocated
+     * environment (e.g. a colocated federal scene) rather than blindly assuming Police/Sheriff.
+     */
+    fun matchPublicSafetyMobileUplink(
+        hz: Long,
+        snrDb: Int,
+        enabledAgencies: Set<KokohoAgency>? = null,
+        primaryPresenceAgency: KokohoAgency? = null
+    ): RfChannelSig? {
+        if (snrDb < 30) return null
+        val inBand = (hz in 799_000_000L..805_000_000L) || (hz in 806_000_000L..813_900_000L)
+        if (!inBand) return null
+        val exactAny = rfChannels.firstOrNull { abs(it.hz - hz) <= 6_250L }
+        if (exactAny != null) {
+            return if (exactAny.isAlertableDirectOrMobile) exactAny else null
+        }
+        val azRef = KokohoReferenceTables.lookupAzRf(hz, 1_200L)
+        // Check paired trunked repeater downlink (+45 MHz in 800 MHz rebanded band, -30 MHz in 700 MHz band)
+        val pairedDownlinkHz = if (hz >= 806_000_000L) hz + 45_000_000L else hz - 30_000_000L
+        val pairedDownlinkRef = KokohoReferenceTables.lookupAzRf(pairedDownlinkHz, 2_500L)
+        val hasPublicSafetyTrunkPair = pairedDownlinkRef != null &&
+            (pairedDownlinkRef.cls == "PS_REP" || pairedDownlinkRef.cls == "NIFOG_REP" || pairedDownlinkRef.cls == "PS_MOB")
+        // Never allow legacy pre-rebanding commercial rows (`IG_COMM`, e.g. WPGY693 at 809.8375 MHz) to veto
+        // close-range (`snrDb >= 32`) public-safety mobile uplinks or active trunked mobile inputs!
+        if (azRef != null && azRef.isSuppressedCommercialOrRepeater) {
+            val isLegacyCommercialOnUplink = azRef.cls == "IG_COMM" && (snrDb >= 32 || hasPublicSafetyTrunkPair)
+            if (!isLegacyCommercialOnUplink) {
+                return null
+            }
+        }
+        val refAgency = azRef?.takeIf { it.isAlertableMobileOrTactical }?.let { KokohoAgency.fromCode(it.agency) }
+            ?: pairedDownlinkRef?.takeIf { hasPublicSafetyTrunkPair }?.let { KokohoAgency.fromCode(it.agency) }
+        val targetAgency = when {
+            primaryPresenceAgency != null && (enabledAgencies == null || primaryPresenceAgency in enabledAgencies) ->
+                primaryPresenceAgency.id
+            refAgency != null && (enabledAgencies == null || refAgency in enabledAgencies) ->
+                refAgency.id
+            enabledAgencies == null -> "POLICE"
+            KokohoAgency.POLICE in enabledAgencies -> "POLICE"
+            KokohoAgency.SHERIFF in enabledAgencies -> "SHERIFF"
+            KokohoAgency.DHS_INTEROP in enabledAgencies -> "DHS_INTEROP"
+            else -> "POLICE"
+        }
+        val mhzStr = "%.4f".format(java.util.Locale.US, hz / 1_000_000.0)
+        val bandLabel = if (hz < 806_000_000L) "700" else "800"
+        val alpha = azRef?.callsign?.takeIf { it.isNotBlank() && azRef.isAlertableMobileOrTactical } ?: "PS-$bandLabel-IN"
+        val desc = if (azRef != null && azRef.isAlertableMobileOrTactical && azRef.licensee.isNotBlank()) {
+            "${azRef.licensee} Mobile Uplink ($mhzStr MHz)"
+        } else {
+            "Public Safety $bandLabel MHz Mobile Uplink ($mhzStr MHz)"
+        }
+        return RfChannelSig(
+            hz = hz,
+            nac = null,
+            mode = azRef?.mode?.takeIf { it == "P25" || it == "DMR" } ?: "P25",
+            alpha = alpha,
+            description = desc,
+            agency = targetAgency,
+            role = "MOBILE_INPUT"
+        )
+    }
+
+    /**
+     * Matches a P25 talkgroup ID against the compiled RadioReference Arizona P25 talkgroup table
+     * (`az_talkgroups.tsv.gz`: PCWIN, AZWINS, Pinal, Marana, FCC Tucson, RWC, TRWC) first — suppressing
+     * municipal non-LE (`IGNORE`: Public Works, Water, Transit, Schools, Hospitals, ADOT) — and falling
+     * back to the curated range table when unlisted.
+     */
+    fun matchTalkgroup(tg: Int, systemHint: String? = null): TalkgroupSig? {
+        KokohoReferenceTables.lookupTalkgroup(tg, systemHint)?.let { ref ->
+            if (ref.agencyCode == "IGNORE") return null
+            val ag = KokohoAgency.fromCode(ref.agencyCode) ?: return null
+            val lbl = if (ref.description.isNotBlank() && !ref.description.equals(ref.alphaTag, ignoreCase = true)) {
+                "${ref.alphaTag} — ${ref.description}"
+            } else {
+                ref.alphaTag.ifBlank { "${ref.system} TG $tg" }
+            }
+            return TalkgroupSig(minTg = tg, maxTg = tg, agency = ag.id, label = lbl)
+        }
+        return talkgroups.firstOrNull { tg in it.minTg..it.maxTg }
+    }
+
+    /**
+     * Maximum 802.11 Beacon TSF continuous uptime (16 hours) expected for a mobile patrol router or
+     * temporary battery/Pelican pole deployment before classifying as fixed building infrastructure.
+     */
+    const val MAX_MOBILE_BEACON_UPTIME_MS = 16L * 3600_000L
+
+    private val ROOM_OR_BUILDING_SSID_REGEX = Regex(
+        "(?i)^\\s*(\\d{1,4}[A-Z]?|room\\s*\\d+.*|apt\\s*\\d+.*|unit\\s*\\d+A|suite\\s*\\d+.*|guest.*|lobby.*|staff.*)\\s*$"
+    )
 
     private val IGNORED_INFRA_MAC_PREFIXES = listOf(
         "00:30:44:55:", // City of Tucson "rmat" Regional Metropolitan Arterial Traffic signal cabinets
         "06:30:44:55:", // AMR / GMR ambulance ePCR ("GMREPCR") & arterial traffic cabinet virtual APs
-        "04:F0:21:",    // Compex Systems municipal intersection V2X / traffic backhaul modules
+        "04:F0:21:",    // Compex Systems highway light-pole / intersection V2X backhaul modules
+        "00:40:29:",    // Compex Systems fixed wireless backhaul modules
+        "00:80:48:",    // Compex Incorporated fixed wireless backhaul modules
         "24:B2:B9:"     // Flock Safety / Liteon ALPR cameras (collected in local DB, never shown on maps)
     )
 
-    private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|GMREPCR|SunTran|SunLink|Chill N NW|Tap4G Backup|RAI-SIGNAGE|H&R Block IoT|Saladandgo|GoEnergy.*|HCI Mobile|MWMBackUp|Tucsonmemorials|E110-.*|IBR200-.*|IBR600-.*|CBA850.*|W1850.*|R980-.*|FX3100.*|FX4100.*)\\s*$"
+    private val MUNICIPAL_TRAFFIC_OR_TRANSIT_SSID_REGEX = Regex(
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran|SunLink|MimoSeries.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*)\\s*$"
     )
+
+    private val FIXED_BRANCH_ROUTER_MODEL_SSID_REGEX = Regex(
+        "(?i)^\\s*(E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|AISMobile.*|MimoSeries.*)\\s*$"
+    )
+
+    private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran|SunLink|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|R920-.*|R980-.*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*)\\s*$"
+    )
+
+    private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TUCSON_?FIRE|NWFD|GRFD|GVFD).*)$")
+    private val DEFAULT_ROUTER_MODEL_SSID_REGEX = Regex("(?i)^\\s*IBR1700-[0-9A-Za-z_-]+\\s*$")
+    private val FLEET_UNIT_SSID_REGEX = Regex("(?i)^\\s*(Unit|Car|SQD|K9|TAHOE|RAM|SUP)[\\s_-]*\\d+.*$")
+    private val MULTI_RADIO_ROUTER_OUIs = setOf(
+        "00:30:44", "00:E0:1C", "24:79:2A", "AC:82:47", "C8:B3:73", // Cradlepoint / Ericsson
+        "D4:13:F8", "10:56:CA", "00:11:6E", "6C:A3:D3",             // Peplink / Pepwave
+        "00:14:3E", "00:A0:D5", "28:A3:31", "50:13:9D", "64:CE:6E", // Sierra Wireless AirLink
+        "84:DB:2F", "CC:93:4A", "D8:12:65", "60:E3:27",             // Sierra Wireless / Semtech
+        "00:15:FF", "18:EE:86", "28:80:A2", "78:0C:71", "E0:86:14", // Inseego / Novatel MiFi & Vehicle
+        "00:40:9D", "00:1E:42", "00:18:0A", "E4:3E:D7"              // Digi International / Teltonika / Meraki
+    )
+    private val GENERIC_FLEET_ROUTER_OUIs = MULTI_RADIO_ROUTER_OUIs + setOf("00:11:AB")
+    private val EXPLICIT_FEDERAL_SSID_REGEX = Regex("(?i)\\b(CBP|BP[_-]?\\d*|USBP|ICE|ERO|HSI|FPS|DHS|FED)\\b")
+
+    /**
+     * Maps locally-administered virtual BSSIDs (e.g. `06:30:44:74:AB:83` `PCSD-Vehicle` or
+     * `D6:13:F8:7F:C6:48` `Guys Win`) back to their physical hardware OUI (`00:30:44` or `D4:13:F8`)
+     * so secondary/5GHz/guest VAPs group with their primary physical router radio.
+     */
+    fun canonicalHardwareOuiMac(raw: String): String {
+        val norm = normalizeMac(raw)
+        if (norm.length != 17) return norm
+        val tail = norm.substring(2) // ":BB:CC:DD:EE:FF"
+        val prefix8 = norm.take(8)
+        return when (prefix8) {
+            "02:30:44", "06:30:44", "0A:30:44", "0E:30:44" -> "00$tail"
+            "D2:13:F8", "D6:13:F8" -> "D4$tail"
+            "12:56:CA", "16:56:CA" -> "10$tail"
+            "02:11:6E", "06:11:6E" -> "00$tail"
+            "6E:A3:D3", "6A:A3:D3" -> "6C$tail"
+            "02:14:3E", "06:14:3E" -> "00$tail"
+            "02:A0:D5", "06:A0:D5" -> "00$tail"
+            "02:18:0A", "06:18:0A" -> "00$tail"
+            "02:1E:42", "06:1E:42" -> "00$tail"
+            "02:40:9D", "06:40:9D" -> "00$tail"
+            "E2:3E:D7", "E6:3E:D7" -> "E4$tail"
+            "02:E0:1C", "06:E0:1C" -> "00$tail"
+            else -> norm
+        }
+    }
+
+    /**
+     * Returns true when [ssid] explicitly identifies a Law Enforcement, Sheriff, Fire, Federal, or Fleet Unit
+     * vehicle/tactical asset (which always overrides generic router suppression).
+     */
+    fun isExplicitAgencyOrTacticalSsid(ssid: String?): Boolean {
+        val clean = ssid?.trim().orEmpty()
+        if (clean.isEmpty()) return false
+        return EXPLICIT_FEDERAL_SSID_REGEX.containsMatchIn(clean) ||
+            LAW_ENFORCEMENT_SSID_REGEX.containsMatchIn(clean) ||
+            SHERIFF_SSID_REGEX.containsMatchIn(clean) ||
+            FIRE_SSID_REGEX.matches(clean) ||
+            FLEET_UNIT_SSID_REGEX.matches(clean) ||
+            TACTICAL_BLE_BEACON_REGEX.matches(clean)
+    }
+
+    /**
+     * Returns true when 802.11 beacon capabilities advertise an unencrypted Open `[ESS]` network
+     * (typical of commercial guest portals like `Guys Win`, municipal `cotwifi`, etc., and never used on tactical vehicle routers).
+     */
+    fun isOpenPublicWifiCapabilities(capabilities: String?): Boolean {
+        val cap = capabilities?.uppercase().orEmpty()
+        if (!cap.contains("[ESS]")) return false
+        return !cap.contains("WPA") && !cap.contains("RSN") && !cap.contains("WEP") && !cap.contains("SAE") && !cap.contains("OWE")
+    }
+
+    fun isMunicipalTrafficCabinetOrTransit(mac: String, ssidOrName: String?): Boolean {
+        val normMac = normalizeMac(mac)
+        if (IGNORED_INFRA_MAC_PREFIXES.any { normMac.startsWith(it) }) return true
+        val ssid = ssidOrName?.trim().orEmpty()
+        return ssid.isNotEmpty() && MUNICIPAL_TRAFFIC_OR_TRANSIT_SSID_REGEX.matches(ssid)
+    }
+
+    fun isFixedBranchRouterModelSsid(ssidOrName: String?): Boolean {
+        val ssid = ssidOrName?.trim().orEmpty()
+        return ssid.isNotEmpty() && FIXED_BRANCH_ROUTER_MODEL_SSID_REGEX.matches(ssid)
+    }
+
+    /**
+     * Principled multi-BSSID hardware-group filter derived from field telemetry (`known_devices` + `device_details`):
+     * Evaluates all sibling VAPs belonging to the same physical router (`routerRadioGroupKey(mac)`) together.
+     * - If ANY sibling broadcasts an explicit agency/tactical SSID (e.g. `06:30:44:74:AB:83` `PCSD-Vehicle` alongside
+     *   `00:30:44:74:AB:83` `IBR1700-b82`), returns `false` (never suppress).
+     * - Otherwise returns `true` (suppress from threats/alerts while still collecting in DB) if ANY sibling exhibits:
+     *   1. Municipal traffic cabinet / transit / fixed branch router model / retail SSID (`isIgnoredInfrastructureOrRetail`)
+     *   2. Continuous 802.11 Beacon TSF uptime > 48 hours (`MAX_MOBILE_BEACON_UPTIME_MS`)
+     *   3. Unencrypted Open `[ESS]` public/guest Wi-Fi VAP (`isOpenPublicWifiCapabilities`)
+     *   4. Multi-session stationary router familiarity (`isStaticBaselineRouter`)
+     */
+    fun isFixedRoomOrBuildingWifiAp(snap: org.tucsoncommunity.kokoho.service.DeviceRegistry.Snapshot): Boolean {
+        val wifi = snap.advert?.wifi ?: return false
+        if (wifi.client) return false
+        val ssid = snap.name?.trim().orEmpty()
+        if (isExplicitAgencyOrTacticalSsid(ssid)) return false
+        val upSince = snap.upSince ?: wifi.upSince
+        if (upSince != null && snap.lastSeen > upSince && (snap.lastSeen - upSince) > MAX_MOBILE_BEACON_UPTIME_MS) {
+            return true
+        }
+        val capUp = wifi.capabilities.uppercase()
+        if (capUp.contains("[ESS]")) {
+            if (ssid.isNotEmpty() && isOpenPublicWifiCapabilities(capUp)) return true
+            if (capUp.contains("TKIP")) return true
+            if (ssid.isNotEmpty() && ROOM_OR_BUILDING_SSID_REGEX.matches(ssid)) return true
+            val normMac = normalizeMac(snap.mac)
+            if (CITATION_PRINTER_OUIs.any { normMac.startsWith(it) } &&
+                !ssid.startsWith("DIRECT-", ignoreCase = true) &&
+                !ZEBRA_PRINTER_REGEX.containsMatchIn(ssid)
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun isStationaryOrCommercialRouterGroup(
+        groupSnapshots: List<org.tucsoncommunity.kokoho.service.DeviceRegistry.Snapshot>,
+        context: Context? = null
+    ): Boolean {
+        if (groupSnapshots.isEmpty()) return false
+        if (groupSnapshots.any { isExplicitAgencyOrTacticalSsid(it.name) }) return false
+        for (s in groupSnapshots) {
+            if (isIgnoredInfrastructureOrRetail(s.mac, s.name)) return true
+            if (isFixedRoomOrBuildingWifiAp(s)) return true
+            val upSince = s.upSince ?: s.advert?.wifi?.upSince
+            if (upSince != null && s.lastSeen > upSince && (s.lastSeen - upSince) > MAX_MOBILE_BEACON_UPTIME_MS) {
+                return true
+            }
+            val wifi = s.advert?.wifi
+            if (wifi != null && !wifi.client && !s.name.isNullOrBlank() && isOpenPublicWifiCapabilities(wifi.capabilities)) {
+                return true
+            }
+            if (isStaticBaselineRouter(context, s.mac)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * Returns true when [mac] matches a multi-agency cellular router OUI (Cradlepoint/Sierra/Peplink/Digi/Meraki)
+     * without an explicit federal/agency SSID or explicit agency NIC sub-block (e.g. `00:30:44:74` PCSD-Vehicle).
+     */
+    fun isGenericUnmarkedFleetRouter(mac: String, ssid: String?): Boolean {
+        val canon = canonicalHardwareOuiMac(mac)
+        if (canon.startsWith("00:30:44:74:") ||
+            canon.startsWith("00:30:44:22:8") ||
+            canon.startsWith("00:30:44:22:9") ||
+            canon.startsWith("00:30:44:A2:E8:")
+        ) {
+            return false
+        }
+        val prefix = canon.take(8)
+        if (prefix !in GENERIC_FLEET_ROUTER_OUIs) return false
+        val clean = ssid?.trim().orEmpty()
+        if (clean.isEmpty()) return true
+        if (EXPLICIT_FEDERAL_SSID_REGEX.containsMatchIn(clean)) return false
+        if (LAW_ENFORCEMENT_SSID_REGEX.containsMatchIn(clean) ||
+            SHERIFF_SSID_REGEX.containsMatchIn(clean) ||
+            FIRE_SSID_REGEX.matches(clean)
+        ) {
+            return false
+        }
+        return true
+    }
+
+    /** Canonical upper-case colon-separated MAC (`AA:BB:CC:DD:EE:FF`) when given 12 hex digits. */
+    fun normalizeMac(raw: String): String {
+        val hex = raw.trim().uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
+        return if (hex.length == 12) hex.chunked(2).joinToString(":") else raw.trim().uppercase()
+    }
+
+    /**
+     * Collapses dual-band and locally-administered virtual BSSIDs belonging to the same physical fleet router radio
+     * (e.g., `00:30:44:74:AB:83` + `06:30:44:74:AB:83`, or `D4:13:F8:7F:C6:49` + `D6:13:F8:7F:C6:48`) into one
+     * 8-BSSID aligned hardware radio group (`AA:BB:CC:DD:EE:X0/8`).
+     */
+    fun routerRadioGroupKey(mac: String): String {
+        val norm = canonicalHardwareOuiMac(mac)
+        val parts = norm.split(':')
+        if (parts.size == 6 && parts.take(3).joinToString(":") in MULTI_RADIO_ROUTER_OUIs) {
+            val last = parts[5].toIntOrNull(16)
+            if (last != null) {
+                val base = (last and 0xF8).toString(16).uppercase().padStart(2, '0')
+                return "${parts.take(5).joinToString(":")}:$base"
+            }
+        }
+        return norm
+    }
+
+    fun isLowConfidenceDefaultRouterSsid(ssid: String?): Boolean =
+        !ssid.isNullOrBlank() && DEFAULT_ROUTER_MODEL_SSID_REGEX.matches(ssid.trim())
+
+    fun isHighValueUnitSsid(ssid: String?): Boolean =
+        !ssid.isNullOrBlank() && FLEET_UNIT_SSID_REGEX.matches(ssid.trim())
 
     /**
      * Returns true if a device/entity is a Flock / ALPR camera (which may be collected in the
@@ -746,36 +1492,68 @@ object KokohoSignatures {
     }
 
     /**
-     * Returns true if a MAC / SSID belongs to a known municipal traffic-signal cabinet (`"rmat"`),
-     * intersection V2X bridge, ambulance ePCR, Flock camera, or fixed commercial/retail POS backup router.
+     * Returns true if a MAC / SSID belongs to fixed non-Flock highway/traffic infrastructure,
+     * Compex light-pole backhaul (`MimoSeries*`), Axon Networks consumer ISP home routers (`00:58:28`),
+     * fixed Cradlepoint/Inseego branch routers (`IBR600C-*`, `E100-*`), or known retail POS backup Wi-Fi.
      */
-    fun isIgnoredInfrastructureOrRetail(mac: String, ssidOrName: String?): Boolean {
-        if (isFlockCamera(mac, ssidOrName)) return true
-        val normMac = mac.trim().uppercase()
-        if (IGNORED_INFRA_MAC_PREFIXES.any { normMac.startsWith(it) }) return true
+    fun isNonFlockIgnoredInfraOrRetail(mac: String, ssidOrName: String?, vendor: String? = null): Boolean {
+        if (isExplicitAgencyOrTacticalSsid(ssidOrName)) return false
+        if (isAxonNetworksConsumerRouter(mac, ssidOrName, vendor)) return true
+        val normMac = normalizeMac(mac)
+        if (IGNORED_INFRA_MAC_PREFIXES.any { it != "24:B2:B9:" && normMac.startsWith(it) }) return true
         val ssid = ssidOrName?.trim().orEmpty()
         if (ssid.isNotEmpty() && IGNORED_INFRA_OR_RETAIL_SSID_REGEX.matches(ssid)) return true
         return false
     }
 
-    /** Matches a Wi-Fi / BLE MAC address against curated fleet router / tactical / drone OUI prefixes. */
+    /**
+     * Returns true if a MAC / SSID belongs to a known municipal traffic-signal cabinet (`"rmat"`),
+     * intersection V2X bridge, ambulance ePCR, Flock camera, or fixed commercial/retail POS backup router.
+     */
+    fun isIgnoredInfrastructureOrRetail(mac: String, ssidOrName: String?): Boolean {
+        if (isFlockCamera(mac, ssidOrName)) return true
+        return isNonFlockIgnoredInfraOrRetail(mac, ssidOrName)
+    }
+
+    /** Matches a Wi-Fi / BLE MAC address against curated fleet router / tactical / drone OUI prefixes & IEEE 28/36-bit sub-blocks. */
     fun matchOui(mac: String, ssidOrName: String? = null): FleetOuiSig? {
         if (isIgnoredInfrastructureOrRetail(mac, ssidOrName)) return null
-        val norm = mac.trim().uppercase()
-        return fleetOuis.firstOrNull { norm.startsWith(it.prefix.uppercase()) }
+        val norm = canonicalHardwareOuiMac(mac)
+        val sub = KokohoReferenceTables.lookupMacSubblock(norm)
+        // Exclude non-tactical IEEE 28/36-bit sub-blocks sharing a 24-bit IEEE root (e.g. 70:B3:D5 / 8C:1F:64 / 00:50:C2)
+        if (sub != null && (sub.role == "CIVIL_SUBBLOCK" || sub.role == "CONSUMER_ISP" || sub.role == "INFRA_BACKHAUL" || sub.role == "FLOCK_ALPR")) {
+            return null
+        }
+        fleetOuis.firstOrNull { norm.startsWith(it.prefix.uppercase()) }?.let { return it }
+        if (sub != null && sub.agency != null && sub.role != "BODY_CAM" && sub.role != "LMR_RADIO") {
+            return FleetOuiSig(
+                prefix = sub.prefixHex.chunked(2).joinToString(":"),
+                agency = sub.agency.id,
+                label = sub.vendor,
+                confidence = if (sub.bitLen >= 28) 88 else 78
+            )
+        }
+        return null
     }
 
     private val TACTICAL_DRONE_OUIs = setOf(
-        "38:1D:14", // Skydio (X2 / X10 Tactical)
-        "D8:80:39", // Teal Drones (Golden Eagle sUAS)
-        "90:03:B7", "A0:14:3D", "00:12:1C", "00:26:7E", // Parrot (Anafi USA / Gov)
-        "EC:5B:73", "18:D7:93", // Autel Robotics (EVO II Dual Enterprise)
+        "38:1D:14",                                     // Skydio (X2 / X10 Tactical)
+        "D8:80:39", "B0:30:C8",                         // Teal Drones / Red Cat (Golden Eagle sUAS)
+        "90:03:B7", "A0:14:3D", "00:12:1C", "00:26:7E", "90:3A:E6", // Parrot (Anafi USA / Gov)
+        "00:1A:F9", "8C:1F:64:B0:7",                    // AeroVironment (Puma / Raven)
+        "14:DD:48",                                     // Shield AI (Nova / V-BAT)
+        "E8:B4:70:C",                                   // Anduril Industries (Ghost / Bolt)
+        "AC:86:D1:7",                                   // Quantum Systems (Vector / Trinity)
+        "34:B5:F3:2",                                   // Inspired Flight (IF800 / IF1200)
+        "EC:71:5E",                                     // Freefly Systems (Astro)
+        "04:71:4B:1", "54:6F:71",                       // uAvionix (UAS Remote ID / Avionics)
+        "EC:5B:73", "18:D7:93",                         // Autel Robotics (EVO II Dual Enterprise)
         "60:60:1F", "48:1C:B9", "34:D2:62", "04:A8:5A", // DJI Enterprise (Matrice / Mavic Enterprise)
-        "FA:0B:BC"  // ASTM F3411 Wi-Fi Beacon / NAN Remote ID
+        "FA:0B:BC"                                      // ASTM F3411 Wi-Fi Beacon / NAN Remote ID
     )
 
     private val TACTICAL_DRONE_TOKEN_REGEX =
-        Regex("(?i)\\b(SKYDIO|ANAFI|BRINC|LEMUR|TEAL|AUTEL|MATRICE|MAVIC\\s*3E|MAVIC\\s*3T|REMOTE\\s*ID)\\b")
+        Regex("(?i)\\b(SKYDIO|ANAFI|BRINC|LEMUR|TEAL|AUTEL|MATRICE|MAVIC\\s*3E|MAVIC\\s*3T|AEROVIRONMENT|SHIELD\\s*AI|ANDURIL|FREEFLY|INSPIRED\\s*FLIGHT|REMOTE\\s*ID)\\b")
 
     /** Returns true if a device is a Pro / Enterprise / Military / Remote ID drone. */
     fun isTacticalOrRemoteIdDrone(
@@ -785,16 +1563,16 @@ object KokohoSignatures {
         hasRemoteId: Boolean
     ): Boolean {
         if (hasRemoteId) return true
-        val prefix = mac.trim().uppercase().take(8)
-        if (prefix in TACTICAL_DRONE_OUIs) return true
+        val norm = normalizeMac(mac)
+        if (TACTICAL_DRONE_OUIs.any { norm.startsWith(it) }) return true
         val combined = "${ssidOrName.orEmpty()} ${vendor.orEmpty()}"
         return TACTICAL_DRONE_TOKEN_REGEX.containsMatchIn(combined)
     }
 
     private val LAW_ENFORCEMENT_SSID_REGEX =
-        Regex("(?i)\\b(TUCSON_PD|TPD_|ANTI_GANG|SWAT|NARCOTICS)\\b")
+        Regex("(?i)\\b(TUCSON_?PD|TPD_?[A-Z0-9]*|AZDPS|DPS_?PATROL|TROOPER|STATE_?PATROL|ANTI_?GANG|SWAT|NARCOTICS|OVPD|ORO_?VALLEY_?PD|MARANA_?PD|SAHUARITA_?PD|UAPD)\\b")
     private val SHERIFF_SSID_REGEX =
-        Regex("(?i)\\b(PCSO|PIMA_SHERIFF|SHERIFF_TAC)\\b")
+        Regex("(?i)\\b(PCSO|PCSD|PIMA_?SHERIFF|SHERIFF_?TAC|SHERIFF)\\b")
     private val TACTICAL_BLE_BEACON_REGEX =
         Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
 
@@ -811,6 +1589,9 @@ object KokohoSignatures {
         }
         val cleanSsid = ssid?.trim().orEmpty()
         if (cleanSsid.isNotEmpty()) {
+            if (FIRE_SSID_REGEX.matches(cleanSsid)) {
+                return KokohoAgency.FIRE to KokohoAgency.FIRE.friendlyLabel
+            }
             if (LAW_ENFORCEMENT_SSID_REGEX.containsMatchIn(cleanSsid)) {
                 return KokohoAgency.POLICE to KokohoAgency.POLICE.friendlyLabel
             }
@@ -842,34 +1623,532 @@ object KokohoSignatures {
         return null
     }
 
+    data class LearnedMacIntel(
+        val mac: String,
+        val ouiPrefix: String,
+        val nicU24: Long,
+        val agencyId: String,
+        val label: String,
+        val reputationScore: Double,
+        val corroboratedHits: Int,
+        val totalHits: Int,
+        val distinctDays: Int = 1,
+        val distinctH3Res10: Int = 1,
+        val associationPattern: String = "TRANSIENT",
+        val capabilities: List<String> = emptyList(),
+        val ssidHint: String = "",
+        val updatedAtMs: Long = System.currentTimeMillis()
+    ) {
+        val agencyEnum: KokohoAgency get() = KokohoAgency.fromCode(agencyId) ?: KokohoAgency.DHS_CBP
+    }
+
+    data class LearnedMacBlock(
+        val ouiPrefix: String,
+        val startMac: String,
+        val endMac: String,
+        val minNicU24: Long,
+        val maxNicU24: Long,
+        val agencyId: String,
+        val label: String,
+        val confirmedCount: Int,
+        val confidenceBoost: Double
+    ) {
+        val agencyEnum: KokohoAgency get() = KokohoAgency.fromCode(agencyId) ?: KokohoAgency.DHS_CBP
+    }
+
+    private const val KEY_LEARNED_MACS_JSON = "learned_macs_v2"
+    private const val KEY_LEARNED_BLOCKS_JSON = "learned_blocks_v2"
+    private val learnedMacCache = java.util.concurrent.ConcurrentHashMap<String, LearnedMacIntel>()
+    @Volatile private var learnedBlockCache: List<LearnedMacBlock> = emptyList()
+    @Volatile private var learnedIntelLoaded = false
+
+    fun parseMacOuiAndNic(rawMacOrFacet: String): Triple<String, Long, String>? {
+        val cleaned = rawMacOrFacet.trim().removePrefix("hw:mac:").uppercase()
+        val hex = cleaned.filter { it in '0'..'9' || it in 'A'..'F' }
+        if (hex.length != 12) return null
+        val oui = "${hex.substring(0, 2)}:${hex.substring(2, 4)}:${hex.substring(4, 6)}"
+        val nic = hex.substring(6, 12).toLongOrNull(16) ?: return null
+        val canonical = hex.chunked(2).joinToString(":")
+        return Triple(oui, nic, canonical)
+    }
+
+    private fun ensureLearnedIntelLoaded(context: Context?) {
+        if (learnedIntelLoaded || context == null) return
+        synchronized(this) {
+            if (learnedIntelLoaded) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (prefs.contains("learned_macs_v1") || prefs.contains("learned_blocks_v1")) {
+                prefs.edit {
+                    remove("learned_macs_v1")
+                    remove("learned_blocks_v1")
+                }
+            }
+            runCatching {
+                val mRaw = prefs.getString(KEY_LEARNED_MACS_JSON, null)
+                if (!mRaw.isNullOrBlank()) {
+                    val mType = object : TypeToken<List<LearnedMacIntel>>() {}.type
+                    val list: List<LearnedMacIntel> = Gson().fromJson(mRaw, mType) ?: emptyList()
+                    for (m in list) learnedMacCache[m.mac.uppercase()] = m
+                }
+                val bRaw = prefs.getString(KEY_LEARNED_BLOCKS_JSON, null)
+                if (!bRaw.isNullOrBlank()) {
+                    val bType = object : TypeToken<List<LearnedMacBlock>>() {}.type
+                    learnedBlockCache = Gson().fromJson(bRaw, bType) ?: emptyList()
+                }
+            }
+            learnedIntelLoaded = true
+        }
+    }
+
+    private fun persistLearnedIntel(context: Context) {
+        val macs = learnedMacCache.values.sortedByDescending { it.updatedAtMs }.take(250)
+        val blocks = learnedBlockCache.take(60)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_LEARNED_MACS_JSON, Gson().toJson(macs))
+            putString(KEY_LEARNED_BLOCKS_JSON, Gson().toJson(blocks))
+        }
+    }
+
+    private val NON_BLOCK_LEARNING_OUIs = setOf(
+        "9C:05:D6", "D8:B3:70", "00:58:28", "04:F0:21", "00:40:29", "00:80:48", "24:B2:B9"
+    )
+
+    fun mergeRemoteMacIntel(
+        context: Context,
+        macs: List<LearnedMacIntel>,
+        blocks: List<LearnedMacBlock>
+    ) {
+        ensureLearnedIntelLoaded(context)
+        var changed = false
+        for (m in macs) {
+            val k = normalizeMac(m.mac)
+            if (k.take(8) in NON_BLOCK_LEARNING_OUIs) continue
+            val prev = learnedMacCache[k]
+            if (prev == null || m.updatedAtMs >= prev.updatedAtMs || m.corroboratedHits >= prev.corroboratedHits) {
+                learnedMacCache[k] = m.copy(mac = k)
+                changed = true
+            }
+        }
+        val validBlocks = blocks.filter { it.ouiPrefix.uppercase() !in NON_BLOCK_LEARNING_OUIs && it.confirmedCount >= 2 }
+        if (validBlocks.isNotEmpty() || blocks.isEmpty()) {
+            learnedBlockCache = validBlocks
+            changed = true
+        }
+        if (changed) persistLearnedIntel(context)
+    }
+
+    fun recordLocalMacCorroboration(
+        context: Context?,
+        mac: String,
+        agency: KokohoAgency,
+        label: String,
+        isCorroborated: Boolean,
+        capabilities: List<String> = emptyList(),
+        ssidHint: String = "",
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        ensureLearnedIntelLoaded(context)
+        val (oui, nic, canonical) = parseMacOuiAndNic(mac) ?: return
+        if (oui in NON_BLOCK_LEARNING_OUIs) return
+        val prev = learnedMacCache[canonical]
+        val mergedCaps = ((prev?.capabilities.orEmpty()) + capabilities).distinct()
+        val delta = when {
+            isCorroborated -> 0.14
+            isHighValueUnitSsid(ssidHint) -> 0.08
+            else -> 0.02
+        }
+        val nextScore = if (prev == null) {
+            if (isCorroborated) 0.80 else 0.45
+        } else {
+            (prev.reputationScore + delta).coerceIn(0.15, 0.99)
+        }
+        val preferNew = prev == null || isCorroborated && (agency.priorityRank < prev.agencyEnum.priorityRank || prev.corroboratedHits == 0)
+        val nextDays = if (prev == null) {
+            1
+        } else if ((nowMs / 86_400_000L) != (prev.updatedAtMs / 86_400_000L)) {
+            prev.distinctDays + 1
+        } else {
+            prev.distinctDays
+        }
+        learnedMacCache[canonical] = LearnedMacIntel(
+            mac = canonical,
+            ouiPrefix = oui,
+            nicU24 = nic,
+            agencyId = if (preferNew) agency.id else prev!!.agencyId,
+            label = if (preferNew && label.isNotBlank()) label else prev?.label.orEmpty().ifBlank { agency.friendlyLabel },
+            reputationScore = nextScore,
+            corroboratedHits = (prev?.corroboratedHits ?: 0) + if (isCorroborated) 1 else 0,
+            totalHits = (prev?.totalHits ?: 0) + 1,
+            distinctDays = nextDays,
+            distinctH3Res10 = prev?.distinctH3Res10 ?: 1,
+            associationPattern = prev?.associationPattern ?: "TRANSIENT",
+            capabilities = mergedCaps,
+            ssidHint = ssidHint.ifBlank { prev?.ssidHint.orEmpty() },
+            updatedAtMs = nowMs
+        )
+        // Recompute local contiguous OUI blocks only when we have >= 2 distinct physical routers (`routerRadioGroupKey`)
+        // with multi-day corroborated hits in the same OUI+agency (so dual-band `:08`/`:0C` on 1 router never self-forms a block!)
+        val grouped = learnedMacCache.values
+            .filter {
+                it.ouiPrefix !in NON_BLOCK_LEARNING_OUIs &&
+                    it.corroboratedHits >= 3 &&
+                    it.distinctDays >= 2 &&
+                    it.reputationScore >= 0.88
+            }
+            .groupBy { it.ouiPrefix to it.agencyId }
+        val newBlocks = ArrayList<LearnedMacBlock>()
+        for ((key, members) in grouped) {
+            val sorted = members.sortedBy { it.nicU24 }
+            val cluster = mutableListOf<LearnedMacIntel>()
+            fun maybeAddCluster() {
+                val distinctRouters = cluster.map { routerRadioGroupKey(it.mac) }.distinct().size
+                if (distinctRouters >= 2) {
+                    newBlocks.add(buildLocalBlock(key.first, key.second, cluster, distinctRouters))
+                }
+            }
+            for (m in sorted) {
+                val last = cluster.lastOrNull()
+                if (last != null && m.nicU24 - last.nicU24 > 0x001000L) {
+                    maybeAddCluster()
+                    cluster.clear()
+                }
+                cluster.add(m)
+            }
+            maybeAddCluster()
+        }
+        if (newBlocks.isNotEmpty()) {
+            val merged = (newBlocks + learnedBlockCache).distinctBy { "${it.ouiPrefix}|${it.startMac}|${it.endMac}" }
+            learnedBlockCache = merged.sortedByDescending { it.confirmedCount }
+        }
+        if (context != null) persistLearnedIntel(context)
+    }
+
+    private fun buildLocalBlock(oui: String, agencyId: String, cluster: List<LearnedMacIntel>, distinctRouters: Int): LearnedMacBlock {
+        val minNic = cluster.first().nicU24
+        val maxNic = cluster.last().nicU24
+        val mean = cluster.sumOf { it.reputationScore } / cluster.size.toDouble()
+        val bonus = (distinctRouters.toDouble() / 6.0).coerceAtMost(0.18)
+        return LearnedMacBlock(
+            ouiPrefix = oui,
+            startMac = cluster.first().mac,
+            endMac = cluster.last().mac,
+            minNicU24 = minNic,
+            maxNicU24 = maxNic,
+            agencyId = agencyId,
+            label = cluster.first().label,
+            confirmedCount = distinctRouters,
+            confidenceBoost = (mean + bonus).coerceIn(0.40, 0.99)
+        )
+    }
+
+    fun lookupMacIntel(context: Context?, mac: String): LearnedMacIntel? {
+        ensureLearnedIntelLoaded(context)
+        return learnedMacCache[normalizeMac(mac)]
+    }
+
+    fun lookupAssignedMacBlock(context: Context?, mac: String): LearnedMacBlock? {
+        ensureLearnedIntelLoaded(context)
+        val (oui, nic, _) = parseMacOuiAndNic(mac) ?: return null
+        return learnedBlockCache.firstOrNull {
+            it.ouiPrefix == oui && nic >= (it.minNicU24 - 0x40L).coerceAtLeast(0L) && nic <= it.maxNicU24 + 0x40L
+        }
+    }
+
+    fun isStaticBaselineRouter(context: Context?, mac: String): Boolean {
+        if (org.tucsoncommunity.kokoho.detect.FixedRouter.isFamiliar(mac)) return true
+        val lm = lookupMacIntel(context, mac) ?: return false
+        return lm.associationPattern == "STATIC_LOCALE" && lm.corroboratedHits == 0
+    }
+
     /**
-     * Returns true ONLY for devices Kokoho cares about processing:
-     *  1. Curated agency fleet/tactical OUI or SSID (Cradlepoint, Sierra AirLink, Motorola APX, Axon)
-     *  2. Pro / Enterprise / Military / Remote ID Drones (Skydio, Parrot Anafi, Autel, Teal, BRINC, DJI Enterprise)
-     *  3. Lightweight BLE tracker candidates (Apple FindMy / AirTag, Samsung SmartTag, Tile) for tracker-following detection.
-     * Everything else (consumer Wi-Fi routers, iPhones, AirPods, TVs, cameras, etc.) is dropped immediately.
+     * Excludes "Axon Networks Inc." (`00:58:28`), a consumer fiber-ISP Wi-Fi 7 home router ODM
+     * (Quantum Fiber / CenturyLink residential gateways), which is unrelated to Axon Enterprise (`00:25:DF`).
      */
+    fun isAxonNetworksConsumerRouter(mac: String, nameOrSsid: String?, vendor: String?): Boolean {
+        val norm = normalizeMac(mac)
+        if (norm.startsWith("00:58:28")) return true
+        if ((vendor ?: "").contains("Axon Networks", ignoreCase = true)) return true
+        if ((nameOrSsid ?: "").contains("Axon Networks", ignoreCase = true)) return true
+        return false
+    }
+
+    private val COMPANION_KIT_REGEX = Regex(
+        "(?i)(?:\\b(BWCDEVICE|AXON(?!\\s+NETWORKS)|TASER|VIEVU|WATCHGUARD|BODYWORN|DIGITAL\\s*ALLY|ZEPCAM|ARBITRATOR|MOTOROLA\\s+SOLUTIONS|APX|XL-?200P|XL-?185P|ZEBRA|POCKETJET|PJ-?7|PJ-?8|RJ-?4|WHELEN|CENCOM|HAVIS|GAMBER|TOUGHBOOK)\\b|ZQ[35][0-9]{2}|PJ7[0-9]{2}|PJ8[0-9]{2})"
+    )
+
+    private val AXON_OR_APX_ACCESSORY_REGEX = Regex(
+        "(?i)\\b(BWCDEVICE|AXON(?!\\s+NETWORKS)|TASER|VIEVU|WATCHGUARD|BODYWORN|DIGITAL\\s*ALLY|ZEPCAM|ARBITRATOR|BODY_?CAM|BODYCAM|MOTOROLA\\s+SOLUTIONS|APX|XL-?200P|XL-?185P|WHELEN|CENCOM|HAVIS|GAMBER|TOUGHBOOK)\\b"
+    )
+
+    /** Raw Bluetooth SIG Company IDs & 16-bit Service UUIDs for Axon/TASER, Motorola Solutions APX, and Zebra kits. */
+    private const val BLE_COMPANY_TASER_AXON = 0x034D
+    private const val BLE_COMPANY_MOTOROLA_SOLUTIONS = 0x04EC
+    private const val BLE_COMPANY_ZEBRA = 0x01F1
+    private val BLE_AXON_SERVICE_UUID16 = setOf(0xFC81, 0xFE6B, 0xFE6C)
+    private val BLE_MOTOROLA_SERVICE_UUID16 = setOf(0xFD8E, 0xFE04)
+    private val BLE_ZEBRA_SERVICE_UUID16 = setOf(0xFD66, 0xFE79)
+
+    enum class BleTacticalKind(val capabilityLabel: String, val facetPrefix: String, val defaultSummary: String) {
+        AXON_BODYCAM("Bodycam", "hw:kit:bwc", "Axon Bodycam"),
+        MOTOROLA_RADIO("Portable Radio", "hw:kit:radio", "Motorola APX Radio"),
+        ZEBRA_PRINTER("Citation Printer", "hw:kit:printer", "Citation Printer")
+    }
+
+    fun classifyBleTacticalPayload(advert: org.tucsoncommunity.kokoho.detect.Advert?): BleTacticalKind? {
+        if (advert == null || !advert.isBle) return null
+        if (BLE_COMPANY_TASER_AXON in advert.manufacturerData.keys) return BleTacticalKind.AXON_BODYCAM
+        if (BLE_COMPANY_MOTOROLA_SOLUTIONS in advert.manufacturerData.keys) return BleTacticalKind.MOTOROLA_RADIO
+        if (BLE_COMPANY_ZEBRA in advert.manufacturerData.keys) return BleTacticalKind.ZEBRA_PRINTER
+        val shorts = (advert.serviceUuids + advert.serviceData.keys)
+            .mapNotNull { org.tucsoncommunity.kokoho.detect.Advert.shortOf(it) }
+        if (shorts.any { it in BLE_AXON_SERVICE_UUID16 }) return BleTacticalKind.AXON_BODYCAM
+        if (shorts.any { it in BLE_MOTOROLA_SERVICE_UUID16 }) return BleTacticalKind.MOTOROLA_RADIO
+        if (shorts.any { it in BLE_ZEBRA_SERVICE_UUID16 }) return BleTacticalKind.ZEBRA_PRINTER
+        return null
+    }
+
+    fun matchesBleTacticalPayload(advert: org.tucsoncommunity.kokoho.detect.Advert?): Boolean =
+        classifyBleTacticalPayload(advert) != null
+
+    private val ZEBRA_PRINTER_REGEX = Regex(
+        "(?i)(?:\\b(ZEBRA|POCKETJET|PJ-?7|PJ-?8|RJ-?4)\\b|ZQ[35][0-9]{2}|PJ7[0-9]{2}|PJ8[0-9]{2})"
+    )
+
+    /**
+     * Curated IEEE MA-L / MA-M / MA-S prefixes for Zebra Technologies (ZQ300/ZQ500/QLn) and
+     * Brother Mobile Solutions (PocketJet PJ-7/PJ-8 / RuggedJet RJ-4) mobile citation printers.
+     */
+    private val CITATION_PRINTER_OUIs = setOf(
+        // Zebra Technologies (17 IEEE blocks)
+        "00:05:12", "00:07:4D", "00:15:70", "00:23:68", "00:A0:F8", "40:83:DE",
+        "48:8E:B7", "60:95:32", "74:93:A4", "78:B8:D6", "84:24:8D", "88:BC:AC",
+        "90:75:DE", "94:FB:29", "C4:7D:CC", "C8:1C:FE", "FC:59:7A",
+        // Brother Mobile Solutions (7 IEEE blocks)
+        "00:1B:A9", "00:80:77", "30:05:5C", "3C:2A:F4", "94:DD:F8", "B0:7C:8E", "B4:22:00"
+    )
+
+    /**
+     * Curated IEEE MA-L / MA-M / MA-S and field-attributed OUI prefixes for agency-agnostic
+     * officer/vehicle accessories (from `all-cameras-are-beacons`, `SignalSweep`, `flock-you`,
+     * `oui-spy`, `wardrive-go`, `Fieldwatch`, and IEEE registries):
+     *  - Body-Worn & In-Car Video: Axon (`00:25:DF`), field-attributed Axon `BWCDEVICE` block (`D8:1F:65`),
+     *    Vievu/Axon (`FC:01:9E`), WatchGuard/Motorola V300/V700 (`00:1D:96`), Digital Ally (`00:23:BD`),
+     *    Utility `BodyWorn` (`00:09:BC`, `00:16:ED`), Zepcam (`48:46:8D`), i-PRO/Arbitrator (`D4:2D:C5`),
+     *    Pro-Vision (`9C:83:BF`), IPT VisionHawk (`00:1C:3F`), ICOP (`00:1B:BE`), L-3 Mobile-Vision (`00:50:C2:6D:C`, `00:50:C2:A4:B`, `38:73:EA:0`)
+     *  - P25 / LMR Tactical Radios: Motorola Solutions APX (`00:1F:92`, `4C:CC:34`, `00:18:85`, `00:04:7D`, `10:74:6F`, `B8:E2:8C`, `9C:86:2B`),
+     *    L3Harris XG/XL (`00:00:C3`, `00:02:68`, `00:06:EC`, `00:17:F3`), E.F. Johnson (`00:08:B8`),
+     *    Codan/Daniels (`00:14:91`), Thales (`00:26:B3`, `00:50:C2:8A:D`), Tait (`00:0D:CA`, `8C:1F:64:A7:8`)
+     *  - Upfit Consoles, Siren Telemetry & Toughbooks: Havis (`00:1F:9C`, `70:B3:D5:98:3`),
+     *    Gamber-Johnson (`00:50:C2:84:F`, `00:50:C2:A7:2`, `00:50:C2:D9:C`, `68:DA:73:B`, `70:B3:D5:17:8`, `70:B3:D5:DB:C`, `70:B3:D5:E3:4`, `8C:1F:64:04:C`, `8C:1F:64:42:B`, `8C:1F:64:CB:5`),
+     *    Federal Signal (`08:3C:03:0`), Patrol Products (`38:43:69`), Panasonic Toughbook (`4C:36:4E`, `B8:20:8E`, `BC:3E:0B`)
+     */
+    private val AGENCY_AGNOSTIC_ACCESSORY_OUIs = setOf(
+        // Bodycams & In-Car Video
+        "00:25:DF", "D8:1F:65", "D8:96:E0", "FC:01:9E", "00:1D:96", "00:23:BD",
+        "00:09:BC", "00:16:ED", "48:46:8D", "D4:2D:C5", "9C:83:BF", "00:1C:3F",
+        "00:1B:BE", "00:50:C2:6D:C", "00:50:C2:A4:B", "38:73:EA:0",
+        // Motorola, L3Harris, EFJohnson, Codan, Thales, Tait P25 Radios
+        "00:1F:92", "4C:CC:34", "00:18:85", "00:04:7D", "10:74:6F", "B8:E2:8C", "9C:86:2B",
+        "00:00:C3", "00:02:68", "00:06:EC", "00:17:F3", "00:08:B8", "00:14:91",
+        "00:26:B3", "00:50:C2:8A:D", "00:0D:CA", "8C:1F:64:A7:8",
+        // Vehicle Upfit Consoles, Siren Telemetry & Toughbooks
+        "00:1F:9C", "70:B3:D5:98:3", "00:50:C2:84:F", "00:50:C2:A7:2", "00:50:C2:D9:C",
+        "68:DA:73:B", "70:B3:D5:17:8", "70:B3:D5:DB:C", "70:B3:D5:E3:4", "8C:1F:64:04:C",
+        "8C:1F:64:42:B", "8C:1F:64:CB:5", "08:3C:03:0", "38:43:69",
+        "4C:36:4E", "B8:20:8E", "BC:3E:0B"
+    )
+
+    fun isZebraCitationPrinter(mac: String, nameOrSsid: String?, vendor: String?): Boolean {
+        val norm = normalizeMac(mac)
+        if (CITATION_PRINTER_OUIs.any { norm.startsWith(it) }) return true
+        val combined = "${nameOrSsid.orEmpty()} ${vendor.orEmpty()}"
+        return ZEBRA_PRINTER_REGEX.containsMatchIn(combined)
+    }
+
+    /**
+     * Returns true when a companion accessory is an agency-agnostic officer/vehicle accessory
+     * (Axon Body 3/4 camera `00:25:DF`, field-attributed Axon `BWCDEVICE` `D8:1F:65`, Vievu `FC:01:9E`,
+     * WatchGuard `00:1D:96`, Digital Ally `00:23:BD`, Utility `BodyWorn` `00:09:BC`/`00:16:ED`,
+     * Motorola APX `00:1F:92`/`4C:CC:34`/`00:18:85`/`00:04:7D`, L3Harris XG/XL `00:00:C3`/`00:17:F3`,
+     * Havis/Gamber-Johnson vehicle docks, Federal Signal/Whelen siren telemetry, or Panasonic Toughbook).
+     * These are deployed across CBP, ICE, HSI, USMS, Police, and Sheriff and must NEVER be
+     * conflated as PD (`POLICE`) by default; instead they bias toward the colocated primary agency presence.
+     */
+    fun isAxonOrAgencyAgnosticAccessory(mac: String, nameOrSsid: String?, vendor: String?): Boolean {
+        if (isAxonNetworksConsumerRouter(mac, nameOrSsid, vendor)) return false
+        val norm = normalizeMac(mac)
+        if (AGENCY_AGNOSTIC_ACCESSORY_OUIs.any { norm.startsWith(it) }) return true
+        val combined = "${nameOrSsid.orEmpty()} ${vendor.orEmpty()}"
+        return AXON_OR_APX_ACCESSORY_REGEX.containsMatchIn(combined)
+    }
+
+    fun isCompanionKitDevice(
+        mac: String,
+        nameOrSsid: String?,
+        vendor: String?,
+        advert: org.tucsoncommunity.kokoho.detect.Advert? = null
+    ): Boolean {
+        if (isAxonNetworksConsumerRouter(mac, nameOrSsid, vendor)) return false
+        if (matchesBleTacticalPayload(advert)) return true
+        val norm = normalizeMac(mac)
+        if (AGENCY_AGNOSTIC_ACCESSORY_OUIs.any { norm.startsWith(it) } ||
+            CITATION_PRINTER_OUIs.any { norm.startsWith(it) }
+        ) return true
+        val combined = "${nameOrSsid.orEmpty()} ${vendor.orEmpty()}"
+        return COMPANION_KIT_REGEX.containsMatchIn(combined)
+    }
+
+    fun inferCapabilitiesFromEvidence(facets: List<String>, details: List<String>): List<String> {
+        val caps = ArrayList<String>()
+        if (facets.any { it.startsWith("uas:op:", ignoreCase = true) || (it.startsWith("uas:mac:", ignoreCase = true) && facets.size > 1) }) {
+            caps.add("Drone Operator")
+        }
+        if (facets.any { it.startsWith("hw:kit:bwc:", ignoreCase = true) }) {
+            caps.add("Bodycam")
+        }
+        if (facets.any { it.startsWith("hw:kit:printer:", ignoreCase = true) }) {
+            caps.add("Citation Printer")
+        }
+        if (facets.any { it.startsWith("hw:kit:radio:", ignoreCase = true) }) {
+            caps.add("Portable Radio")
+        }
+        val combined = (facets + details).joinToString(" ").uppercase()
+        val sanitizedBodycam = combined
+            .replace("AXON NETWORKS", "")
+            .replace("00:58:28", "")
+            .replace("HW:KIT:PRINTER:", "")
+            .replace("HW:KIT:RADIO:", "")
+        if ("Bodycam" !in caps && ("00:25:DF" in sanitizedBodycam || "D8:1F:65" in sanitizedBodycam || "FC:01:9E" in sanitizedBodycam || "00:1D:96" in sanitizedBodycam || "00:23:BD" in sanitizedBodycam || "BWCDEVICE" in sanitizedBodycam || "BODY_CAM" in sanitizedBodycam || "AXON" in sanitizedBodycam || "TASER" in sanitizedBodycam || "BODYCAM" in sanitizedBodycam || "WATCHGUARD" in sanitizedBodycam || "BODYWORN" in sanitizedBodycam)) {
+            caps.add("Bodycam")
+        }
+        if (facets.any { it.startsWith("rf:chan:", ignoreCase = true) || it.startsWith("rf:rid:", ignoreCase = true) || it.startsWith("rf:tg:", ignoreCase = true) }) {
+            caps.add("Tactical RF")
+        }
+        if ("Citation Printer" !in caps && ("ZEBRA" in combined || "POCKETJET" in combined || "RJ-4" in combined || "PJ-7" in combined || "PJ-8" in combined || "PRINTER" in combined)) {
+            caps.add("Citation Printer")
+        }
+        if ("Portable Radio" !in caps && ("MOTOROLA SOLUTIONS" in combined || "APX" in combined || "XL-200P" in combined)) {
+            caps.add("Portable Radio")
+        }
+        if (facets.any { it.startsWith("cell:anom:", ignoreCase = true) } || "CELL_ANOMALY" in combined || "00:50:C2:36:0" in combined || "DRTBOX" in combined) {
+            caps.add("Cell Anomaly")
+        }
+        return caps.distinct()
+    }
+
+    fun epistemicPrefix(
+        confidence: Int,
+        witness: WitnessReportRecord? = null,
+        hasExplicitAgencySsid: Boolean = false
+    ): String {
+        val hasPositiveWitness = witness != null && witness.reportKind == "LE" &&
+            (witness.agentName.isNotBlank() || witness.badgeNumber.isNotBlank() || witness.vehicleNumber.isNotBlank() || witness.plateNumber.isNotBlank() || witness.accessoryKind.isNotBlank())
+        return when {
+            hasPositiveWitness || hasExplicitAgencySsid || confidence >= 88 -> "Confirmed"
+            confidence >= 65 -> "Likely"
+            else -> "Suspected"
+        }
+    }
+
+    fun formatHighestOrderTitle(
+        threat: EvaluatedThreat,
+        witness: WitnessReportRecord? = null
+    ): String {
+        if (witness != null && witness.reportKind == "LE") {
+            val ag = (KokohoAgency.fromCode(witness.agencyCode) ?: threat.agency).friendlyLabel
+            val subjectText = when {
+                witness.agentName.isNotBlank() && witness.badgeNumber.isNotBlank() -> "${witness.agentName} (#${witness.badgeNumber.removePrefix("#")})"
+                witness.agentName.isNotBlank() -> witness.agentName
+                witness.vehicleNumber.isNotBlank() -> "Veh #${witness.vehicleNumber.removePrefix("#")}"
+                witness.plateNumber.isNotBlank() -> "Plate ${witness.plateNumber}"
+                witness.accessoryKind.isNotBlank() -> witness.accessoryKind
+                witness.badgeNumber.isNotBlank() -> "Badge #${witness.badgeNumber.removePrefix("#")}"
+                else -> ""
+            }
+            if (subjectText.isNotBlank()) {
+                val tier = if (witness.isApproved) "Confirmed" else "Likely"
+                return "$tier $ag: $subjectText"
+            }
+        }
+        val ssidCandidate = threat.evidenceSources.firstOrNull()?.detail
+        val explicitSsid = isExplicitAgencyOrTacticalSsid(ssidCandidate) || isExplicitAgencyOrTacticalSsid(threat.recurrenceSummary)
+        val tier = epistemicPrefix(threat.combinedConfidence, witness, explicitSsid)
+        val summary = threat.recurrenceSummary.trim()
+        val subject = when {
+            threat.isDrone -> "Tactical Drone"
+            threat.isAircraft && threat.isHelicopter -> "${threat.agency.friendlyLabel} Helicopter${threat.aircraftHex?.let { " ($it)" } ?: ""}"
+            threat.isAircraft -> "${threat.agency.friendlyLabel} Aircraft${threat.aircraftHex?.let { " ($it)" } ?: ""}"
+            "Bodycam" in threat.capabilities && threat.evidenceSources.size == 1 ->
+                if (summary.contains("Axon", ignoreCase = true) || summary.contains("TASER", ignoreCase = true)) "Axon Bodycam" else "${threat.agency.friendlyLabel} Bodycam"
+            "Citation Printer" in threat.capabilities && threat.evidenceSources.size == 1 -> "Citation Printer"
+            "Portable Radio" in threat.capabilities && threat.evidenceSources.size == 1 -> "Motorola APX Radio"
+            summary.contains("Fleet Router", ignoreCase = true) || summary.contains("IBR", ignoreCase = true) || summary.contains("Cradlepoint", ignoreCase = true) || summary.contains("Sierra", ignoreCase = true) || summary.contains("Peplink", ignoreCase = true) ->
+                if (tier == "Suspected") "Fleet Router" else "${threat.agency.friendlyLabel} Fleet Router"
+            threat.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" } ->
+                "${threat.agency.friendlyLabel} Tactical RF"
+            else -> threat.agency.friendlyLabel
+        }
+        return if (subject.startsWith("Confirmed ") || subject.startsWith("Likely ") || subject.startsWith("Suspected ")) {
+            subject
+        } else {
+            "$tier $subject"
+        }
+    }
+
+    fun formatIdentityWithCapabilities(
+        baseLabel: String,
+        witness: WitnessReportRecord?,
+        capabilities: List<String>
+    ): String {
+        val agentName = witness?.agentName?.trim().orEmpty()
+        val badge = witness?.badgeNumber?.trim()?.removePrefix("#").orEmpty()
+        val veh = witness?.vehicleNumber?.trim().orEmpty()
+        var core = when {
+            agentName.isNotEmpty() && badge.isNotEmpty() -> "$agentName #$badge"
+            agentName.isNotEmpty() -> agentName
+            badge.isNotEmpty() -> "Badge #$badge"
+            else -> baseLabel.trim()
+        }
+        if (veh.isNotEmpty() && (agentName.isNotEmpty() || badge.isNotEmpty()) && !core.contains(veh)) {
+            core = "$core · Veh $veh"
+        }
+        val missing = capabilities.filter { it.isNotBlank() && !core.contains(it, ignoreCase = true) }
+        if (missing.isEmpty()) return core
+        val closeIdx = core.lastIndexOf(']')
+        return if (closeIdx > 0 && core.substring(0, closeIdx).contains('[')) {
+            "${core.substring(0, closeIdx)} · ${missing.joinToString(" · ")}]"
+        } else {
+            "$core [${missing.joinToString(" · ")}]"
+        }
+    }
+
     fun isRelevantBleOrWifiCandidate(
         mac: String,
         nameOrSsid: String?,
         vendor: String?,
         hasRemoteId: Boolean,
-        isBleTrackerPayload: Boolean
+        isBleTrackerPayload: Boolean,
+        advert: org.tucsoncommunity.kokoho.detect.Advert? = null
     ): Boolean {
         if (hasRemoteId || isBleTrackerPayload) return true
-        return matchOuiOrSsid(mac, nameOrSsid, vendor, hasRemoteId = false) != null
+        if (isAxonNetworksConsumerRouter(mac, nameOrSsid, vendor)) return false
+        if (matchesBleTacticalPayload(advert)) return true
+        val normMac = normalizeMac(mac)
+        if (normMac.startsWith("04:F0:21:") || normMac.startsWith("00:40:29:") || normMac.startsWith("00:80:48:")) return false
+        if (!nameOrSsid.isNullOrBlank() && nameOrSsid.trim().startsWith("MimoSeries", ignoreCase = true)) return false
+        if (isCompanionKitDevice(mac, nameOrSsid, vendor, advert)) return true
+        val canonMac = canonicalHardwareOuiMac(mac)
+        if (canonMac.take(8) in GENERIC_FLEET_ROUTER_OUIs) return true
+        if (isMunicipalTrafficCabinetOrTransit(mac, nameOrSsid) || isFlockCamera(mac, nameOrSsid)) return true
+        if (lookupMacIntel(null, mac) != null || lookupAssignedMacBlock(null, mac) != null) return true
+        return matchOuiOrSsid(canonMac, nameOrSsid, vendor, hasRemoteId = false) != null
     }
 
-    /**
-     * Active watched targets for RTL-SDR RadioWatch based on the user's enabled agencies.
-     * Solidly excludes `REPEATER` downlinks and `CONTROL_CHANNEL` trunks so the SDR only sweeps
-     * Direct Tactical Simplex (`DIRECT_TACTICAL`), Mobile Uplinks (`MOBILE_INPUT`), and Air Assets (`AIR_ASSET`).
-     */
     fun watchedTargetsForEnabled(context: Context): List<RadioWatch.Target> {
         ensureLoaded(context)
-        val enabled = getEnabledAgencies(context)
+        val evaluated = getEvaluatedAgencies(context)
         return rfChannels
-            .filter { it.agencyEnum in enabled && it.isAlertableDirectOrMobile }
+            .filter { it.agencyEnum in evaluated && it.isAlertableDirectOrMobile }
             .distinctBy { it.hz }
             .map { RadioWatch.Target(it.hz, it.agencyEnum.friendlyLabel) }
     }

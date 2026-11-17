@@ -129,6 +129,244 @@ object MapIcons {
         return bmp
     }
 
+    enum class BadgeIconKind(val id: String) {
+        CAR("car"),
+        HELICOPTER("heli"),
+        SMALL_PLANE("plane"),
+        DRONE("drone"),
+        RADIO("radio")
+    }
+
+    /**
+     * Circular classification-colored badge icon (`CAR`, `HELICOPTER`, `SMALL_PLANE`, `DRONE`, `RADIO`)
+     * with a dark drop halo, agency fill disc, crisp white rim, and crisp white inner glyph.
+     */
+    fun classificationBadgeIcon(dp: Float, kind: BadgeIconKind, bgColorArgb: Int): Bitmap {
+        val sizePx = (30f * dp).toInt().coerceAtLeast(24)
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val w = sizePx.toFloat()
+        val cx = w / 2f
+        val cy = w / 2f
+        val r = (w / 2f) - 2.0f * dp
+
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        // Subtle outer dark halo
+        p.style = Paint.Style.FILL
+        p.color = 0x55000000
+        c.drawCircle(cx, cy + 0.6f * dp, r + 1.0f * dp, p)
+
+        // Solid agency classification fill
+        p.color = bgColorArgb
+        c.drawCircle(cx, cy, r, p)
+
+        // Crisp white ring stroke
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 1.8f * dp
+        p.color = Color.WHITE
+        c.drawCircle(cx, cy, r, p)
+
+        // White inner glyph
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.STROKE
+            strokeWidth = 1.7f * dp
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+
+        when (kind) {
+            BadgeIconKind.CAR -> {
+                // Cruiser roof + body silhouette + lightbar + wheels
+                val roof = android.graphics.Path().apply {
+                    moveTo(cx - r * 0.36f, cy - r * 0.04f)
+                    lineTo(cx - r * 0.24f, cy - r * 0.34f)
+                    lineTo(cx + r * 0.24f, cy - r * 0.34f)
+                    lineTo(cx + r * 0.36f, cy - r * 0.04f)
+                    close()
+                }
+                c.drawPath(roof, fill)
+                // Lightbar
+                c.drawRect(RectF(cx - r * 0.14f, cy - r * 0.45f, cx + r * 0.14f, cy - r * 0.36f), fill)
+                // Lower body
+                val body = RectF(cx - r * 0.50f, cy - r * 0.06f, cx + r * 0.50f, cy + r * 0.24f)
+                c.drawRoundRect(body, 2.2f * dp, 2.2f * dp, fill)
+                // Dark windshield cutouts for clarity
+                val cutout = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = bgColorArgb
+                    style = Paint.Style.FILL
+                }
+                c.drawCircle(cx - r * 0.28f, cy + r * 0.10f, r * 0.08f, cutout)
+                c.drawCircle(cx + r * 0.28f, cy + r * 0.10f, r * 0.08f, cutout)
+                // Wheels
+                c.drawCircle(cx - r * 0.30f, cy + r * 0.28f, r * 0.12f, fill)
+                c.drawCircle(cx + r * 0.30f, cy + r * 0.28f, r * 0.12f, fill)
+            }
+            BadgeIconKind.HELICOPTER -> {
+                // Top-down rotorcraft: vertical fuselage + tailboom + 4-blade X rotor
+                c.drawOval(RectF(cx - r * 0.17f, cy - r * 0.34f, cx + r * 0.17f, cy + r * 0.14f), fill)
+                c.drawLine(cx, cy + r * 0.12f, cx, cy + r * 0.52f, stroke)
+                c.drawLine(cx - r * 0.16f, cy + r * 0.48f, cx + r * 0.16f, cy + r * 0.48f, stroke)
+                // 4-blade X rotor
+                val blade = r * 0.48f
+                c.drawLine(cx - blade, cy - r * 0.10f - blade * 0.72f, cx + blade, cy - r * 0.10f + blade * 0.72f, stroke)
+                c.drawLine(cx - blade, cy - r * 0.10f + blade * 0.72f, cx + blade, cy - r * 0.10f - blade * 0.72f, stroke)
+                c.drawCircle(cx, cy - r * 0.10f, r * 0.10f, fill)
+            }
+            BadgeIconKind.SMALL_PLANE -> {
+                // Fixed-wing plane pointing north (up)
+                val path = android.graphics.Path().apply {
+                    moveTo(cx, cy - r * 0.56f)
+                    lineTo(cx + r * 0.11f, cy - r * 0.14f)
+                    lineTo(cx + r * 0.56f, cy + r * 0.08f)
+                    lineTo(cx + r * 0.56f, cy + r * 0.20f)
+                    lineTo(cx + r * 0.11f, cy + r * 0.09f)
+                    lineTo(cx + r * 0.09f, cy + r * 0.36f)
+                    lineTo(cx + r * 0.26f, cy + r * 0.48f)
+                    lineTo(cx + r * 0.26f, cy + r * 0.56f)
+                    lineTo(cx, cy + r * 0.48f)
+                    lineTo(cx - r * 0.26f, cy + r * 0.56f)
+                    lineTo(cx - r * 0.26f, cy + r * 0.48f)
+                    lineTo(cx - r * 0.09f, cy + r * 0.36f)
+                    lineTo(cx - r * 0.11f, cy + r * 0.09f)
+                    lineTo(cx - r * 0.56f, cy + r * 0.20f)
+                    lineTo(cx - r * 0.56f, cy + r * 0.08f)
+                    lineTo(cx - r * 0.11f, cy - r * 0.14f)
+                    close()
+                }
+                c.drawPath(path, fill)
+            }
+            BadgeIconKind.DRONE -> {
+                // X-frame quadcopter with 4 corner rotor rings & center pod
+                val off = r * 0.36f
+                c.drawLine(cx - off, cy - off, cx + off, cy + off, stroke)
+                c.drawLine(cx - off, cy + off, cx + off, cy - off, stroke)
+                val rotorR = r * 0.19f
+                c.drawCircle(cx - off, cy - off, rotorR, stroke)
+                c.drawCircle(cx + off, cy - off, rotorR, stroke)
+                c.drawCircle(cx - off, cy + off, rotorR, stroke)
+                c.drawCircle(cx + off, cy + off, rotorR, stroke)
+                c.drawRoundRect(RectF(cx - r * 0.16f, cy - r * 0.22f, cx + r * 0.16f, cy + r * 0.22f), 2f * dp, 2f * dp, fill)
+            }
+            BadgeIconKind.RADIO -> {
+                // Vertical mast + base dot + dual symmetrical RF wave arcs
+                c.drawLine(cx, cy - r * 0.10f, cx, cy + r * 0.46f, stroke)
+                c.drawCircle(cx, cy - r * 0.16f, r * 0.11f, fill)
+                c.drawArc(RectF(cx - r * 0.32f, cy - r * 0.48f, cx + r * 0.32f, cy + r * 0.16f), 210f, 120f, false, stroke)
+                c.drawArc(RectF(cx - r * 0.50f, cy - r * 0.66f, cx + r * 0.50f, cy + r * 0.34f), 215f, 110f, false, stroke)
+            }
+        }
+        return bmp
+    }
+
+    /**
+     * Rounded-square facility / station badge icon for `Location` directory pins
+     * (DHS offices, Police/Sheriff stations, Fire departments), visually distinct from circular moving pucks.
+     */
+    fun facilityBadgeIcon(dp: Float, bgColorArgb: Int, isFire: Boolean = false): Bitmap {
+        val sizePx = (26f * dp).toInt().coerceAtLeast(22)
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val w = sizePx.toFloat()
+        val pad = 2.2f * dp
+        val rect = RectF(pad, pad, w - pad, w - pad)
+        val corner = 6.0f * dp
+
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.style = Paint.Style.FILL
+        p.color = 0x66000000
+        c.drawRoundRect(RectF(pad, pad + 0.8f * dp, w - pad, w - pad + 0.8f * dp), corner, corner, p)
+
+        p.color = bgColorArgb
+        c.drawRoundRect(rect, corner, corner, p)
+
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 1.8f * dp
+        p.color = Color.WHITE
+        c.drawRoundRect(rect, corner, corner, p)
+
+        val fg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            style = Paint.Style.FILL
+        }
+        val cx = w / 2f
+        val cy = w / 2f
+        val s = (w - 2f * pad) * 0.5f
+        if (isFire) {
+            // Crisp flame / Maltese cross silhouette
+            val bar = s * 0.28f
+            val len = s * 0.58f
+            c.drawRoundRect(RectF(cx - bar, cy - len, cx + bar, cy + len), 1.2f * dp, 1.2f * dp, fg)
+            c.drawRoundRect(RectF(cx - len, cy - bar, cx + len, cy + bar), 1.2f * dp, 1.2f * dp, fg)
+        } else {
+            // Crisp civic building / pediment + columns
+            val roof = android.graphics.Path().apply {
+                moveTo(cx, cy - s * 0.62f)
+                lineTo(cx + s * 0.62f, cy - s * 0.20f)
+                lineTo(cx - s * 0.62f, cy - s * 0.20f)
+                close()
+            }
+            c.drawPath(roof, fg)
+            val colW = s * 0.16f
+            for (dx in listOf(-0.38f, 0f, 0.38f)) {
+                val x = cx + s * dx
+                c.drawRect(RectF(x - colW / 2f, cy - s * 0.14f, x + colW / 2f, cy + s * 0.40f), fg)
+            }
+            c.drawRect(RectF(cx - s * 0.58f, cy + s * 0.42f, cx + s * 0.58f, cy + s * 0.58f), fg)
+        }
+        return bmp
+    }
+
+    /** High-contrast gold/amber crosshair pin for a user-dropped map point. */
+    fun droppedPinIcon(dp: Float): Bitmap {
+        val sizePx = (34f * dp).toInt().coerceAtLeast(28)
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val cx = sizePx / 2f
+        val cy = sizePx / 2f
+        val r = sizePx / 2f - 3f * dp
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.style = Paint.Style.FILL
+        p.color = 0x77000000
+        c.drawCircle(cx, cy + 0.8f * dp, r + 1.2f * dp, p)
+        p.color = 0xFFD97706.toInt()
+        c.drawCircle(cx, cy, r * 0.72f, p)
+        p.style = Paint.Style.STROKE
+        p.strokeWidth = 2.2f * dp
+        p.color = 0xFFFEF3C7.toInt()
+        c.drawCircle(cx, cy, r * 0.72f, p)
+        p.strokeWidth = 1.8f * dp
+        p.color = Color.WHITE
+        c.drawCircle(cx, cy, r, p)
+        p.style = Paint.Style.FILL
+        c.drawCircle(cx, cy, 2.4f * dp, p)
+        return bmp
+    }
+
+    /** Crisp high-visibility gold-white selection halo ring drawn around the active map selection. */
+    fun selectionRingIcon(dp: Float): Bitmap {
+        val sizePx = (46f * dp).toInt().coerceAtLeast(38)
+        val bmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val cx = sizePx / 2f
+        val cy = sizePx / 2f
+        val r = sizePx / 2f - 3f * dp
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 3.2f * dp
+            color = 0xDD0B0F17.toInt()
+        }
+        c.drawCircle(cx, cy, r, p)
+        p.strokeWidth = 2.2f * dp
+        p.color = 0xFFFBBF24.toInt()
+        c.drawCircle(cx, cy, r, p)
+        return bmp
+    }
+
     /** A round device dot with a white ring. */
     fun dot(dp: Float, color: Int, sizeDp: Int, ringDp: Float = 2f) = GradientDrawable().apply {
         shape = GradientDrawable.OVAL
