@@ -26,6 +26,7 @@ import java.util.zip.GZIPInputStream
 object KokohoDirectory {
 
     private const val PUBLIC_LOCATIONS_ASSET = "reference/public_locations.tsv.gz"
+    private const val ENCRYPTED_DIRECTORY_DB_ASSET = "reference/directory_ext.sqlite3.enc"
     private const val OPTIONAL_DIRECTORY_DB_ASSET = "reference/directory_ext.sqlite3.gz"
     private const val EXTRACTED_DB_NAME = "directory.db"
     private const val USER_PERSONS_PREF = "kokoho_user_persons_json"
@@ -109,11 +110,38 @@ object KokohoDirectory {
     fun hasExtendedDirectoryCapability(context: Context): Boolean {
         if (hasPackagedDirectoryDb) return true
         val app = context.applicationContext ?: context
-        val stream = runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET) }.getOrElse {
-            runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET.removeSuffix(".gz")) }.getOrNull()
+        val stream = runCatching { app.assets.open(ENCRYPTED_DIRECTORY_DB_ASSET) }.getOrElse {
+            runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET) }.getOrElse {
+                runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET.removeSuffix(".gz")) }.getOrNull()
+            }
         } ?: return false
         runCatching { stream.close() }
         return true
+    }
+
+    @Synchronized
+    fun invalidateForReload() {
+        initialized = false
+        visibleCacheKey = ""
+    }
+
+    @Synchronized
+    fun reloadAfterKeyUnlock(context: Context) {
+        initialized = false
+        visibleCacheKey = ""
+        ensureLoaded(context)
+    }
+
+    @Synchronized
+    fun purgeDecryptedCache(context: Context) {
+        runCatching { sqliteDb?.close() }
+        sqliteDb = null
+        hasPackagedDirectoryDb = false
+        initialized = false
+        visibleCacheKey = ""
+        val app = context.applicationContext ?: context
+        runCatching { File(app.noBackupFilesDir, EXTRACTED_DB_NAME).delete() }
+        runCatching { File(app.noBackupFilesDir, "$EXTRACTED_DB_NAME.vc").delete() }
     }
 
     private fun openAssetStreamSmart(context: Context, pathWithGz: String): java.io.InputStream? {
@@ -126,6 +154,29 @@ object KokohoDirectory {
         val b1 = pb.read()
         pb.reset()
         return if (b0 == 0x1f && b1 == 0x8b) GZIPInputStream(pb) else pb
+    }
+
+    private fun openDecryptedDirectoryStream(context: Context): java.io.InputStream? {
+        val encBytes = runCatching {
+            context.assets.open(ENCRYPTED_DIRECTORY_DB_ASSET).use { it.readBytes() }
+        }.getOrNull()
+        if (encBytes != null && encBytes.size > 28) {
+            val keyBytes = DeviceTrustManager.getDirectoryKeyBytes(context) ?: return null
+            if (keyBytes.size != 32) return null
+            val iv = encBytes.copyOfRange(0, 12)
+            val ctAndTag = encBytes.copyOfRange(12, encBytes.size)
+            val decrypted = DeviceTrustManager.aes256GcmDecrypt(keyBytes, iv, ctAndTag) ?: return null
+            val bais = java.io.ByteArrayInputStream(decrypted)
+            return if (decrypted.size >= 2 &&
+                (decrypted[0].toInt() and 0xFF) == 0x1f &&
+                (decrypted[1].toInt() and 0xFF) == 0x8b
+            ) {
+                GZIPInputStream(bais)
+            } else {
+                bais
+            }
+        }
+        return openAssetStreamSmart(context, OPTIONAL_DIRECTORY_DB_ASSET)
     }
 
     @Synchronized
@@ -211,18 +262,18 @@ object KokohoDirectory {
     }
 
     private fun extractAssetDbIfPresent(context: Context): File? {
-        val decodedStream = openAssetStreamSmart(context, OPTIONAL_DIRECTORY_DB_ASSET) ?: return null
-        val outFile = context.getDatabasePath(EXTRACTED_DB_NAME)
-        val dir = outFile.parentFile ?: context.filesDir
+        val dir = context.noBackupFilesDir ?: context.filesDir
         dir.mkdirs()
+        val outFile = File(dir, EXTRACTED_DB_NAME)
         val stampFile = File(dir, "$EXTRACTED_DB_NAME.vc")
         val currentStamp = "${BuildConfig.VERSION_CODE}:${BuildConfig.VERSION_NAME}"
         if (outFile.exists() && outFile.length() > 4096L && stampFile.exists() &&
-            runCatching { stampFile.readText().trim() }.getOrNull() == currentStamp
+            runCatching { stampFile.readText().trim() }.getOrNull() == currentStamp &&
+            DeviceTrustManager.getDirectoryKeyBytes(context) != null
         ) {
-            runCatching { decodedStream.close() }
             return outFile
         }
+        val decodedStream = openDecryptedDirectoryStream(context) ?: return null
         val tmp = File(dir, "$EXTRACTED_DB_NAME.tmp")
         decodedStream.use { input ->
             FileOutputStream(tmp).use { out ->

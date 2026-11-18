@@ -61,6 +61,7 @@ class KokohoSearchView(
         DETECTION("Detection"),
         LOCATION("Location"),
         PERSON("Person"),
+        PLATE("Plate"),
         DEVICE("Device")
     }
 
@@ -564,10 +565,54 @@ class KokohoSearchView(
         val includeDetections = requestedSchemas.isEmpty() || SchemaKind.DETECTION in requestedSchemas
         val includeLocations = requestedSchemas.isEmpty() || SchemaKind.LOCATION in requestedSchemas
         val includePersons = requestedSchemas.isEmpty() || SchemaKind.PERSON in requestedSchemas
+        val includePlates = requestedSchemas.isEmpty() || SchemaKind.PLATE in requestedSchemas
         val includeDevices = requestedSchemas.isEmpty() || SchemaKind.DEVICE in requestedSchemas
 
         val hasAnyFilter = pills.isNotEmpty() || rawQuery.isNotEmpty()
-        val rows = ArrayList<SearchResultRow>(96)
+        val rows = ArrayList<SearchResultRow>(112)
+
+        // 0. Synced License Plates (`KokohoHubClient.SyncedPlateRecord`)
+        if (includePlates) {
+            val allPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity)
+            if (allPlates.isNotEmpty()) {
+                val plateTokens = contentTokens.filterNot { parseSchemaPill(it) == SchemaKind.PLATE }
+                val matchedPlates = if (plateTokens.isEmpty()) {
+                    allPlates.take(if (requestedSchemas.size == 1) 120 else 20)
+                } else {
+                    allPlates.filter { p ->
+                        plateTokens.all { tok ->
+                            val low = tok.trim().lowercase(Locale.US)
+                            p.plateNumber.lowercase(Locale.US).contains(low) ||
+                                p.stateCode.lowercase(Locale.US).contains(low) ||
+                                p.suspectedAgency.lowercase(Locale.US).contains(low) ||
+                                p.agencyCode.lowercase(Locale.US).contains(low) ||
+                                p.color.lowercase(Locale.US).contains(low) ||
+                                p.bodyType.lowercase(Locale.US).contains(low) ||
+                                p.make.lowercase(Locale.US).contains(low) ||
+                                p.model.lowercase(Locale.US).contains(low) ||
+                                p.details.lowercase(Locale.US).contains(low)
+                        }
+                    }.take(80)
+                }
+                for (p in matchedPlates) {
+                    val ag = KokohoAgency.fromCode(p.agencyCode)
+                    val vehDesc = listOf(p.color, p.make, p.model, p.bodyType)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ")
+                    val detStr = if (p.detected) " · ✓ Wireless" else ""
+                    rows += SearchResultRow(
+                        stableId = "plate:${p.plateId}",
+                        schema = SchemaKind.PLATE,
+                        title = "${p.plateNumber} (${p.stateCode})",
+                        metaLine = "Plate · ${p.suspectedAgency.ifBlank { ag?.friendlyLabel ?: "Unknown" }} · ${p.confidencePct}%$detStr",
+                        detailLine = listOf(vehDesc, p.details).filter { it.isNotBlank() }.joinToString(" — "),
+                        targetDetailKey = "plate:${p.plateId}",
+                        agency = ag,
+                        detectionIconKind = MapIcons.BadgeIconKind.CAR
+                    )
+                }
+            }
+        }
 
         // 1. Detections (`EvaluatedThreat`)
         if (includeDetections) {
@@ -701,6 +746,7 @@ class KokohoSearchView(
         "detection", "detections", "entity", "entities" -> SchemaKind.DETECTION
         "location", "locations", "station", "stations", "facility", "facilities" -> SchemaKind.LOCATION
         "person", "persons", "personnel", "people" -> SchemaKind.PERSON
+        "plate", "plates", "vehicle", "vehicles" -> SchemaKind.PLATE
         "device", "devices", "hardware" -> SchemaKind.DEVICE
         else -> null
     }
@@ -713,11 +759,13 @@ class KokohoSearchView(
     ): List<String> {
         val q = rawQuery.trim().lowercase(Locale.US)
         val hasPersons = KokohoDirectory.isDirectoryAvailable || KokohoDirectory.browsePersons(activity, limit = 1).isNotEmpty()
+        val hasPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity).isNotEmpty()
 
         val baseFilters = buildList {
             add("Detection")
             add("Location")
             if (hasPersons) add("Person")
+            if (hasPlates) add("Plate")
             add("Device")
             add("ICE")
             add("CBP")
@@ -951,7 +999,7 @@ class KokohoSearchView(
                     MapIcons.classificationBadgeIcon(density * 1.35f, row.detectionIconKind, bg)
                 }
             }
-            SchemaKind.DEVICE -> {
+            SchemaKind.PLATE, SchemaKind.DEVICE -> {
                 val bg = row.agency?.mapColorArgb ?: 0xFF37474F.toInt()
                 val key = "dev:${row.detectionIconKind.id}:$bg:${density}"
                 iconBitmapCache.getOrPut(key) {
@@ -963,6 +1011,49 @@ class KokohoSearchView(
 
     private fun openRowDetails(row: SearchResultRow) {
         when {
+            row.targetDetailKey.startsWith("plate:", ignoreCase = true) -> {
+                val pid = row.targetDetailKey.removePrefix("plate:")
+                val plate = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity)
+                    .firstOrNull { it.plateId == pid }
+                if (plate != null) {
+                    val veh = listOf(plate.color, plate.make, plate.model, plate.bodyType)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · ")
+                        .ifBlank { "—" }
+                    KokohoJourneyUi.showModal(
+                        activity = activity,
+                        title = "${plate.plateNumber} (${plate.stateCode})",
+                        subtitle = "${plate.suspectedAgency} · ${plate.confidencePct}% confidence" +
+                            if (plate.partialPlate) " · Partial plate" else ""
+                    ) { body, dismiss ->
+                        body.addView(KokohoJourneyUi.buildActionRow(
+                            activity,
+                            "Vehicle",
+                            veh
+                        ) {})
+                        body.addView(KokohoJourneyUi.buildActionRow(
+                            activity,
+                            "Wireless Association",
+                            if (plate.detected) "✓ Linked wireless entity (${plate.entityUuid ?: "active"})" else "No wireless entity linked yet"
+                        ) {
+                            val eu = plate.entityUuid
+                            if (!eu.isNullOrBlank()) {
+                                dismiss()
+                                activity.startActivity(
+                                    Intent(activity, DeviceDetailActivity::class.java)
+                                        .putExtra(DeviceDetailActivity.EXTRA_MAC, "kokoho:$eu")
+                                )
+                            }
+                        })
+                        if (plate.observedDate.isNotBlank()) {
+                            body.addView(KokohoJourneyUi.buildActionRow(activity, "Observed Date", plate.observedDate) {})
+                        }
+                        if (plate.details.isNotBlank()) {
+                            body.addView(KokohoJourneyUi.buildActionRow(activity, "Details", plate.details) {})
+                        }
+                    }
+                }
+            }
             row.targetDetailKey.startsWith("loc:", ignoreCase = true) ->
                 DeviceDetailActivity.openLocation(activity, row.targetDetailKey)
             row.targetDetailKey.startsWith("person:", ignoreCase = true) ->

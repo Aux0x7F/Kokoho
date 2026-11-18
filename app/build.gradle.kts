@@ -9,8 +9,8 @@ plugins {
 // Bump both for every release. versionName ends up in the APK file name.
 // Monotonic channel-parity versionCode: base (major*1000 + minor*100 + patch*10) + channelOffset (0 = public, 1 = non-public channel)
 // so a specialized channel build always upgrades cleanly in-place over the matching public release without colliding.
-val baseVersionCode = 1380
-val baseVersionName = "1.3.8"
+val baseVersionCode = 1390
+val baseVersionName = "1.3.9"
 val releaseChannel = providers.gradleProperty("rfs.channel").orNull?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: "public"
 val isPublicChannel = releaseChannel == "public"
 
@@ -126,9 +126,9 @@ android {
         }
     }
 
-    // Keep pre-compressed `.gz` reference tables intact (`assets/reference/*.tsv.gz`) so aapt2 does not strip `.gz`.
+    // Keep pre-compressed `.gz` and `.enc` reference tables intact so aapt2 does not alter them.
     androidResources {
-        noCompress += "gz"
+        noCompress += listOf("gz", "enc")
     }
 
     // No Google-encrypted dependency list in the APK or bundle (F-Droid's scanner flags it; only Play reads it).
@@ -180,6 +180,7 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.5")
 
     implementation("com.google.code.gson:gson:2.14.0")
+    implementation("com.google.zxing:core:3.5.4")
     // Waze direct backend: lite protobuf runtime for the app protocol.
     implementation("com.google.protobuf:protobuf-javalite:4.35.0")
 

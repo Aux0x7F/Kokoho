@@ -64,7 +64,39 @@ object KokohoHubClient {
         val notes: String = "",
         @SerializedName("photo_data_url") val photoDataUrl: String? = null,
         @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L,
-        val status: String = "PENDING"
+        val status: String = "PENDING",
+        @SerializedName("confidence_pct") val confidencePct: Int = 85,
+        @SerializedName("subject_kind") val subjectKind: String = "VEHICLE",
+        @SerializedName("plate_number") val plateNumber: String = "",
+        @SerializedName("plate_state") val plateState: String = "AZ",
+        @SerializedName("partial_plate") val partialPlate: Boolean = false,
+        @SerializedName("vehicle_color") val vehicleColor: String = "",
+        @SerializedName("vehicle_body_type") val vehicleBodyType: String = "",
+        @SerializedName("vehicle_make") val vehicleMake: String = "",
+        @SerializedName("vehicle_model") val vehicleModel: String = "",
+        @SerializedName("accessory_kind") val accessoryKind: String = "",
+        val lat: Double? = null,
+        val lon: Double? = null
+    )
+
+    data class SyncedPlateRecord(
+        @SerializedName("plate_id") val plateId: String = "",
+        @SerializedName("plate_number") val plateNumber: String = "",
+        @SerializedName("state_code") val stateCode: String = "AZ",
+        @SerializedName("partial_plate") val partialPlate: Boolean = false,
+        @SerializedName("confidence_pct") val confidencePct: Int = 80,
+        @SerializedName("agency_code") val agencyCode: String = "UNKNOWN",
+        @SerializedName("suspected_agency") val suspectedAgency: String = "Unknown",
+        val color: String = "",
+        @SerializedName("body_type") val bodyType: String = "",
+        val make: String = "",
+        val model: String = "",
+        val details: String = "",
+        @SerializedName("observed_date") val observedDate: String = "",
+        @SerializedName("entity_uuid") val entityUuid: String? = null,
+        val detected: Boolean = false,
+        @SerializedName("sighting_count") val sightingCount: Int = 1,
+        @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
     )
 
     data class BugReportSubmission(
@@ -401,6 +433,7 @@ object KokohoHubClient {
                     readTimeout = 10_000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    DeviceTrustManager.attachSignedHeaders(app, this)
                 }
                 try {
                     conn.outputStream.use { it.write("{}".toByteArray(Charsets.UTF_8)) }
@@ -422,6 +455,7 @@ object KokohoHubClient {
             }
             syncHistoricalEntities(app)
             syncWitnessReports(app)
+            syncPlates(app)
         }
     }
 
@@ -704,7 +738,19 @@ object KokohoHubClient {
                     notes = report.notes,
                     photoDataUrl = report.photoDataUrl,
                     updatedAtMs = report.updatedAtMs,
-                    status = "PENDING"
+                    status = "PENDING",
+                    confidencePct = report.confidencePct,
+                    subjectKind = report.subjectKind,
+                    plateNumber = report.plateNumber,
+                    plateState = report.plateState,
+                    partialPlate = report.partialPlate,
+                    vehicleColor = report.vehicleColor,
+                    vehicleBodyType = report.vehicleBodyType,
+                    vehicleMake = report.vehicleMake,
+                    vehicleModel = report.vehicleModel,
+                    accessoryKind = report.accessoryKind,
+                    lat = report.lat,
+                    lon = report.lon
                 )
                 val json = gson.toJson(dto)
                 val conn = (URL("$base/v1/witness").openConnection() as HttpURLConnection).apply {
@@ -713,6 +759,7 @@ object KokohoHubClient {
                     readTimeout = 10_000
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    if (context != null) DeviceTrustManager.attachSignedHeaders(context, this)
                 }
                 try {
                     conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
@@ -911,7 +958,19 @@ object KokohoHubClient {
                                     notes = w.notes,
                                     photoDataUrl = w.photoDataUrl,
                                     updatedAtMs = w.updatedAtMs,
-                                    status = w.status.ifBlank { "APPROVED" }
+                                    status = w.status.ifBlank { "APPROVED" },
+                                    subjectKind = w.subjectKind.ifBlank { "VEHICLE" },
+                                    plateNumber = w.plateNumber,
+                                    plateState = w.plateState.ifBlank { "AZ" },
+                                    partialPlate = w.partialPlate,
+                                    vehicleColor = w.vehicleColor,
+                                    vehicleBodyType = w.vehicleBodyType,
+                                    vehicleMake = w.vehicleMake,
+                                    vehicleModel = w.vehicleModel,
+                                    confidencePct = w.confidencePct,
+                                    accessoryKind = w.accessoryKind,
+                                    lat = w.lat,
+                                    lon = w.lon
                                 )
                             }
                             if (approved != null) {
@@ -1001,13 +1060,80 @@ object KokohoHubClient {
                                     notes = it.notes,
                                     photoDataUrl = it.photoDataUrl,
                                     updatedAtMs = it.updatedAtMs,
-                                    status = "APPROVED"
+                                    status = "APPROVED",
+                                    subjectKind = it.subjectKind.ifBlank { "VEHICLE" },
+                                    plateNumber = it.plateNumber,
+                                    plateState = it.plateState.ifBlank { "AZ" },
+                                    partialPlate = it.partialPlate,
+                                    vehicleColor = it.vehicleColor,
+                                    vehicleBodyType = it.vehicleBodyType,
+                                    vehicleMake = it.vehicleMake,
+                                    vehicleModel = it.vehicleModel,
+                                    confidencePct = it.confidencePct,
+                                    accessoryKind = it.accessoryKind,
+                                    lat = it.lat,
+                                    lon = it.lon
                                 )
                             }
                         KokohoSignatures.mergeRemoteWitnessReports(app, mapped)
                     }
                 } finally {
                     conn.disconnect()
+                }
+            }
+        }
+    }
+
+    private const val KEY_SYNCED_PLATES = "kokoho_synced_plates_json"
+
+    @Volatile
+    private var memoryPlatesCache: List<SyncedPlateRecord>? = null
+
+    fun cachedPlates(context: Context): List<SyncedPlateRecord> {
+        memoryPlatesCache?.let { return it }
+        val app = context.applicationContext ?: context
+        val raw = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SYNCED_PLATES, null) ?: return emptyList()
+        return runCatching {
+            val type = object : com.google.gson.reflect.TypeToken<List<SyncedPlateRecord>>() {}.type
+            gson.fromJson<List<SyncedPlateRecord>>(raw, type).orEmpty()
+        }.getOrDefault(emptyList()).also { memoryPlatesCache = it }
+    }
+
+    /** Synchronizes the license plate database (`GET /v1/plates`) for enrolled seats. */
+    fun syncPlates(context: Context, onComplete: ((List<SyncedPlateRecord>) -> Unit)? = null) {
+        val app = context.applicationContext ?: context
+        if (!DeviceTrustManager.isEnrolled(app)) {
+            onComplete?.invoke(cachedPlates(app))
+            return
+        }
+        scope.launch {
+            val fetched = runCatching {
+                val base = hubUrl(app)
+                val conn = (URL("$base/v1/plates?limit=2500").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 10_000
+                    DeviceTrustManager.attachSignedHeaders(app, this)
+                }
+                try {
+                    if (conn.responseCode in 200..299) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val type = object : com.google.gson.reflect.TypeToken<List<SyncedPlateRecord>>() {}.type
+                        val list = gson.fromJson<List<SyncedPlateRecord>>(body, type).orEmpty()
+                        memoryPlatesCache = list
+                        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+                            putString(KEY_SYNCED_PLATES, gson.toJson(list))
+                        }
+                        list
+                    } else null
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrNull()
+            if (onComplete != null) {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onComplete(fetched ?: cachedPlates(app))
                 }
             }
         }
@@ -1070,6 +1196,7 @@ object KokohoHubClient {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     if (rKey.isNotEmpty()) setRequestProperty("x-kokoho-room-key", rKey)
+                    DeviceTrustManager.attachSignedHeaders(app, this)
                 }
                 try {
                     conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }

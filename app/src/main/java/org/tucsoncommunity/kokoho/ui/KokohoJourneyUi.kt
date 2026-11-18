@@ -693,7 +693,20 @@ object KokohoJourneyUi {
         body.addView(utilsHeader)
         body.addView(utilsSubmenu)
 
-        // ---- Entry 3: SETTINGS ----
+        // ---- Entry 3: AUTHORIZE WEB SESSION (Shown when extended capability or seat voucher exists) ----
+        if (org.tucsoncommunity.kokoho.posture.KokohoDirectory.hasExtendedDirectoryCapability(activity) ||
+            org.tucsoncommunity.kokoho.posture.DeviceTrustManager.loadOrExtractSeatIdentity(activity) != null
+        ) {
+            val webAuthHeader = buildMenuSectionButton(VectorIconKind.QR_SCAN, "Authorize Web Session", null).apply {
+                setOnClickListener {
+                    dialog.dismiss()
+                    WebAuthQrDialog.openScannerOrRequestPermission(activity)
+                }
+            }
+            body.addView(webAuthHeader)
+        }
+
+        // ---- Entry 4: SETTINGS ----
         val settingsHeader = buildMenuSectionButton(VectorIconKind.GEAR_SETTINGS, "Settings", null).apply {
             setOnClickListener {
                 dialog.dismiss()
@@ -834,7 +847,8 @@ object KokohoJourneyUi {
         EYE_VISIBILITY,
         TOOLBOX,
         GEAR_SETTINGS,
-        BUG_REPORT
+        BUG_REPORT,
+        QR_SCAN
     }
 
     class VectorIconDrawable(
@@ -948,6 +962,15 @@ object KokohoJourneyUi {
                     canvas.drawLine(cx + w * 0.38f, t + h * 0.56f, cx + w * 0.21f, t + h * 0.56f, paint)
                     canvas.drawLine(cx - w * 0.36f, t + h * 0.74f, cx - w * 0.20f, t + h * 0.66f, paint)
                     canvas.drawLine(cx + w * 0.36f, t + h * 0.74f, cx + w * 0.20f, t + h * 0.66f, paint)
+                }
+                VectorIconKind.QR_SCAN -> {
+                    canvas.drawRect(RectF(l + w * 0.18f, t + h * 0.18f, l + w * 0.44f, t + h * 0.44f), paint)
+                    canvas.drawRect(RectF(l + w * 0.56f, t + h * 0.18f, l + w * 0.82f, t + h * 0.44f), paint)
+                    canvas.drawRect(RectF(l + w * 0.18f, t + h * 0.56f, l + w * 0.44f, t + h * 0.82f), paint)
+                    canvas.drawCircle(l + w * 0.62f, t + h * 0.62f, w * 0.05f, fillPaint)
+                    canvas.drawCircle(l + w * 0.78f, t + h * 0.78f, w * 0.05f, fillPaint)
+                    canvas.drawCircle(l + w * 0.78f, t + h * 0.62f, w * 0.05f, fillPaint)
+                    canvas.drawCircle(l + w * 0.62f, t + h * 0.78f, w * 0.05f, fillPaint)
                 }
             }
         }

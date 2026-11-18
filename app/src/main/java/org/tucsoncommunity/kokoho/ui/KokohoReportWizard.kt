@@ -14,6 +14,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -309,6 +310,26 @@ object KokohoReportWizard {
         }
         form.addView(agencyPickerBtn)
 
+        var confidencePctVal = (existing?.confidencePct ?: 85).coerceIn(0, 100)
+        val confCaption = sectionCaption("Confidence: $confidencePctVal%")
+        val confSeekBar = SeekBar(activity).apply {
+            max = 100
+            progress = confidencePctVal
+            progressTintList = ColorStateList.valueOf(KokohoJourneyUi.HIGHLIGHT_AMBER)
+            thumbTintList = ColorStateList.valueOf(KokohoJourneyUi.HIGHLIGHT_AMBER)
+            setPadding(dp(activity, 8), dp(activity, 6), dp(activity, 8), dp(activity, 6))
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    confidencePctVal = progress.coerceIn(0, 100)
+                    confCaption.text = "Confidence: $confidencePctVal%"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+        form.addView(confCaption)
+        form.addView(confSeekBar)
+
         form.addView(sectionCaption("2. Subject Type"))
         val subjectTabsRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -500,13 +521,43 @@ object KokohoReportWizard {
         agentSection.addView(moreDetailsBtn)
         form.addView(agentSection)
 
-        // -- B. Vehicle Fields --
-        val vehicleNumInput = styledInput("Cruiser / Fleet / Tail # (e.g. 412, N822AZ)", existing?.vehicleNumber.orEmpty())
-        val vehiclePlateInput = styledInput("License Plate (optional)", existing?.plateNumber.orEmpty())
-        val vehicleDescInput = styledInput("Make / Color / Upfit (e.g. Unmarked White Tahoe, Cage + ALPR)", existing?.vehicleDescription.orEmpty())
+        // -- B. Vehicle Fields (Separated Plate/State/Partial + Color/Body Type/Make/Model + Fleet #) --
+        fun sideBySideRow(left: EditText, right: EditText, leftWeight: Float = 1f, rightWeight: Float = 1f): LinearLayout =
+            LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(activity, 8) }
+                left.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, leftWeight).apply {
+                    marginEnd = dp(activity, 6)
+                }
+                right.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, rightWeight)
+                addView(left)
+                addView(right)
+            }
+
+        val vehiclePlateInput = styledInput("License Plate #", existing?.plateNumber.orEmpty())
+        val vehicleStateInput = styledInput("State", existing?.plateState?.ifBlank { "AZ" } ?: "AZ")
+        val partialPlateCheck = CheckBox(activity).apply {
+            text = "Partial plate"
+            textSize = 13.5f
+            setTextColor(KokohoJourneyUi.INK_SECONDARY)
+            buttonTintList = ColorStateList.valueOf(KokohoJourneyUi.HIGHLIGHT_AMBER)
+            isChecked = existing?.partialPlate == true
+            setPadding(dp(activity, 4), dp(activity, 4), 0, dp(activity, 2))
+        }
+        val vehicleColorInput = styledInput("Color (e.g. White)", existing?.vehicleColor.orEmpty())
+        val vehicleBodyInput = styledInput("Body Type (e.g. SUV)", existing?.vehicleBodyType.orEmpty())
+        val vehicleMakeInput = styledInput("Make (e.g. Chevrolet)", existing?.vehicleMake.orEmpty())
+        val vehicleModelInput = styledInput("Model (e.g. Tahoe)", existing?.vehicleModel.orEmpty())
+        val vehicleNumInput = styledInput("Fleet / Bumper / Tail # (optional)", existing?.vehicleNumber.orEmpty())
+
+        vehicleSection.addView(sideBySideRow(vehiclePlateInput, vehicleStateInput, 2.2f, 1f))
+        vehicleSection.addView(partialPlateCheck)
+        vehicleSection.addView(sideBySideRow(vehicleColorInput, vehicleBodyInput))
+        vehicleSection.addView(sideBySideRow(vehicleMakeInput, vehicleModelInput))
         vehicleSection.addView(vehicleNumInput)
-        vehicleSection.addView(vehiclePlateInput)
-        vehicleSection.addView(vehicleDescInput)
         form.addView(vehicleSection)
 
         // -- C. Accessory Fields --
@@ -530,8 +581,8 @@ object KokohoReportWizard {
         accessorySection.addView(accessoryPickerBtn)
         form.addView(accessorySection)
 
-        // Shared Notes + Photos
-        val notesInput = styledInput("Field Notes / Context…", existing?.notes.orEmpty(), multiLine = true)
+        // Unified Details unstructured input box + Photos
+        val notesInput = styledInput("Details…", existing?.notes.orEmpty(), multiLine = true)
         form.addView(notesInput)
 
         val photosRow = LinearLayout(activity).apply {
@@ -621,8 +672,14 @@ object KokohoReportWizard {
             val mgrVal = if (selectedSubject == SubjectKind.AGENT) extraManagedByInput.text?.toString()?.trim().orEmpty() else ""
 
             val vehVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleNumInput.text?.toString()?.trim().orEmpty() else ""
-            val plateVal = if (selectedSubject == SubjectKind.VEHICLE) vehiclePlateInput.text?.toString()?.trim().orEmpty() else ""
-            val vehDescVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleDescInput.text?.toString()?.trim().orEmpty() else ""
+            val plateVal = if (selectedSubject == SubjectKind.VEHICLE) vehiclePlateInput.text?.toString()?.trim()?.uppercase().orEmpty() else ""
+            val plateStateVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleStateInput.text?.toString()?.trim()?.uppercase()?.ifEmpty { "AZ" } ?: "AZ" else "AZ"
+            val partialVal = selectedSubject == SubjectKind.VEHICLE && partialPlateCheck.isChecked
+            val colorVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleColorInput.text?.toString()?.trim().orEmpty() else ""
+            val bodyVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleBodyInput.text?.toString()?.trim().orEmpty() else ""
+            val makeVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleMakeInput.text?.toString()?.trim().orEmpty() else ""
+            val modelVal = if (selectedSubject == SubjectKind.VEHICLE) vehicleModelInput.text?.toString()?.trim().orEmpty() else ""
+            val vehDescVal = listOf(colorVal, makeVal, modelVal, bodyVal).filter { it.isNotEmpty() }.joinToString(" ")
             val accVal = if (selectedSubject == SubjectKind.ACCESSORY) selectedAccessoryType else ""
             val notesVal = notesInput.text?.toString()?.trim().orEmpty()
 
@@ -660,9 +717,9 @@ object KokohoReportWizard {
                 badgeNumber = badgeVal,
                 agentName = nameVal,
                 vehicleNumber = vehVal,
-                notes = listOf(vehDescVal, notesVal).filter { it.isNotBlank() }.joinToString(" · "),
+                notes = notesVal,
                 photoDataUrl = attachedPhotos.firstOrNull(),
-                status = if (KokohoSignatures.isSharingActive(activity)) "PENDING" else "APPROVED",
+                status = "PENDING",
                 reportKind = "LE",
                 subjectKind = selectedSubject.id,
                 personId = resolvedPid,
@@ -672,13 +729,20 @@ object KokohoReportWizard {
                 suiteOrAddress = suiteVal,
                 managedBy = mgrVal,
                 plateNumber = plateVal,
+                plateState = plateStateVal,
+                partialPlate = partialVal,
+                vehicleColor = colorVal,
+                vehicleBodyType = bodyVal,
+                vehicleMake = makeVal,
+                vehicleModel = modelVal,
+                confidencePct = confidencePctVal,
                 vehicleDescription = vehDescVal,
                 accessoryKind = accVal,
                 photoDataUrls = attachedPhotos.toList(),
                 lat = droppedLat ?: existing?.lat,
                 lon = droppedLon ?: existing?.lon
             )
-            KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = KokohoSignatures.isSharingActive(activity))
+            KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
             org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordUserInteraction(
                 context = activity,
                 action = "SUBMIT_REPORT_${mode.name}",

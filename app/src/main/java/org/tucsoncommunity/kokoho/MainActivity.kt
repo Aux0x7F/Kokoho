@@ -329,6 +329,26 @@ class MainActivity : AppCompatActivity() {
                 requestPermissionsAndStart()
             }
         }
+        org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent?.data)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent.data)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.CAMERA_PERMISSION_REQ_CODE) {
+            if (grantResults.isNotEmpty() && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.openScannerOrRequestPermission(this)
+            }
+        }
     }
 
     override fun onResume() {
