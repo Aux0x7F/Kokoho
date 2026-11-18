@@ -9,8 +9,8 @@ plugins {
 // Bump both for every release. versionName ends up in the APK file name.
 // Monotonic channel-parity versionCode: base (major*1000 + minor*100 + patch*10) + channelOffset (0 = public, 1 = non-public channel)
 // so a specialized channel build always upgrades cleanly in-place over the matching public release without colliding.
-val baseVersionCode = 1370
-val baseVersionName = "1.3.7"
+val baseVersionCode = 1380
+val baseVersionName = "1.3.8"
 val releaseChannel = providers.gradleProperty("rfs.channel").orNull?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: "public"
 val isPublicChannel = releaseChannel == "public"
 
@@ -95,12 +95,14 @@ android {
             applicationIdSuffix = ".debug"
         }
         release {
+            isDebuggable = false
+            vcsInfo.include = false
             signingConfig = signingConfigs.findByName("release")
             // The map engines' native libraries are ~15 MB per CPU type: ARM phones only, 64-bit and 32-bit
             // (older or low-end phones), not the x86 emulator builds, which debug builds keep.
             ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
-            // R8 shrinks the libraries' unused code; the app's own classes are kept whole (proguard-rules.pro).
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -109,7 +111,20 @@ android {
     }
 
     // Native libraries stored compressed: a much smaller APK to download (unpacked once at install).
-    packaging { jniLibs { useLegacyPackaging = true } }
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "kotlin-tooling-metadata.json",
+                "META-INF/*.version",
+                "META-INF/**/LICENSE*",
+                "META-INF/kotlin-project-structure-metadata.json",
+                "META-INF/version-control-info.textproto",
+                "**/NOTICE.md"
+            )
+        }
+    }
 
     // Keep pre-compressed `.gz` reference tables intact (`assets/reference/*.tsv.gz`) so aapt2 does not strip `.gz`.
     androidResources {

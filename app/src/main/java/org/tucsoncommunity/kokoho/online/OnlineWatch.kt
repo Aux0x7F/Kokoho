@@ -95,10 +95,11 @@ class OnlineWatch(
                 val skip = PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)
                 val circling = if (skip) false else loiter.update(p, now)
                 val distanceM = PoliceAircraft.distance(p, me.latitude, me.longitude)
-                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, alertM = Prefs.aircraftAlertKm(context) * 1000.0)
+                val effectiveAlertM = minOf(Prefs.aircraftAlertKm(context) * 1000.0, if (circling) 4_828.0 else 1_609.0)
+                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, alertM = effectiveAlertM)
                 seen += PoliceAircraft.Seen(p, hit)
                 if (hit == null) continue
-                val loud = PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), Prefs.aircraftAlertKm(context) * 1000.0)
+                val loud = PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), effectiveAlertM)
                 if (loud && (best == null || hit.confidence > best!!.confidence)) best = hit
                 reportAircraft(hit, p.hex, p.lat, p.lon, loud, now, said(hit, distanceM, me, p))
             }
@@ -130,10 +131,11 @@ class OnlineWatch(
                 val skip = PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)
                 val circling = if (skip) false else loiter.update(p, now)
                 val distanceM = me?.let { PoliceAircraft.distance(p, it.latitude, it.longitude) }
-                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, PoliceAircraft.VIA_LOCAL, Prefs.aircraftAlertKm(context) * 1000.0)
+                val effectiveAlertM = minOf(Prefs.aircraftAlertKm(context) * 1000.0, if (circling) 4_828.0 else 1_609.0)
+                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, PoliceAircraft.VIA_LOCAL, effectiveAlertM)
                 seen += PoliceAircraft.Seen(p, hit)
                 if (hit == null) continue
-                val loud = PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), Prefs.aircraftAlertKm(context) * 1000.0)
+                val loud = PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), effectiveAlertM)
                 if (loud && (best == null || hit.confidence > best!!.confidence)) best = hit
                 reportAircraft(hit, p.hex, p.lat, p.lon, loud, now, said(hit, distanceM, me, p))
             }
@@ -169,10 +171,11 @@ class OnlineWatch(
                 val skip = PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)
                 val circling = if (skip) false else loiter.update(p, now)
                 val distanceM = me?.let { PoliceAircraft.distance(p, it.latitude, it.longitude) }
-                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, "ADS-B shared by $via", alertM)
+                val effectiveAlertM = minOf(alertM, if (circling) 4_828.0 else 1_609.0)
+                val hit = if (skip) null else PoliceAircraft.classify(p, registry, circling, distanceM, "ADS-B shared by $via", effectiveAlertM)
                 PoliceAircraft.shared[p.hex] = now to PoliceAircraft.Seen(p, hit)
                 if (hit == null) continue
-                val loud = !quiet && PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), alertM)
+                val loud = !quiet && PoliceAircraft.alerts(hit, distanceM, Prefs.aircraftCircling(context), effectiveAlertM)
                 if (loud && (best == null || hit.confidence > best!!.confidence)) best = hit
                 reportAircraft(hit, p.hex, p.lat, p.lon, loud, now, said(hit, distanceM, me, p))
             }

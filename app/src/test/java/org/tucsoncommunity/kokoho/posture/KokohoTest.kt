@@ -1602,6 +1602,89 @@ class KokohoTest {
         assertNotNull("Expected Sonora Mexico 334 cell in az_cells.tsv.gz", sonoraCell)
     }
 
+    @Test
+    fun aircraftMonitorRequiresWithinOneMileOrCirclingWithinThreeMiles() {
+        val ctx: android.content.Context = org.robolectric.RuntimeEnvironment.getApplication()
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setAdsbEnabled(ctx, true)
+        KokohoSignatures.setEnabledAircraftAgencies(ctx, KokohoAgency.entries.toSet())
+
+        val nowMs = System.currentTimeMillis()
+        val userLoc = android.location.Location(android.location.LocationManager.GPS_PROVIDER).apply {
+            latitude = 32.2226
+            longitude = -110.9747
+            time = nowMs
+        }
+        val lm = ctx.getSystemService(android.content.Context.LOCATION_SERVICE) as android.location.LocationManager
+        org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, userLoc)
+        try {
+            fun heliAtKm(kmNorth: Double, circling: Boolean): org.tucsoncommunity.kokoho.online.PoliceAircraft.Seen {
+                val lat = 32.2226 + (kmNorth / 111.0)
+                val p = org.tucsoncommunity.kokoho.online.PoliceAircraft.Plane(
+                    hex = "a99999",
+                    callsign = "N911TP",
+                    registration = "N911TP",
+                    type = "AS50",
+                    owner = "TUCSON POLICE DEPARTMENT",
+                    lat = lat,
+                    lon = -110.9747,
+                    altitudeFt = 1800,
+                    speedKt = 75.0,
+                    trackDeg = 180.0,
+                    military = false
+                )
+                val hit = org.tucsoncommunity.kokoho.detect.Hit(
+                    org.tucsoncommunity.kokoho.detect.Category.AIRCRAFT,
+                    "Police aircraft: Tucson Police Department",
+                    if (circling) 90 else 85,
+                    if (circling) "Registered to Tucson Police Department. It is circling." else "Registered to Tucson Police Department.",
+                    "ADS-B"
+                )
+                return org.tucsoncommunity.kokoho.online.PoliceAircraft.Seen(p, hit)
+            }
+
+            // 1) Police helicopter 10 mi (~16.1 km) away -> visible on Map, NOT on Monitor ("Police nearby")
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latest = listOf(heliAtKm(16.1, circling = false))
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = nowMs
+            val snap10Mi = KokohoPostureEngine.evaluate(ctx, nowMs)
+            assertEquals("10 mi police helicopter must not raise Monitor posture", PostureColor.GREEN, snap10Mi.color)
+            assertTrue("10 mi police helicopter must not appear in Monitor activeThreats", snap10Mi.activeThreats.isEmpty())
+            assertTrue("10 mi police helicopter remains visible on Map", snap10Mi.mapThreats.any { it.isAircraft })
+
+            // 2) Non-circling police helicopter at 2 mi (~3.2 km) -> still NOT Monitor nearby (> 1 mi)
+            KokohoPostureEngine.clearLocalState()
+            org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, userLoc)
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latest = listOf(heliAtKm(3.2, circling = false))
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = nowMs
+            val snap2MiTransit = KokohoPostureEngine.evaluate(ctx, nowMs)
+            assertTrue("2 mi non-circling helicopter must not trigger Monitor nearby", snap2MiTransit.activeThreats.isEmpty())
+
+            // 3) Circling police helicopter at 2.4 mi (~3.85 km, within 3 mi) -> DOES trigger Monitor nearby
+            KokohoPostureEngine.clearLocalState()
+            org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, userLoc)
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latest = listOf(heliAtKm(3.85, circling = true))
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = nowMs
+            val snapCirclingWithin3Mi = KokohoPostureEngine.evaluate(ctx, nowMs)
+            assertTrue("Circling helicopter within 3 mi must trigger Monitor", snapCirclingWithin3Mi.activeThreats.any { it.isAircraft })
+
+            // 4) Non-circling police helicopter at 0.7 mi (~1.1 km, within 1 mi) -> DOES trigger Monitor nearby
+            KokohoPostureEngine.clearLocalState()
+            org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, userLoc)
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latest = listOf(heliAtKm(1.1, circling = false))
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = nowMs
+            val snapWithin1Mi = KokohoPostureEngine.evaluate(ctx, nowMs)
+            assertTrue("Helicopter within 1 mi must trigger Monitor", snapWithin1Mi.activeThreats.any { it.isAircraft })
+        } finally {
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latest = emptyList()
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = 0L
+            org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, null)
+            KokohoPostureEngine.clearLocalState()
+        }
+    }
+
     private fun renderViewToPng(view: View, widthPx: Int, heightPx: Int, bgColor: Int, fileName: String) {
         val wSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
         val hSpec = View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY)

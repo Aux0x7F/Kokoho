@@ -337,6 +337,8 @@ object KokohoPostureEngine {
         lastPostureColor = PostureColor.GREEN
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+        cachedFallbackLocation = null
+        cachedFallbackLocationAtMs = 0L
     }
 
     /** Non-recursive lookup of an entity's evidence facets and hardwareIdentifier when a report is saved on it. */
@@ -363,6 +365,8 @@ object KokohoPostureEngine {
         lrrpRadioFixes.clear()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+        cachedFallbackLocation = null
+        cachedFallbackLocationAtMs = 0L
     }
 
     /**
@@ -403,12 +407,14 @@ object KokohoPostureEngine {
         }
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+        cachedFallbackLocation = null
+        cachedFallbackLocationAtMs = 0L
     }
 
     private fun resolveUserLocation(context: Context): android.location.Location? {
         ScanForegroundService.lastFix?.let { return it }
         val now = System.currentTimeMillis()
-        if (now - cachedFallbackLocationAtMs < 10_000L) {
+        if (cachedFallbackLocation != null && now - cachedFallbackLocationAtMs < 10_000L) {
             return cachedFallbackLocation
         }
         cachedFallbackLocationAtMs = now
@@ -866,6 +872,75 @@ object KokohoPostureEngine {
         return maxPerp
     }
 
+    /** Direct/transiting aircraft only count as Monitor ("nearby") within 1 mile (1,609 m). */
+    const val AIRCRAFT_NEARBY_DIRECT_MAX_M = 1_609
+
+    /** Circling/orbiting aircraft count as Monitor ("nearby") within 3 miles (4,828 m). */
+    const val AIRCRAFT_NEARBY_CIRCLING_MAX_M = 4_828
+
+    fun isAircraftNearbyForMonitor(distM: Int, isCircling: Boolean, hasUserLoc: Boolean): Boolean {
+        if (!hasUserLoc) return false
+        return distM <= AIRCRAFT_NEARBY_DIRECT_MAX_M ||
+            (isCircling && distM <= AIRCRAFT_NEARBY_CIRCLING_MAX_M)
+    }
+
+    private fun spatiallyCompatible(lat1: Double?, lon1: Double?, lat2: Double?, lon2: Double?, maxDistM: Double): Boolean {
+        if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return true
+        return haversineMeters(lat1, lon1, lat2, lon2) <= maxDistM
+    }
+
+    private fun resolveRfCoords(
+        rf: RadioLog.Entry,
+        userLoc: android.location.Location?,
+        nowMs: Long
+    ): Pair<Double?, Double?> {
+        val freshUserLoc = userLoc?.takeIf { abs(nowMs - rf.lastSeen) <= 5_000L }
+        val rLat = rf.lastLat ?: rf.peakLat ?: freshUserLoc?.latitude
+        val rLon = rf.lastLon ?: rf.peakLon ?: freshUserLoc?.longitude
+        return rLat to rLon
+    }
+
+    private fun deduplicateRemoteRfEchoes(
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        keepUuid: String,
+        freqHz: Long,
+        refLat: Double?,
+        refLon: Double?,
+        refTsMs: Long
+    ) {
+        val rfPrefix = "rf:chan:$freqHz:"
+        val dupKeys = evaluated.entries
+            .filter { (otherUuid, other) ->
+                otherUuid != keepUuid &&
+                    !other.isAircraft &&
+                    !other.isDrone &&
+                    other.evidenceSources.isNotEmpty() &&
+                    other.evidenceSources.all { it.facetKey.startsWith("rf:") } &&
+                    other.evidenceSources.any { it.facetKey.startsWith(rfPrefix) } &&
+                    abs(other.updatedAtMs - refTsMs) <= 10 * 60_000L &&
+                    spatiallyCompatible(refLat, refLon, other.lat, other.lon, 450.0)
+            }
+            .map { it.key }
+        for (dk in dupKeys) {
+            val dup = evaluated.remove(dk) ?: continue
+            val kept = evaluated[keepUuid] ?: continue
+            val tighterRadius = if (dup.sightingCount >= 2 && dup.uncertaintyRadiusM < kept.uncertaintyRadiusM) {
+                dup.uncertaintyRadiusM
+            } else {
+                kept.uncertaintyRadiusM
+            }
+            val updated = kept.copy(
+                uncertaintyRadiusM = tighterRadius,
+                sightingCount = max(kept.sightingCount, dup.sightingCount),
+                isApproximatedPosition = kept.isApproximatedPosition || (dup.sightingCount >= 2 && dup.isApproximatedPosition)
+            )
+            evaluated[keepUuid] = updated
+            if (localThreatCache.containsKey(keepUuid)) {
+                localThreatCache[keepUuid] = updated
+            }
+        }
+    }
+
     fun evaluate(context: Context, nowMs: Long = System.currentTimeMillis()): PostureSnapshot {
         KokohoSignatures.ensureLoaded(context)
         val alarmEnabled = KokohoSignatures.getEnabledAgencies(context)
@@ -922,160 +997,15 @@ object KokohoPostureEngine {
 
         // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub
         if (auxnetOn) {
-            for (remote in KokohoHubClient.activeObjects(nowMs, mapVisibilityMs)) {
-                if (KokohoSignatures.isFlockCamera(remote.uuid, remote.classification.label) ||
-                    remote.classification.evidenceSources.any { KokohoSignatures.isFlockCamera(it.facetKey, it.detail) }
-                ) {
-                    continue
-                }
-                val isAir = remote.location.propagationClass.equals("AIR_TO_GROUND", ignoreCase = true) ||
-                    remote.location.propagationClass.equals("AIRBORNE", ignoreCase = true) ||
-                    remote.classification.evidenceSources.any { it.kind.contains("ADSB", ignoreCase = true) }
-                if (isAir && KokohoSignatures.isAnomalousUnattributedAirRecord(
-                        primaryKey = remote.classification.evidenceSources.firstOrNull()?.facetKey ?: "adsb:",
-                        category = remote.classification.category,
-                        label = remote.classification.label,
-                        facets = remote.classification.evidenceSources.map { it.facetKey },
-                        avgVelocityMps = remote.location.velocityMps
-                    )
-                ) {
-                    continue
-                }
-                val remoteHex = remote.classification.evidenceSources
-                    .firstOrNull { it.facetKey.startsWith("adsb:icao:", ignoreCase = true) || it.facetKey.startsWith("ICAO:", ignoreCase = true) }
-                    ?.facetKey?.substringAfterLast(':')?.uppercase()
-                if (isAir) {
-                    if (nowMs - remote.updatedAtMs > LIVE_AIRCRAFT_MAX_AGE_MS) continue
-                    if (remoteHex != null && remoteHex in groundedHexes) continue
-                }
-                val agency = KokohoAgency.fromCode(remote.classification.category) ?: continue
-                if (isAir) {
-                    if (!KokohoSignatures.isAdsbEnabled(context)) continue
-                    val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
-                    val allowed = if (agency.isDhs) airEnabled.any { it.isDhs } else agency in airEnabled
-                    if (!allowed) continue
-                } else {
-                    if (agency !in enabled) continue
-                }
-
-                // Skip remote repeater-only artifacts
-                if (remote.location.propagationClass.equals("REPEATER_INFRASTRUCTURE", ignoreCase = true)) {
-                    continue
-                }
-
-                val uncertM = remote.location.uncertaintyRadiusM.roundToInt().coerceAtLeast(15)
-                val hasUserLoc = userLoc != null
-                val centerDistM = if (userLoc != null) {
-                    haversineMeters(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
-                } else {
-                    9_999
-                }
-                val edgeDistM = if (hasUserLoc) max(0, centerDistM - uncertM) else max(0, 9_999 - uncertM)
-
-                val bearingFromUser = if (userLoc != null) {
-                    bearingDeg(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
-                } else {
-                    remote.location.bearingDeg?.roundToInt()
-                }
-
-                val headingTowardUser = isHeadingTowardUser(
-                    userLat = userLoc?.latitude,
-                    userLon = userLoc?.longitude,
-                    objLat = remote.location.lat,
-                    objLon = remote.location.lon,
-                    objBearingDeg = remote.location.bearingDeg,
-                    objVelocityMps = remote.location.velocityMps
-                )
-
-                val effectiveDistM = if (hasUserLoc) max(edgeDistM, uncertM) else 9_999
-                val posture = when {
-                    !hasUserLoc -> PostureColor.YELLOW
-                    effectiveDistM <= 300 -> PostureColor.RED
-                    headingTowardUser || effectiveDistM <= 850 -> PostureColor.ORANGE
-                    else -> PostureColor.YELLOW
-                }
-
-                val badges = remote.classification.evidenceSources.map {
-                    EvidenceBadge(
-                        kind = it.kind,
-                        facetKey = it.facetKey,
-                        detail = it.detail,
-                        weight = it.weight,
-                        lastSeenMs = it.lastSeenMs
-                    )
-                }
-
-                var remoteOpLat: Double? = null
-                var remoteOpLon: Double? = null
-                var remoteIsDrone = agency == KokohoAgency.DRONE
-                for (b in badges) {
-                    if (b.facetKey.startsWith("uas:mac:", ignoreCase = true)) remoteIsDrone = true
-                    if (b.facetKey.startsWith("uas:op:", ignoreCase = true)) {
-                        remoteIsDrone = true
-                        val parts = b.facetKey.substringAfter("uas:op:", "").split(',')
-                        if (parts.size == 2) {
-                            val olat = parts[0].trim().toDoubleOrNull()
-                            val olon = parts[1].trim().toDoubleOrNull()
-                            if (olat != null && olon != null && olat in -90.0..90.0 && olon in -180.0..180.0) {
-                                remoteOpLat = olat
-                                remoteOpLon = olon
-                            }
-                        }
-                    }
-                }
-
-                val classConf = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99)
-                val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
-                val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
-
-                val remoteSightings = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1)
-                val isRemoteDerived = isAir ||
-                    remote.corroborationCount >= 2 ||
-                    remote.sightingCount >= 2 ||
-                    uncertM <= WIDE_CIRCLE_JITTER_MIN_M
-
-                val remoteHeli = isAir && KokohoSignatures.isHelicopterAirframe(
-                    null,
-                    remote.classification.category,
-                    "${remote.classification.label} ${badges.joinToString(" ") { it.detail }}",
-                    agency = agency,
-                    hex = remoteHex
-                )
-                evaluated[remote.uuid] = EvaluatedThreat(
-                    uuid = remote.uuid,
-                    trackUuid = remote.trackUuid,
-                    agency = agency,
-                    label = agency.friendlyLabel,
-                    posture = posture,
-                    overallConfidence = combinedConf,
-                    classificationConfidence = classConf,
-                    spatialConfidence = spatConf,
-                    estimatedDistanceM = centerDistM,
-                    uncertaintyRadiusM = uncertM,
-                    bearingDeg = bearingFromUser,
-                    closingVelocityMps = remote.location.velocityMps,
-                    recurrenceSummary = remote.classification.recurrenceSummary,
-                    evidenceSources = badges,
-                    updatedAtMs = remote.updatedAtMs,
-                    lat = remote.location.lat,
-                    lon = remote.location.lon,
-                    isApproximatedPosition = isRemoteDerived,
-                    isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
-                    isAircraft = isAir,
-                    isHelicopter = remoteHeli,
-                    aircraftTrackDeg = remote.location.bearingDeg,
-                    aircraftHex = remoteHex,
-                    isDrone = remoteIsDrone,
-                    operatorLat = remoteOpLat,
-                    operatorLon = remoteOpLon,
-                    hardwareIdentifier = badges.firstOrNull()?.facetKey,
-                    sightingCount = remoteSightings,
-                    capabilities = KokohoSignatures.inferCapabilitiesFromEvidence(
-                        badges.map { it.facetKey },
-                        badges.map { it.detail } + remote.classification.label
-                    )
-                )
-            }
+            evaluateRemoteHubObjects(
+                context = context,
+                nowMs = nowMs,
+                mapVisibilityMs = mapVisibilityMs,
+                enabled = enabled,
+                groundedHexes = groundedHexes,
+                userLoc = userLoc,
+                evaluated = evaluated
+            )
         }
 
         // 2. Evaluate local RTL-SDR RF hits, Pro/Enterprise/RemoteID Drones, and close-range Fleet OUI devices
@@ -1087,112 +1017,12 @@ object KokohoPostureEngine {
 
         // 2a. Pro / Enterprise / Military / Remote ID Drones (#24)
         if (KokohoSignatures.isDroneDetectionEnabled(context)) {
-            for (snap in localDevices) {
-                val rid = snap.remoteId
-                val isDrone = KokohoSignatures.isTacticalOrRemoteIdDrone(
-                    mac = snap.mac,
-                    ssidOrName = snap.name,
-                    vendor = snap.vendor,
-                    hasRemoteId = rid != null
-                )
-                if (!isDrone) continue
-
-                val normMac = KokohoSignatures.normalizeMac(snap.mac)
-                val facetKey = "uas:mac:$normMac"
-                val uuid = deterministicUuidV5(facetKey)
-                val droneLat = rid?.latitude ?: snap.place?.lat ?: userLoc?.latitude
-                val droneLon = rid?.longitude ?: snap.place?.lon ?: userLoc?.longitude
-                val hasExactDroneGps = rid?.latitude != null && rid.longitude != null
-                val altMeters = rid?.heightM ?: rid?.altitudeGeoM
-                val altFtAgl = altMeters?.let { (it * 3.28084).roundToInt().coerceAtLeast(0) }
-
-                val distM = if (hasExactDroneGps && userLoc != null) {
-                    haversineMeters(userLoc.latitude, userLoc.longitude, droneLat!!, droneLon!!).roundToInt()
-                } else {
-                    estimateRssiDistanceMeters(snap.rssi)
-                }
-                val uncertM = if (hasExactDroneGps) 20 else distM
-
-                val posture = when {
-                    distM <= 350 || snap.rssi >= -68 -> PostureColor.RED
-                    distM <= 900 || snap.rssi >= -78 -> PostureColor.ORANGE
-                    else -> PostureColor.YELLOW
-                }
-
-                val uasDetail = buildString {
-                    append(snap.vendor ?: "Tactical sUAS")
-                    if (!rid?.uasId.isNullOrBlank()) append(" · ID ${rid?.uasId}")
-                    if (altFtAgl != null) append(" · $altFtAgl ft AGL")
-                    append(" (${snap.rssi} dBm)")
-                }
-
-                val badges = mutableListOf(
-                    EvidenceBadge(
-                        kind = if (rid != null) "REMOTE_ID_UAS" else "TACTICAL_DRONE_OUI",
-                        facetKey = facetKey,
-                        detail = uasDetail,
-                        weight = 0.92,
-                        lastSeenMs = snap.lastSeen
-                    )
-                )
-                if (rid?.operatorLatitude != null && rid.operatorLongitude != null) {
-                    val opLatStr = "%.5f".format(Locale.US, rid.operatorLatitude)
-                    val opLonStr = "%.5f".format(Locale.US, rid.operatorLongitude)
-                    badges += EvidenceBadge(
-                        kind = "REMOTE_ID_OP",
-                        facetKey = "uas:op:$opLatStr,$opLonStr",
-                        detail = "Pilot GPS: $opLatStr, $opLonStr",
-                        weight = 0.80,
-                        lastSeenMs = snap.lastSeen
-                    )
-                }
-
-                val threat = EvaluatedThreat(
-                    uuid = uuid,
-                    trackUuid = uuid,
-                    agency = KokohoAgency.DRONE,
-                    label = KokohoAgency.DRONE.friendlyLabel,
-                    posture = posture,
-                    overallConfidence = 94,
-                    classificationConfidence = 95,
-                    spatialConfidence = if (hasExactDroneGps) 96 else 72,
-                    estimatedDistanceM = distM,
-                    uncertaintyRadiusM = uncertM,
-                    bearingDeg = rid?.directionDeg,
-                    closingVelocityMps = rid?.speedMs,
-                    recurrenceSummary = if (altFtAgl != null) "Airborne at $altFtAgl ft AGL" else "Tactical Drone Beacon",
-                    evidenceSources = badges,
-                    updatedAtMs = snap.lastSeen,
-                    lat = droneLat,
-                    lon = droneLon,
-                    isApproximatedPosition = hasExactDroneGps,
-                    isPinpointed = hasExactDroneGps,
-                    isDrone = true,
-                    altitudeFtAgl = altFtAgl,
-                    operatorLat = rid?.operatorLatitude,
-                    operatorLon = rid?.operatorLongitude,
-                    hardwareIdentifier = rid?.uasId?.takeIf { it.isNotBlank() } ?: normMac
-                )
-                upsertAndFuseThreat(evaluated, threat)
-                if (droneLat != null && droneLon != null) {
-                    localRawObservations += RawSensorReportCandidate(
-                        facetKey = facetKey,
-                        rawLat = droneLat,
-                        rawLon = droneLon,
-                        signalDb = snap.rssi.toDouble(),
-                        modality = if (rid != null) "REMOTE_ID" else "TACTICAL_DRONE_OUI",
-                        additionalFacets = badges.drop(1).map { it.facetKey },
-                        agency = KokohoAgency.DRONE,
-                        label = threat.friendlyLabel,
-                        propClass = "GROUND_DIRECT",
-                        uncertaintyRadiusM = if (hasExactDroneGps) 20.0 else uncertM.toDouble(),
-                        isDerived = hasExactDroneGps,
-                        localSightings = snap.sightings.coerceAtLeast(1),
-                        ssidHint = snap.name,
-                        obsTimestampMs = snap.lastSeen
-                    )
-                }
-            }
+            evaluateLocalDrones(
+                userLoc = userLoc,
+                localDevices = localDevices,
+                evaluated = evaluated,
+                localRawObservations = localRawObservations
+            )
         }
 
         // 2b. Curated Fleet OUI / Tactical candidates (collapse dual-band BSSIDs, weight unit vs factory SSIDs)
@@ -1396,22 +1226,10 @@ object KokohoPostureEngine {
             val lon: Double?
         )
 
-        fun resolveRfCoords(rf: RadioLog.Entry): Pair<Double?, Double?> {
-            val freshUserLoc = userLoc?.takeIf { abs(nowMs - rf.lastSeen) <= 5_000L }
-            val rLat = rf.lastLat ?: rf.peakLat ?: freshUserLoc?.latitude
-            val rLon = rf.lastLon ?: rf.peakLon ?: freshUserLoc?.longitude
-            return rLat to rLon
-        }
-
-        fun spatiallyCompatible(lat1: Double?, lon1: Double?, lat2: Double?, lon2: Double?, maxDistM: Double): Boolean {
-            if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return true
-            return haversineMeters(lat1, lon1, lat2, lon2) <= maxDistM
-        }
-
         // Pre-scan explicit cataloged RF hits (with true sighting coordinates) to know whether DHS is the attested primary presence at this scene
         val explicitCatalogRfByTime = localRfHits.mapNotNull { rf ->
             KokohoSignatures.matchFrequency(rf.freqHz, snrDb = rf.peakSnrDb)?.takeIf { it.isAlertableDirectOrMobile }?.let { sig ->
-                val (rLat, rLon) = resolveRfCoords(rf)
+                val (rLat, rLon) = resolveRfCoords(rf, userLoc, nowMs)
                 AttestedSignalRef(sig.agencyEnum, rf.lastSeen, rLat, rLon)
             }
         }
@@ -1446,7 +1264,7 @@ object KokohoPostureEngine {
                 }
                 ?: return@mapNotNull null
             if (rfSig.agencyEnum == KokohoAgency.POLICE || rfSig.agencyEnum == KokohoAgency.SHERIFF) {
-                val (rLat, rLon) = resolveRfCoords(rf)
+                val (rLat, rLon) = resolveRfCoords(rf, userLoc, nowMs)
                 AttestedSignalRef(rfSig.agencyEnum, rf.lastSeen, rLat, rLon)
             } else {
                 null
@@ -2020,46 +1838,367 @@ object KokohoPostureEngine {
                 ?.key
         }
 
-        fun deduplicateRemoteRfEchoes(
-            keepUuid: String,
-            freqHz: Long,
-            refLat: Double?,
-            refLon: Double?,
-            refTsMs: Long
-        ) {
-            val rfPrefix = "rf:chan:$freqHz:"
-            val dupKeys = evaluated.entries
-                .filter { (otherUuid, other) ->
-                    otherUuid != keepUuid &&
-                        !other.isAircraft &&
-                        !other.isDrone &&
-                        other.evidenceSources.isNotEmpty() &&
-                        other.evidenceSources.all { it.facetKey.startsWith("rf:") } &&
-                        other.evidenceSources.any { it.facetKey.startsWith(rfPrefix) } &&
-                        abs(other.updatedAtMs - refTsMs) <= 10 * 60_000L &&
-                        spatiallyCompatible(refLat, refLon, other.lat, other.lon, 450.0)
-                }
-                .map { it.key }
-            for (dk in dupKeys) {
-                val dup = evaluated.remove(dk) ?: continue
-                val kept = evaluated[keepUuid] ?: continue
-                val tighterRadius = if (dup.sightingCount >= 2 && dup.uncertaintyRadiusM < kept.uncertaintyRadiusM) {
-                    dup.uncertaintyRadiusM
-                } else {
-                    kept.uncertaintyRadiusM
-                }
-                val updated = kept.copy(
-                    uncertaintyRadiusM = tighterRadius,
-                    sightingCount = max(kept.sightingCount, dup.sightingCount),
-                    isApproximatedPosition = kept.isApproximatedPosition || (dup.sightingCount >= 2 && dup.isApproximatedPosition)
-                )
-                evaluated[keepUuid] = updated
-                if (localThreatCache.containsKey(keepUuid)) {
-                    localThreatCache[keepUuid] = updated
-                }
-            }
+        evaluateLocalRfAndP25(
+            context = context,
+            nowMs = nowMs,
+            mapVisibilityMs = mapVisibilityMs,
+            rfWindowMs = rfWindowMs,
+            triDecayMs = triDecayMs,
+            enabled = enabled,
+            primaryRfPresence = primaryRfPresence,
+            userLoc = userLoc,
+            localRfHits = localRfHits,
+            ouiThreatUuids = ouiThreatUuids,
+            pendingInteropBadges = pendingInteropBadges,
+            consumedRfUnitUuids = consumedRfUnitUuids,
+            evaluated = evaluated,
+            localRawObservations = localRawObservations
+        )
+
+        if (KokohoSignatures.isAdsbEnabled(context)) {
+            evaluateAdsbAircraft(
+                context = context,
+                nowMs = nowMs,
+                userLoc = userLoc,
+                evaluated = evaluated,
+                localRawObservations = localRawObservations
+            )
         }
 
+        return finalizeSnapshotAndPublish(
+            context = context,
+            nowMs = nowMs,
+            mapVisibilityMs = mapVisibilityMs,
+            monitorWindowMs = monitorWindowMs,
+            activeMapWindow = activeMapWindow,
+            alarmEnabled = alarmEnabled,
+            mapVisible = mapVisible,
+            enabled = enabled,
+            enabledScopeText = enabledScopeText,
+            groundedHexes = groundedHexes,
+            userLoc = userLoc,
+            evaluated = evaluated,
+            localRawObservations = localRawObservations
+        )
+    }
+
+    private fun evaluateRemoteHubObjects(
+        context: Context,
+        nowMs: Long,
+        mapVisibilityMs: Long,
+        enabled: Set<KokohoAgency>,
+        groundedHexes: Set<String>,
+        userLoc: android.location.Location?,
+        evaluated: MutableMap<String, EvaluatedThreat>
+    ) {
+        for (remote in KokohoHubClient.activeObjects(nowMs, mapVisibilityMs)) {
+            if (KokohoSignatures.isFlockCamera(remote.uuid, remote.classification.label) ||
+                remote.classification.evidenceSources.any { KokohoSignatures.isFlockCamera(it.facetKey, it.detail) }
+            ) {
+                continue
+            }
+            val isAir = remote.location.propagationClass.equals("AIRBORNE", ignoreCase = true) ||
+                remote.classification.evidenceSources.any {
+                    it.kind.contains("ADSB", ignoreCase = true) ||
+                        it.facetKey.startsWith("adsb:", ignoreCase = true) ||
+                        it.facetKey.startsWith("ICAO:", ignoreCase = true)
+                }
+            if (isAir && KokohoSignatures.isAnomalousUnattributedAirRecord(
+                    primaryKey = remote.classification.evidenceSources.firstOrNull()?.facetKey ?: "adsb:",
+                    category = remote.classification.category,
+                    label = remote.classification.label,
+                    facets = remote.classification.evidenceSources.map { it.facetKey },
+                    avgVelocityMps = remote.location.velocityMps
+                )
+            ) {
+                continue
+            }
+            val remoteHex = remote.classification.evidenceSources
+                .firstOrNull { it.facetKey.startsWith("adsb:icao:", ignoreCase = true) || it.facetKey.startsWith("ICAO:", ignoreCase = true) }
+                ?.facetKey?.substringAfterLast(':')?.uppercase()
+            if (isAir) {
+                if (nowMs - remote.updatedAtMs > LIVE_AIRCRAFT_MAX_AGE_MS) continue
+                if (remoteHex != null && remoteHex in groundedHexes) continue
+            }
+            val agency = KokohoAgency.fromCode(remote.classification.category) ?: continue
+            if (isAir) {
+                if (!KokohoSignatures.isAdsbEnabled(context)) continue
+                val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
+                val allowed = if (agency.isDhs) airEnabled.any { it.isDhs } else agency in airEnabled
+                if (!allowed) continue
+            } else {
+                if (agency !in enabled) continue
+            }
+
+            if (remote.location.propagationClass.equals("REPEATER_INFRASTRUCTURE", ignoreCase = true)) {
+                continue
+            }
+
+            val uncertM = remote.location.uncertaintyRadiusM.roundToInt().coerceAtLeast(15)
+            val hasUserLoc = userLoc != null
+            val centerDistM = if (userLoc != null) {
+                haversineMeters(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
+            } else {
+                9_999
+            }
+            val edgeDistM = if (hasUserLoc) max(0, centerDistM - uncertM) else max(0, 9_999 - uncertM)
+
+            val bearingFromUser = if (userLoc != null) {
+                bearingDeg(userLoc.latitude, userLoc.longitude, remote.location.lat, remote.location.lon).roundToInt()
+            } else {
+                remote.location.bearingDeg?.roundToInt()
+            }
+
+            val headingTowardUser = isHeadingTowardUser(
+                userLat = userLoc?.latitude,
+                userLon = userLoc?.longitude,
+                objLat = remote.location.lat,
+                objLon = remote.location.lon,
+                objBearingDeg = remote.location.bearingDeg,
+                objVelocityMps = remote.location.velocityMps
+            )
+
+            val badges = remote.classification.evidenceSources.map {
+                EvidenceBadge(
+                    kind = it.kind,
+                    facetKey = it.facetKey,
+                    detail = it.detail,
+                    weight = it.weight,
+                    lastSeenMs = it.lastSeenMs
+                )
+            }
+            val remoteIsCircling = isAir && (
+                remote.classification.label.contains("circling", ignoreCase = true) ||
+                    remote.classification.label.contains("orbit", ignoreCase = true) ||
+                    remote.classification.recurrenceSummary.contains("circling", ignoreCase = true) ||
+                    remote.classification.recurrenceSummary.contains("orbit", ignoreCase = true) ||
+                    badges.any {
+                        it.detail.contains("circling", ignoreCase = true) ||
+                            it.facetKey.contains("ORBIT", ignoreCase = true)
+                    }
+                )
+
+            val effectiveDistM = if (hasUserLoc) max(edgeDistM, uncertM) else 9_999
+            val posture = if (isAir) {
+                when {
+                    !hasUserLoc -> PostureColor.YELLOW
+                    centerDistM <= 805 || (remoteIsCircling && centerDistM <= AIRCRAFT_NEARBY_DIRECT_MAX_M) -> PostureColor.RED
+                    centerDistM <= AIRCRAFT_NEARBY_DIRECT_MAX_M || (remoteIsCircling && centerDistM <= 3_219) -> PostureColor.ORANGE
+                    else -> PostureColor.YELLOW
+                }
+            } else {
+                when {
+                    !hasUserLoc -> PostureColor.YELLOW
+                    effectiveDistM <= 300 -> PostureColor.RED
+                    headingTowardUser || effectiveDistM <= 850 -> PostureColor.ORANGE
+                    else -> PostureColor.YELLOW
+                }
+            }
+
+            var remoteOpLat: Double? = null
+            var remoteOpLon: Double? = null
+            var remoteIsDrone = agency == KokohoAgency.DRONE
+            for (b in badges) {
+                if (b.facetKey.startsWith("uas:mac:", ignoreCase = true)) remoteIsDrone = true
+                if (b.facetKey.startsWith("uas:op:", ignoreCase = true)) {
+                    remoteIsDrone = true
+                    val parts = b.facetKey.substringAfter("uas:op:", "").split(',')
+                    if (parts.size == 2) {
+                        val olat = parts[0].trim().toDoubleOrNull()
+                        val olon = parts[1].trim().toDoubleOrNull()
+                        if (olat != null && olon != null && olat in -90.0..90.0 && olon in -180.0..180.0) {
+                            remoteOpLat = olat
+                            remoteOpLon = olon
+                        }
+                    }
+                }
+            }
+
+            val classConf = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99)
+            val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+
+            val remoteSightings = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1)
+            val isRemoteDerived = isAir ||
+                remote.corroborationCount >= 2 ||
+                remote.sightingCount >= 2 ||
+                uncertM <= WIDE_CIRCLE_JITTER_MIN_M
+
+            val remoteHeli = isAir && KokohoSignatures.isHelicopterAirframe(
+                null,
+                remote.classification.category,
+                "${remote.classification.label} ${badges.joinToString(" ") { it.detail }}",
+                agency = agency,
+                hex = remoteHex
+            )
+            evaluated[remote.uuid] = EvaluatedThreat(
+                uuid = remote.uuid,
+                trackUuid = remote.trackUuid,
+                agency = agency,
+                label = agency.friendlyLabel,
+                posture = posture,
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = centerDistM,
+                uncertaintyRadiusM = uncertM,
+                bearingDeg = bearingFromUser,
+                closingVelocityMps = remote.location.velocityMps,
+                recurrenceSummary = remote.classification.recurrenceSummary,
+                evidenceSources = badges,
+                updatedAtMs = remote.updatedAtMs,
+                lat = remote.location.lat,
+                lon = remote.location.lon,
+                isApproximatedPosition = isRemoteDerived,
+                isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
+                isAircraft = isAir,
+                isHelicopter = remoteHeli,
+                aircraftTrackDeg = remote.location.bearingDeg,
+                aircraftHex = remoteHex,
+                isCircling = remoteIsCircling,
+                isDrone = remoteIsDrone,
+                operatorLat = remoteOpLat,
+                operatorLon = remoteOpLon,
+                hardwareIdentifier = badges.firstOrNull()?.facetKey,
+                sightingCount = remoteSightings,
+                capabilities = KokohoSignatures.inferCapabilitiesFromEvidence(
+                    badges.map { it.facetKey },
+                    badges.map { it.detail } + remote.classification.label
+                )
+            )
+        }
+    }
+
+    private fun evaluateLocalDrones(
+        userLoc: android.location.Location?,
+        localDevices: List<DeviceRegistry.Snapshot>,
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        localRawObservations: MutableList<RawSensorReportCandidate>
+    ) {
+        for (snap in localDevices) {
+            val rid = snap.remoteId
+            val isDrone = KokohoSignatures.isTacticalOrRemoteIdDrone(
+                mac = snap.mac,
+                ssidOrName = snap.name,
+                vendor = snap.vendor,
+                hasRemoteId = rid != null
+            )
+            if (!isDrone) continue
+
+            val normMac = KokohoSignatures.normalizeMac(snap.mac)
+            val facetKey = "uas:mac:$normMac"
+            val uuid = deterministicUuidV5(facetKey)
+            val droneLat = rid?.latitude ?: snap.place?.lat ?: userLoc?.latitude
+            val droneLon = rid?.longitude ?: snap.place?.lon ?: userLoc?.longitude
+            val hasExactDroneGps = rid?.latitude != null && rid.longitude != null
+            val altMeters = rid?.heightM ?: rid?.altitudeGeoM
+            val altFtAgl = altMeters?.let { (it * 3.28084).roundToInt().coerceAtLeast(0) }
+
+            val distM = if (hasExactDroneGps && userLoc != null) {
+                haversineMeters(userLoc.latitude, userLoc.longitude, droneLat!!, droneLon!!).roundToInt()
+            } else {
+                estimateRssiDistanceMeters(snap.rssi)
+            }
+            val uncertM = if (hasExactDroneGps) 20 else distM
+
+            val posture = when {
+                distM <= 350 || snap.rssi >= -68 -> PostureColor.RED
+                distM <= 900 || snap.rssi >= -78 -> PostureColor.ORANGE
+                else -> PostureColor.YELLOW
+            }
+
+            val uasDetail = buildString {
+                append(snap.vendor ?: "Tactical sUAS")
+                if (!rid?.uasId.isNullOrBlank()) append(" · ID ${rid?.uasId}")
+                if (altFtAgl != null) append(" · $altFtAgl ft AGL")
+                append(" (${snap.rssi} dBm)")
+            }
+
+            val badges = mutableListOf(
+                EvidenceBadge(
+                    kind = if (rid != null) "REMOTE_ID_UAS" else "TACTICAL_DRONE_OUI",
+                    facetKey = facetKey,
+                    detail = uasDetail,
+                    weight = 0.92,
+                    lastSeenMs = snap.lastSeen
+                )
+            )
+            if (rid?.operatorLatitude != null && rid.operatorLongitude != null) {
+                val opLatStr = "%.5f".format(Locale.US, rid.operatorLatitude)
+                val opLonStr = "%.5f".format(Locale.US, rid.operatorLongitude)
+                badges += EvidenceBadge(
+                    kind = "REMOTE_ID_OP",
+                    facetKey = "uas:op:$opLatStr,$opLonStr",
+                    detail = "Pilot GPS: $opLatStr, $opLonStr",
+                    weight = 0.80,
+                    lastSeenMs = snap.lastSeen
+                )
+            }
+
+            val threat = EvaluatedThreat(
+                uuid = uuid,
+                trackUuid = uuid,
+                agency = KokohoAgency.DRONE,
+                label = KokohoAgency.DRONE.friendlyLabel,
+                posture = posture,
+                overallConfidence = 94,
+                classificationConfidence = 95,
+                spatialConfidence = if (hasExactDroneGps) 96 else 72,
+                estimatedDistanceM = distM,
+                uncertaintyRadiusM = uncertM,
+                bearingDeg = rid?.directionDeg,
+                closingVelocityMps = rid?.speedMs,
+                recurrenceSummary = if (altFtAgl != null) "Airborne at $altFtAgl ft AGL" else "Tactical Drone Beacon",
+                evidenceSources = badges,
+                updatedAtMs = snap.lastSeen,
+                lat = droneLat,
+                lon = droneLon,
+                isApproximatedPosition = hasExactDroneGps,
+                isPinpointed = hasExactDroneGps,
+                isDrone = true,
+                altitudeFtAgl = altFtAgl,
+                operatorLat = rid?.operatorLatitude,
+                operatorLon = rid?.operatorLongitude,
+                hardwareIdentifier = rid?.uasId?.takeIf { it.isNotBlank() } ?: normMac
+            )
+            upsertAndFuseThreat(evaluated, threat)
+            if (droneLat != null && droneLon != null) {
+                localRawObservations += RawSensorReportCandidate(
+                    facetKey = facetKey,
+                    rawLat = droneLat,
+                    rawLon = droneLon,
+                    signalDb = snap.rssi.toDouble(),
+                    modality = if (rid != null) "REMOTE_ID" else "TACTICAL_DRONE_OUI",
+                    additionalFacets = badges.drop(1).map { it.facetKey },
+                    agency = KokohoAgency.DRONE,
+                    label = threat.friendlyLabel,
+                    propClass = "GROUND_DIRECT",
+                    uncertaintyRadiusM = if (hasExactDroneGps) 20.0 else uncertM.toDouble(),
+                    isDerived = hasExactDroneGps,
+                    localSightings = snap.sightings.coerceAtLeast(1),
+                    ssidHint = snap.name,
+                    obsTimestampMs = snap.lastSeen
+                )
+            }
+        }
+    }
+
+    private fun evaluateLocalRfAndP25(
+        context: Context,
+        nowMs: Long,
+        mapVisibilityMs: Long,
+        rfWindowMs: Long,
+        triDecayMs: Long,
+        enabled: Set<KokohoAgency>,
+        primaryRfPresence: KokohoAgency?,
+        userLoc: android.location.Location?,
+        localRfHits: List<RadioLog.Entry>,
+        ouiThreatUuids: List<String>,
+        pendingInteropBadges: MutableList<EvidenceBadge>,
+        consumedRfUnitUuids: MutableSet<String>,
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        localRawObservations: MutableList<RawSensorReportCandidate>
+    ) {
         val dodTrunkActive = RadioLog.activeDodTrunkChannelCount(nowMs) >= 3
 
         // 3. Evaluate local RTL-SDR RF Hits — suppress wide-area non-localizing emissions along user travel,
@@ -2078,7 +2217,7 @@ object KokohoPostureEngine {
                 ?: continue
             if (!sig.isAlertableDirectOrMobile) continue
 
-            val (rfObsLat, rfObsLon) = resolveRfCoords(rf)
+            val (rfObsLat, rfObsLon) = resolveRfCoords(rf, userLoc, nowMs)
             val agency = sig.agencyEnum
 
             // Along-track wide-area / non-localizing RF rejection:
@@ -2142,7 +2281,7 @@ object KokohoPostureEngine {
                     capabilities = mergedCaps
                 )
                 upsertAndFuseThreat(evaluated, updated)
-                deduplicateRemoteRfEchoes(colocatedUuid, rf.freqHz, rfObsLat, rfObsLon, rf.lastSeen)
+                deduplicateRemoteRfEchoes(evaluated, colocatedUuid, rf.freqHz, rfObsLat, rfObsLon, rf.lastSeen)
                 target.hardwareIdentifier?.let { macId ->
                     val targetFacet = "hw:mac:$macId"
                     for (idx in localRawObservations.indices) {
@@ -2249,7 +2388,7 @@ object KokohoPostureEngine {
             if (!isAirAssetRf) {
                 localThreatCache[uuid] = evaluated[uuid] ?: threat
             }
-            deduplicateRemoteRfEchoes(uuid, rf.freqHz, rfAnchorLat, rfAnchorLon, rf.lastSeen)
+            deduplicateRemoteRfEchoes(evaluated, uuid, rf.freqHz, rfAnchorLat, rfAnchorLon, rf.lastSeen)
             if (rfObsLat != null && rfObsLon != null) {
                 localRawObservations += RawSensorReportCandidate(
                     facetKey = facetKey,
@@ -2511,141 +2650,155 @@ object KokohoPostureEngine {
             )
         }
 
-        // 5. Evaluate ADS-B Aircraft & Unlisted Circling Spy Planes (grounded, gliders, and military excluded)
-        if (KokohoSignatures.isAdsbEnabled(context)) {
-            val enabledAirAgencies = KokohoSignatures.getEnabledAircraftAgencies(context)
-            for (seen in PoliceAircraft.all(nowMs)) {
-                val p = seen.plane
-                val hit = seen.hit
-                if (PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)) continue
-                val isCircling = hit?.label == PoliceAircraft.CIRCLING ||
-                    hit?.evidence?.contains("circling", ignoreCase = true) == true
-                val agency = KokohoSignatures.classifyAircraftAgency(
-                    owner = p.owner,
-                    registration = p.registration,
-                    callsign = p.callsign,
-                    hitLabel = hit?.label,
-                    type = p.type,
-                    hex = p.hex,
-                    speedKt = p.speedKt,
-                    isCircling = isCircling
-                ) ?: continue
-                val allowed = isCircling ||
-                    (if (agency.isDhs) enabledAirAgencies.any { it.isDhs } else agency in enabledAirAgencies)
-                if (!allowed) continue
+    }
 
-                val facetKey = "adsb:icao:${p.hex.uppercase()}"
-                val uuid = deterministicUuidV5(facetKey)
-                val distM = if (userLoc != null) {
-                    haversineMeters(userLoc.latitude, userLoc.longitude, p.lat, p.lon).roundToInt()
-                } else {
-                    4000
-                }
-                val velMps = p.speedKt?.let { it * 0.514444 }
-                val headingToward = isHeadingTowardUser(
-                    userLat = userLoc?.latitude,
-                    userLon = userLoc?.longitude,
-                    objLat = p.lat,
-                    objLon = p.lon,
-                    objBearingDeg = p.trackDeg,
-                    objVelocityMps = velMps
-                )
-                val isUnattributedCircling = isCircling && hit?.label == PoliceAircraft.CIRCLING
-                val posture = when {
-                    isUnattributedCircling && distM <= 3_500 -> PostureColor.RED
-                    isUnattributedCircling && distM <= 7_000 -> PostureColor.ORANGE
-                    isUnattributedCircling -> PostureColor.YELLOW
-                    isCircling && distM <= 8_000 -> PostureColor.RED
-                    distM <= 2_000 -> PostureColor.RED
-                    isCircling || headingToward || distM <= 6_000 -> PostureColor.ORANGE
-                    else -> PostureColor.YELLOW
-                }
-                val classConf = if (isUnattributedCircling) {
-                    (hit?.confidence ?: 55).coerceIn(45, 68)
-                } else {
-                    hit?.confidence?.coerceIn(80, 99) ?: 92
-                }
-                val spatConf = if (isUnattributedCircling) 68 else 98
-                val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
-                val identStr = listOfNotNull(
-                    p.registration?.takeIf { it.isNotBlank() },
-                    p.callsign?.takeIf { it.isNotBlank() },
-                    "ICAO ${p.hex.uppercase()}"
-                ).distinct().joinToString(" · ")
-                val seenAtMs = max(PoliceAircraft.localAt, PoliceAircraft.latestAt).takeIf { it > 0L } ?: nowMs
-                org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(p.hex, p.lat, p.lon, seenAtMs)
-                val isHeli = KokohoSignatures.isHelicopterAirframe(
-                    p.type,
-                    p.category,
-                    "${hit?.label.orEmpty()} ${p.owner.orEmpty()} ${p.registration.orEmpty()}",
-                    agency = if (isUnattributedCircling) null else agency,
-                    hex = p.hex
-                )
-                val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()
-                val airSummary = when {
-                    isUnattributedCircling -> "Unattributed Circling Aircraft — Verify ($identStr)"
-                    isCircling -> "Spy Plane / Orbiting Overhead ($identStr)"
-                    else -> "ADS-B Aircraft ($identStr)"
-                }
+    private fun evaluateAdsbAircraft(
+        context: Context,
+        nowMs: Long,
+        userLoc: android.location.Location?,
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        localRawObservations: MutableList<RawSensorReportCandidate>
+    ) {
+        val enabledAirAgencies = KokohoSignatures.getEnabledAircraftAgencies(context)
+        for (seen in PoliceAircraft.all(nowMs)) {
+            val p = seen.plane
+            val hit = seen.hit
+            if (PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)) continue
+            val isCircling = hit?.label == PoliceAircraft.CIRCLING ||
+                hit?.evidence?.contains("circling", ignoreCase = true) == true
+            val agency = KokohoSignatures.classifyAircraftAgency(
+                owner = p.owner,
+                registration = p.registration,
+                callsign = p.callsign,
+                hitLabel = hit?.label,
+                type = p.type,
+                hex = p.hex,
+                speedKt = p.speedKt,
+                isCircling = isCircling
+            ) ?: continue
+            val allowed = isCircling ||
+                (if (agency.isDhs) enabledAirAgencies.any { it.isDhs } else agency in enabledAirAgencies)
+            if (!allowed) continue
 
-                val threat = EvaluatedThreat(
-                    uuid = uuid,
-                    trackUuid = uuid,
-                    agency = agency,
-                    label = agency.friendlyLabel,
-                    posture = posture,
-                    overallConfidence = combinedConf,
-                    classificationConfidence = classConf,
-                    spatialConfidence = spatConf,
-                    estimatedDistanceM = distM,
-                    uncertaintyRadiusM = 25,
-                    bearingDeg = null,
-                    closingVelocityMps = velMps,
-                    recurrenceSummary = airSummary,
-                    evidenceSources = listOf(
-                        EvidenceBadge(
-                            kind = "ADSB_AIR",
-                            facetKey = facetKey,
-                            detail = "${hit?.label ?: agency.friendlyLabel} ($identStr$altSuffix)",
-                            weight = if (isUnattributedCircling) 0.55 else 0.95,
-                            lastSeenMs = seenAtMs
-                        )
-                    ),
-                    updatedAtMs = seenAtMs,
-                    lat = p.lat,
-                    lon = p.lon,
-                    isApproximatedPosition = true,
-                    isPinpointed = true,
-                    isAircraft = true,
-                    isHelicopter = isHeli,
-                    aircraftTrackDeg = p.trackDeg,
-                    aircraftHex = p.hex.uppercase(),
-                    isCircling = isCircling,
-                    altitudeFtAgl = p.altitudeFt,
-                    hardwareIdentifier = identStr
-                )
-                upsertAndFuseThreat(evaluated, threat)
-                localRawObservations += RawSensorReportCandidate(
-                    facetKey = facetKey,
-                    rawLat = p.lat,
-                    rawLon = p.lon,
-                    signalDb = 42.0,
-                    modality = "ADSB",
-                    additionalFacets = emptyList(),
-                    agency = agency,
-                    label = agency.friendlyLabel,
-                    propClass = "AIRBORNE",
-                    uncertaintyRadiusM = 25.0,
-                    isDerived = true,
-                    localSightings = 1,
-                    ssidHint = p.callsign ?: p.registration,
-                    isFlagged = !isUnattributedCircling,
-                    obsTimestampMs = seenAtMs
-                )
+            val facetKey = "adsb:icao:${p.hex.uppercase()}"
+            val uuid = deterministicUuidV5(facetKey)
+            val distM = if (userLoc != null) {
+                haversineMeters(userLoc.latitude, userLoc.longitude, p.lat, p.lon).roundToInt()
+            } else {
+                9_999
             }
-        }
+            val velMps = p.speedKt?.let { it * 0.514444 }
+            val isUnattributedCircling = isCircling && hit?.label == PoliceAircraft.CIRCLING
+            val posture = when {
+                userLoc == null -> PostureColor.YELLOW
+                isUnattributedCircling && distM <= AIRCRAFT_NEARBY_DIRECT_MAX_M -> PostureColor.RED
+                isUnattributedCircling && distM <= 3_219 -> PostureColor.ORANGE
+                isUnattributedCircling -> PostureColor.YELLOW
+                isCircling && distM <= AIRCRAFT_NEARBY_DIRECT_MAX_M -> PostureColor.RED
+                distM <= 805 -> PostureColor.RED
+                (isCircling && distM <= 3_219) || distM <= AIRCRAFT_NEARBY_DIRECT_MAX_M -> PostureColor.ORANGE
+                else -> PostureColor.YELLOW
+            }
+            val classConf = if (isUnattributedCircling) {
+                (hit?.confidence ?: 55).coerceIn(45, 68)
+            } else {
+                hit?.confidence?.coerceIn(80, 99) ?: 92
+            }
+            val spatConf = if (isUnattributedCircling) 68 else 98
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+            val identStr = listOfNotNull(
+                p.registration?.takeIf { it.isNotBlank() },
+                p.callsign?.takeIf { it.isNotBlank() },
+                "ICAO ${p.hex.uppercase()}"
+            ).distinct().joinToString(" · ")
+            val seenAtMs = max(PoliceAircraft.localAt, PoliceAircraft.latestAt).takeIf { it > 0L } ?: nowMs
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(p.hex, p.lat, p.lon, seenAtMs)
+            val isHeli = KokohoSignatures.isHelicopterAirframe(
+                p.type,
+                p.category,
+                "${hit?.label.orEmpty()} ${p.owner.orEmpty()} ${p.registration.orEmpty()}",
+                agency = if (isUnattributedCircling) null else agency,
+                hex = p.hex
+            )
+            val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()
+            val airSummary = when {
+                isUnattributedCircling -> "Unattributed Circling Aircraft — Verify ($identStr)"
+                isCircling -> "Spy Plane / Orbiting Overhead ($identStr)"
+                else -> "ADS-B Aircraft ($identStr)"
+            }
 
-        // 6a. Persist fresh LOCAL located entities into the durable all-time SQLite ledger and hydrate rolling-window entities
+            val threat = EvaluatedThreat(
+                uuid = uuid,
+                trackUuid = uuid,
+                agency = agency,
+                label = agency.friendlyLabel,
+                posture = posture,
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = distM,
+                uncertaintyRadiusM = 25,
+                bearingDeg = null,
+                closingVelocityMps = velMps,
+                recurrenceSummary = airSummary,
+                evidenceSources = listOf(
+                    EvidenceBadge(
+                        kind = "ADSB_AIR",
+                        facetKey = facetKey,
+                        detail = "${hit?.label ?: agency.friendlyLabel} ($identStr$altSuffix)",
+                        weight = if (isUnattributedCircling) 0.55 else 0.95,
+                        lastSeenMs = seenAtMs
+                    )
+                ),
+                updatedAtMs = seenAtMs,
+                lat = p.lat,
+                lon = p.lon,
+                isApproximatedPosition = true,
+                isPinpointed = true,
+                isAircraft = true,
+                isHelicopter = isHeli,
+                aircraftTrackDeg = p.trackDeg,
+                aircraftHex = p.hex.uppercase(),
+                isCircling = isCircling,
+                altitudeFtAgl = p.altitudeFt,
+                hardwareIdentifier = identStr
+            )
+            upsertAndFuseThreat(evaluated, threat)
+            localRawObservations += RawSensorReportCandidate(
+                facetKey = facetKey,
+                rawLat = p.lat,
+                rawLon = p.lon,
+                signalDb = 42.0,
+                modality = "ADSB",
+                additionalFacets = emptyList(),
+                agency = agency,
+                label = agency.friendlyLabel,
+                propClass = "AIRBORNE",
+                uncertaintyRadiusM = 25.0,
+                isDerived = true,
+                localSightings = 1,
+                ssidHint = p.callsign ?: p.registration,
+                isFlagged = !isUnattributedCircling,
+                obsTimestampMs = seenAtMs
+            )
+        }
+    }
+
+    private fun finalizeSnapshotAndPublish(
+        context: Context,
+        nowMs: Long,
+        mapVisibilityMs: Long,
+        monitorWindowMs: Long,
+        activeMapWindow: KokohoSignatures.MapTimeWindow,
+        alarmEnabled: Set<KokohoAgency>,
+        mapVisible: Set<KokohoAgency>,
+        enabled: Set<KokohoAgency>,
+        enabledScopeText: String,
+        groundedHexes: Set<String>,
+        userLoc: android.location.Location?,
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        localRawObservations: List<RawSensorReportCandidate>
+    ): PostureSnapshot {
         for (fresh in evaluated.values) {
             if (!fresh.isAircraft && fresh.lat != null && fresh.lon != null && localThreatCache.containsKey(fresh.uuid)) {
                 KokohoEntityLedger.upsert(context, fresh, nowMs)
@@ -2661,7 +2814,6 @@ object KokohoPostureEngine {
                 localThreatCache.putIfAbsent(persisted.uuid, persisted)
             }
         }
-        // Hydrate dropped-point Witness Reports within the rolling window
         for (wr in KokohoSignatures.getAllWitnessReports(context)) {
             if (wr.reportKind != "LE" || wr.lat == null || wr.lon == null) continue
             if (nowMs - wr.updatedAtMs > mapVisibilityMs) continue
@@ -2706,7 +2858,6 @@ object KokohoPostureEngine {
             KokohoEntityLedger.upsert(context, pointEntity, nowMs)
         }
 
-        // 6b. Include retained local detections within the rolling window (recomputing true distance from current userLoc!)
         localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, mapVisibilityMs, groundedHexes) }
         for ((uuid, cached) in localThreatCache) {
             if (uuid !in evaluated && !shouldEvictLocalCache(cached, nowMs, mapVisibilityMs, groundedHexes)) {
@@ -2720,17 +2871,19 @@ object KokohoPostureEngine {
                     else -> cached.agency in enabled
                 }
                 if (allowed) {
-                    val refreshed = if (!cached.isAircraft && userLoc != null && cached.lat != null && cached.lon != null) {
-                        val liveDistM = max(
-                            haversineMeters(userLoc.latitude, userLoc.longitude, cached.lat, cached.lon).roundToInt(),
-                            cached.uncertaintyRadiusM.coerceAtLeast(15)
-                        )
-                        val refreshedPosture = if (nowMs - cached.updatedAtMs > 20_000L && liveDistM > 120) {
-                            PostureColor.YELLOW
+                    val refreshed = if (userLoc != null && cached.lat != null && cached.lon != null) {
+                        val rawLiveDistM = haversineMeters(userLoc.latitude, userLoc.longitude, cached.lat, cached.lon).roundToInt()
+                        if (cached.isAircraft) {
+                            cached.copy(estimatedDistanceM = rawLiveDistM)
                         } else {
-                            cached.posture
+                            val liveDistM = max(rawLiveDistM, cached.uncertaintyRadiusM.coerceAtLeast(15))
+                            val refreshedPosture = if (nowMs - cached.updatedAtMs > 20_000L && liveDistM > 120) {
+                                PostureColor.YELLOW
+                            } else {
+                                cached.posture
+                            }
+                            cached.copy(estimatedDistanceM = liveDistM, posture = refreshedPosture)
                         }
-                        cached.copy(estimatedDistanceM = liveDistM, posture = refreshedPosture)
                     } else {
                         cached
                     }
@@ -2742,13 +2895,12 @@ object KokohoPostureEngine {
                         ?.substringBefore(':')
                         ?.toLongOrNull()
                     if (cachedRfChan != null) {
-                        deduplicateRemoteRfEchoes(uuid, cachedRfChan, refreshed.lat, refreshed.lon, refreshed.updatedAtMs)
+                        deduplicateRemoteRfEchoes(evaluated, uuid, cachedRfChan, refreshed.lat, refreshed.lon, refreshed.updatedAtMs)
                     }
                 }
             }
         }
 
-        // Apply Witness Reports + capabilities + dynamic epistemic titles (`Suspected` / `Likely` / `Confirmed`), excluding locally whitelisted entities
         val allRetained = evaluated.values
             .filter { !KokohoSignatures.isEntityWhitelisted(context, it.uuid) }
             .map { t ->
@@ -2771,7 +2923,6 @@ object KokohoPostureEngine {
                 updated
             }
 
-        // Map threats: filtered by Eye (`mapVisible`) and projected onto the active rolling window (`30m` | `3h` | `24h`)
         val mapThreats = allRetained
             .filter { t ->
                 when {
@@ -2796,11 +2947,22 @@ object KokohoPostureEngine {
                     .thenByDescending { it.updatedAtMs }
             )
 
-        // Monitor threats: strictly filtered by Alarm (`alarmEnabled`) within the 3-minute Monitor window,
-        // sorted strictly by agency priorityRank (ICE, DHS Air, CBP, HSI, Other Fed, Sheriff/TPD/Drone)
+        // Monitor threats: strictly filtered by Alarm (`alarmEnabled`) within the 3-minute Monitor window.
+        // Aircraft only count as Monitor ("nearby") when <= 1 mi (1,609 m) or circling <= 3 mi (4,828 m).
         val monitorThreats = allRetained
             .filter { t ->
-                (nowMs - t.updatedAtMs <= monitorWindowMs) && (t.isAircraft || t.agency in alarmEnabled)
+                if (nowMs - t.updatedAtMs > monitorWindowMs) return@filter false
+                if (t.isAircraft) {
+                    val airAlarmAllowed = t.isCircling ||
+                        (if (t.agency.isDhs) alarmEnabled.any { it.isDhs } else t.agency in alarmEnabled)
+                    airAlarmAllowed && isAircraftNearbyForMonitor(
+                        distM = t.estimatedDistanceM,
+                        isCircling = t.isCircling,
+                        hasUserLoc = userLoc != null
+                    )
+                } else {
+                    t.agency in alarmEnabled
+                }
             }
             .sortedWith(
                 compareBy<EvaluatedThreat> { it.agency.priorityRank }
@@ -2820,8 +2982,6 @@ object KokohoPostureEngine {
             )
         }
 
-        // Real-time upload of FLAGGED local sensor observations to volatile RoomEngine for quick inference & recomputed SSE broadcast.
-        // Passive detections (isFlagged == false) are never posted individually; they are bulk-posted via FieldTelemetryLogger (/v1/telemetry/batch).
         if (ScanForegroundService.isRunning && KokohoSignatures.isSharingActive(context) && localRawObservations.isNotEmpty()) {
             val bestByFacet = linkedMapOf<String, RawSensorReportCandidate>()
             for (cand in localRawObservations) {
@@ -2833,7 +2993,6 @@ object KokohoPostureEngine {
             }
             for (cand in bestByFacet.values) {
                 val prev = lastRawReportByFacet[cand.facetKey]
-                // Never re-upload a silent cached facet along the user's moving GPS track: require a genuinely newer observation timestamp!
                 if (prev != null && cand.obsTimestampMs > 0L && cand.obsTimestampMs <= prev.lastObsTsMs) continue
                 val elapsed = if (prev != null) nowMs - prev.atMs else Long.MAX_VALUE
                 val movedEnough = prev != null && haversineMeters(prev.lat, prev.lon, cand.rawLat, cand.rawLon) >= 25.0
@@ -2880,7 +3039,6 @@ object KokohoPostureEngine {
             ).also { latestSnapshot = it }
         }
 
-        // Overall screen posture color reflects the highest severity among active 3-minute monitor threats
         val highestPosture = monitorThreats.maxByOrNull { it.posture.ordinal }?.posture ?: primary.posture
         lastPostureColor = highestPosture
         val distFormatted = formatUserDistance(context, primary.effectiveProximityM)

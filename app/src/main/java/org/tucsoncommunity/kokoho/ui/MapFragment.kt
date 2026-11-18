@@ -317,10 +317,17 @@ class MapFragment : Fragment() {
         setupMapTimeWindowPills()
         setupSelectionFooter()
         hideLegacyMapChrome()
-        binding.bottomPanel.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSideButtonsSoon() }
+        binding.bottomPanel.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || bt != ob) fitSideButtonsSoon()
+        }
         // The scale and the map credit sit just under the status banner, or at the very top when there is none.
-        binding.statusBox.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeScaleBar(); if (embedded) fitSideButtonsSoon() }
-        binding.root.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob -> if (r - l != or - ol || bt - t != ob - ot) fitSideButtonsSoon() }
+        binding.statusBox.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || bt != ob) {
+                placeScaleBar()
+                if (embedded) fitSideButtonsSoon()
+            }
+        }
+        binding.root.addOnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob -> if (r - l != or - ol || bt - t != ob - ot) { placeScaleBar(); fitSideButtonsSoon() } }
 
         createEngine(savedInstanceState, null)
         if (tripId == null) {
@@ -1111,6 +1118,18 @@ class MapFragment : Fragment() {
 
     // ---- Scale and credit ----------------------------------------------------------------------------
 
+    private fun applyOsmCreditMaxWidth(b: org.tucsoncommunity.kokoho.databinding.ActivityMapBinding, targetMaxW: Int) {
+        if (b.osmCredit.maxWidth == targetMaxW) return
+        if (b.root.isInLayout || b.osmCredit.isInLayout) {
+            b.osmCredit.post {
+                val cur = _binding ?: return@post
+                if (cur.osmCredit.maxWidth != targetMaxW) cur.osmCredit.maxWidth = targetMaxW
+            }
+        } else {
+            b.osmCredit.maxWidth = targetMaxW
+        }
+    }
+
     private fun placeScaleBar() {
         val b = _binding ?: return
         val gap = (8 * resources.displayMetrics.density).toInt()
@@ -1126,7 +1145,9 @@ class MapFragment : Fragment() {
             // Mapbox: its logo and info button at the very top, the credit line beside them, the scale under them.
             val rowH = (brandH * d).toInt()
             engine?.placeBranding(y, false)
-            if (b.root.width > 0) b.osmCredit.maxWidth = (b.root.width - 84 * d - brandW * d).toInt().coerceAtLeast((100 * d).toInt())
+            if (b.root.width > 0) {
+                applyOsmCreditMaxWidth(b, (b.root.width - 84 * d - brandW * d).toInt().coerceAtLeast((100 * d).toInt()))
+            }
             b.osmCredit.translationX = brandW * d - b.osmCredit.left
             b.osmCredit.translationY = (y + (rowH - b.osmCredit.height) / 2).toFloat()
             b.scaleBar.translationY = (y + maxOf(rowH, b.osmCredit.height) + gap / 2).toFloat()
@@ -1134,7 +1155,9 @@ class MapFragment : Fragment() {
             return
         }
         b.scaleBar.translationY = y.toFloat()
-        if (b.root.width > 0) b.osmCredit.maxWidth = (b.root.width - 84 * d).toInt().coerceAtLeast((140 * d).toInt())
+        if (b.root.width > 0) {
+            applyOsmCreditMaxWidth(b, (b.root.width - 84 * d).toInt().coerceAtLeast((140 * d).toInt()))
+        }
         val scaleH = if (b.scaleBar.visibility == View.GONE) 0 else b.scaleBar.height
         b.osmCredit.translationY = (y + scaleH).toFloat()
         b.osmCredit.translationX = if (atEnd && b.osmCredit.width > 0) (b.root.width - b.osmCredit.width - b.osmCredit.left - gap).toFloat() else 0f
@@ -1185,7 +1208,9 @@ class MapFragment : Fragment() {
         binding.mapSettingsButton.visibility = View.GONE
         binding.fullscreenButton.visibility = View.GONE
         binding.statusText.textSize = 12f
-        val relayout = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitSideButtonsSoon() }
+        val relayout = View.OnLayoutChangeListener { _, l, t, r, bt, ol, ot, or, ob ->
+            if (l != ol || t != ot || r != or || bt != ob) fitSideButtonsSoon()
+        }
         binding.root.addOnLayoutChangeListener(relayout)
         binding.navCard.addOnLayoutChangeListener(relayout)
         binding.navBar.addOnLayoutChangeListener(relayout)
