@@ -23,7 +23,6 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -65,7 +64,7 @@ object WebAuthQrDialog {
             val s = uri.getQueryParameter("s")?.trim().orEmpty()
             val u = uri.getQueryParameter("u")?.trim()
             if (c.isNotEmpty() && s.isNotEmpty()) {
-                promptConfirmWebGrant(activity, c, s, u)
+                promptConfirmWebGrant(activity, c, s, u, fromDeepLink = true)
                 return true
             }
         }
@@ -76,14 +75,22 @@ object WebAuthQrDialog {
         val text = raw.trim()
         if (text.isEmpty()) return false
         val uri = runCatching { Uri.parse(text) }.getOrNull()
-        if (uri != null && handleDeepLinkUri(activity, uri)) {
-            return true
+        if (uri != null && uri.scheme.equals("kokoho", ignoreCase = true) &&
+            uri.host.equals("web-auth", ignoreCase = true)
+        ) {
+            val c = uri.getQueryParameter("c")?.trim().orEmpty()
+            val s = uri.getQueryParameter("s")?.trim().orEmpty()
+            val u = uri.getQueryParameter("u")?.trim()
+            if (c.isNotEmpty() && s.isNotEmpty()) {
+                promptConfirmWebGrant(activity, c, s, u, fromDeepLink = false)
+                return true
+            }
         }
         if (text.contains("/s/")) {
             val slug = text.substringAfter("/s/").substringBefore('?').substringBefore('/').trim()
             if (slug.isNotEmpty()) {
                 DeviceTrustManager.claimSeatBySlug(activity, slug) { ok, msg ->
-                    Toast.makeText(activity, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                    showAuthResultModal(activity, ok = ok, message = msg, isSeatClaim = true, fromDeepLink = false)
                 }
                 return true
             }
@@ -91,16 +98,80 @@ object WebAuthQrDialog {
         return false
     }
 
+    private fun resolveAppLabel(activity: AppCompatActivity): String =
+        runCatching {
+            activity.applicationInfo.loadLabel(activity.packageManager).toString().trim()
+        }.getOrDefault("").ifEmpty { "Kokoho" }
+
+    private fun showAuthResultModal(
+        activity: AppCompatActivity,
+        ok: Boolean,
+        message: String,
+        isSeatClaim: Boolean = false,
+        fromDeepLink: Boolean = false
+    ) {
+        if (activity.isFinishing || activity.isDestroyed) return
+        val appLabel = resolveAppLabel(activity)
+        val title = when {
+            ok && isSeatClaim -> "Device Enrolled"
+            ok -> "Browser Session Authorized"
+            else -> "Authorization Not Completed"
+        }
+        val subtitle = if (ok) {
+            "Confirmed in $appLabel"
+        } else {
+            "Handled by $appLabel"
+        }
+        val bodyCopy = buildString {
+            append(message.trim())
+            if (ok && fromDeepLink && !message.contains("Switch back to your browser", ignoreCase = true)) {
+                append("\n\nSwitch back to your browser — your Hub session is now unlocked.")
+            }
+            if (!ok) {
+                append("\n\nHandled by app: ")
+                append(appLabel)
+            }
+        }
+        KokohoJourneyUi.showModal(
+            activity = activity,
+            title = title,
+            subtitle = subtitle
+        ) { body, dismiss ->
+            val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
+            val msgTv = TextView(activity).apply {
+                text = bodyCopy
+                textSize = 14.5f
+                setTextColor(KokohoJourneyUi.INK_PRIMARY)
+                setLineSpacing(0f, 1.28f)
+                setPadding(0, dp(2), 0, dp(14))
+            }
+            body.addView(msgTv)
+
+            val btnRow = LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+            }
+            val doneBtn = KokohoJourneyUi.primaryActionButton(activity, if (ok) "Done" else "OK") {
+                dismiss()
+            }
+            btnRow.addView(doneBtn)
+            body.addView(btnRow)
+        }
+    }
+
     private fun promptConfirmWebGrant(
         activity: AppCompatActivity,
         challengeId: String,
         secret: String,
-        slugHint: String?
+        slugHint: String?,
+        fromDeepLink: Boolean
     ) {
+        if (activity.isFinishing || activity.isDestroyed) return
+        val appLabel = resolveAppLabel(activity)
         KokohoJourneyUi.showModal(
             activity = activity,
             title = "Authorize Web Session?",
-            subtitle = "Grants a single-session Hub token that expires when the browser closes."
+            subtitle = "$appLabel · Grants a single-session Hub token that expires when the browser closes."
         ) { body, dismiss ->
             val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
             val btnRow = LinearLayout(activity).apply {
@@ -119,7 +190,13 @@ object WebAuthQrDialog {
             val authBtn = KokohoJourneyUi.primaryActionButton(activity, "Authorize Session") {
                 dismiss()
                 DeviceTrustManager.grantWebSession(activity, challengeId, secret, slugHint) { ok, msg ->
-                    Toast.makeText(activity, msg, if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
+                    showAuthResultModal(
+                        activity = activity,
+                        ok = ok,
+                        message = msg,
+                        isSeatClaim = false,
+                        fromDeepLink = fromDeepLink
+                    )
                 }
             }
             btnRow.addView(cancelBtn)
@@ -265,7 +342,13 @@ object WebAuthQrDialog {
                         activity.runOnUiThread {
                             dialog.dismiss()
                             if (!handleRawQrPayload(activity, text)) {
-                                Toast.makeText(activity, "Unrecognized QR code", Toast.LENGTH_SHORT).show()
+                                showAuthResultModal(
+                                    activity = activity,
+                                    ok = false,
+                                    message = "That QR code is not a Kokoho Hub invitation or web session code.",
+                                    isSeatClaim = false,
+                                    fromDeepLink = false
+                                )
                             }
                         }
                     }

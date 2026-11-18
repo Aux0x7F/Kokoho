@@ -85,4 +85,46 @@ class DeviceTrustAndSchemaTest {
         assertEquals("Tahoe", rec.vehicleModel)
         assertEquals("Observed staging near west lot", rec.notes)
     }
+
+    @Test
+    fun grantErrorAndUnenrolledDiagnosticsAreCompleteAndNonTechnical() {
+        val pendingMsg = DeviceTrustManager.formatUnenrolledGrantMessage(
+            status = "PENDING_REBIND",
+            enr = DeviceTrustManager.AuthResponseDto(ok = false, status = "PENDING_REBIND"),
+            hasSeatRef = true
+        )
+        assertTrue(pendingMsg.contains("Kokoho and Kokoho Debug"))
+        assertTrue(pendingMsg.contains("Hub → Permissions"))
+
+        val offlineMsg = DeviceTrustManager.formatUnenrolledGrantMessage(
+            status = "UNENROLLED",
+            enr = null,
+            hasSeatRef = true
+        )
+        assertTrue(offlineMsg.contains("VPN"))
+
+        val noSeatMsg = DeviceTrustManager.formatUnenrolledGrantMessage(
+            status = "UNENROLLED",
+            enr = null,
+            hasSeatRef = false
+        )
+        assertTrue(noSeatMsg.contains("Field Guide"))
+
+        val revokedMsg = DeviceTrustManager.formatUnenrolledGrantMessage(
+            status = "REVOKED",
+            enr = DeviceTrustManager.AuthResponseDto(ok = false, status = "REVOKED"),
+            hasSeatRef = true
+        )
+        assertEquals("This invitation seat has been revoked.", revokedMsg)
+
+        val expiredMsg = DeviceTrustManager.formatGrantErrorMessage(400, "QR challenge expired or not found")
+        assertEquals(
+            "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again.",
+            expiredMsg
+        )
+
+        val jsonStripped = DeviceTrustManager.formatGrantErrorMessage(403, """{"message":"Custom seat error"}""")
+        assertEquals("Custom seat error", jsonStripped)
+        assertTrue(!jsonStripped.contains("{") && !jsonStripped.contains("}"))
+    }
 }

@@ -31,7 +31,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Single-instance hardware trust & web-session grant manager (`v1.3.9`).
+ * Single-instance hardware trust & web-session grant manager (`v1.3.10`).
  *
  *  - Extracts per-seat voucher metadata (`0x54434B56`) from the APK Signing Block on first launch
  *    and persists it inside `noBackupFilesDir` so subsequent universal OTA updates retain seat trust.
@@ -213,23 +213,39 @@ object DeviceTrustManager {
     }
 
     private fun getOrCreateSigningKeys(): Pair<PrivateKey, String>? = synchronized(keyLock) {
-        // 1. Hardware-backed AndroidKeyStore EC P-256
-        runCatching {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            if (!ks.containsAlias(EC_KEY_ALIAS)) {
-                val generated = generateEcKeyInKeystore(useStrongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
-                if (!generated) {
-                    generateEcKeyInKeystore(useStrongBox = false)
+        val isRobolectric = Build.FINGERPRINT == null || Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
+        val hasAndroidKeyStore = java.security.Security.getProvider(KEYSTORE_PROVIDER) != null
+
+        // 1. Real Android hardware: strictly use AndroidKeyStore (never fall back to an ephemeral RAM key!)
+        if (!isRobolectric && hasAndroidKeyStore) {
+            return runCatching {
+                val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                if (!ks.containsAlias(EC_KEY_ALIAS)) {
+                    val generated = generateEcKeyInKeystore(useStrongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+                    if (!generated) {
+                        generateEcKeyInKeystore(useStrongBox = false)
+                    }
                 }
-            }
-            val entry = ks.getEntry(EC_KEY_ALIAS, null) as? KeyStore.PrivateKeyEntry
-            if (entry != null) {
-                val spkiB64 = Base64.encodeToString(entry.certificate.publicKey.encoded, Base64.NO_WRAP)
-                return entry.privateKey to spkiB64
-            }
+                val entry = runCatching { ks.getEntry(EC_KEY_ALIAS, null) as? KeyStore.PrivateKeyEntry }.getOrNull()
+                if (entry != null) {
+                    val spkiB64 = Base64.encodeToString(entry.certificate.publicKey.encoded, Base64.NO_WRAP)
+                    return@runCatching entry.privateKey to spkiB64
+                }
+                val privKey = runCatching { ks.getKey(EC_KEY_ALIAS, null) as? PrivateKey }.getOrNull()
+                val pubKey = runCatching { ks.getCertificate(EC_KEY_ALIAS)?.publicKey }.getOrNull()
+                if (privKey != null && pubKey != null) {
+                    val spkiB64 = Base64.encodeToString(pubKey.encoded, Base64.NO_WRAP)
+                    return@runCatching privKey to spkiB64
+                }
+                null
+            }.getOrNull()
         }
 
-        // 2. Standard JCE fallback (for Robolectric / non-Keystore environments)
+        if (hasAndroidKeyStore) {
+            return null
+        }
+
+        // 2. Standard JCE fallback ONLY when AndroidKeyStore provider does not exist (JVM/Robolectric unit tests)
         val kp = fallbackJvmKeyPair ?: runCatching {
             KeyPairGenerator.getInstance("EC").apply {
                 initialize(ECGenParameterSpec("secp256r1"))
@@ -359,6 +375,9 @@ object DeviceTrustManager {
         scope.launch {
             val resp = if (isEnrolled(app) && getDirectoryKeyBytes(app) != null && seat.seatId.isNotBlank()) {
                 checkDeviceStatusBlocking(app, seat) ?: enrollBlocking(app, seat)
+            } else if (seat.seatId.isNotBlank()) {
+                checkDeviceStatusBlocking(app, seat)?.takeIf { it.status.equals("ENROLLED", ignoreCase = true) }
+                    ?: enrollBlocking(app, seat)
             } else {
                 enrollBlocking(app, seat)
             }
@@ -376,22 +395,139 @@ object DeviceTrustManager {
         val app = context.applicationContext ?: context
         val cleanSlug = slug.trim().substringAfterLast('/').trim()
         if (cleanSlug.isEmpty()) {
-            onResult(false, "Invalid invitation QR code")
+            onResult(false, "Invalid invitation QR code.")
             return
         }
         scope.launch {
-            val tempIdentity = SeatIdentity(seatId = "", slug = cleanSlug, voucher = "")
+            val existing = loadOrExtractSeatIdentity(app)
+            val tempIdentity = SeatIdentity(
+                seatId = existing?.seatId.orEmpty(),
+                slug = cleanSlug,
+                voucher = existing?.voucher.orEmpty()
+            )
             val resp = enrollBlocking(app, tempIdentity)
             withContext(Dispatchers.Main) {
                 when {
-                    resp == null -> onResult(false, "Could not reach Kokoho Hub — check VPN/network")
-                    resp.status == "ENROLLED" -> onResult(true, "Device enrolled (${resp.role.lowercase().replaceFirstChar { it.uppercase() }})")
-                    resp.status == "PENDING_REBIND" -> onResult(false, resp.message ?: "Pending Owner rebind approval")
-                    resp.status == "REVOKED" -> onResult(false, "Invitation has been revoked")
-                    else -> onResult(false, resp.message ?: "Enrollment declined")
+                    resp == null -> onResult(
+                        false,
+                        "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
+                    )
+                    resp.status == "ENROLLED" -> onResult(
+                        true,
+                        "This phone is enrolled (${resp.role.lowercase().replaceFirstChar { it.uppercase() }})."
+                    )
+                    resp.status == "PENDING_REBIND" -> onResult(
+                        false,
+                        formatUnenrolledGrantMessage("PENDING_REBIND", resp, hasSeatRef = true)
+                    )
+                    resp.status == "REVOKED" -> onResult(
+                        false,
+                        "This invitation seat has been revoked."
+                    )
+                    else -> onResult(false, resp.message ?: "Enrollment could not be completed.")
                 }
             }
         }
+    }
+
+    fun formatUnenrolledGrantMessage(
+        status: String?,
+        enr: AuthResponseDto?,
+        hasSeatRef: Boolean
+    ): String {
+        val norm = status?.trim()?.uppercase().orEmpty()
+        return when {
+            norm == "PENDING_REBIND" ->
+                "This app build's hardware key is pending Owner approval on this seat (for example, if both Kokoho and Kokoho Debug are installed, or if switching phones). Approve it in Hub → Permissions, or open the originally enrolled Kokoho app."
+            norm == "REVOKED" ->
+                "This invitation seat has been revoked."
+            enr == null && hasSeatRef ->
+                "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
+            else ->
+                "This app is not yet enrolled on a Hub seat. Install your seat APK from the Field Guide first."
+        }
+    }
+
+    fun formatGrantErrorMessage(httpCode: Int, rawError: String): String {
+        val cleaned = rawError
+            .trim()
+            .let { raw ->
+                if (raw.startsWith("{") && raw.endsWith("}")) {
+                    runCatching {
+                        val map = gson.fromJson(raw, Map::class.java)
+                        (map["message"] ?: map["error"] ?: "").toString().trim()
+                    }.getOrDefault("")
+                        .ifEmpty { raw.trim('{', '}', ' ', '"', '\n', '\r') }
+                } else {
+                    raw.trim()
+                }
+            }
+        val low = cleaned.lowercase()
+        return when {
+            httpCode == 0 ->
+                "Could not reach Kokoho Hub. Make sure your VPN and internet connection are active."
+            low.contains("expired") || low.contains("not found") && httpCode == 400 ->
+                "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again."
+            low.contains("mismatch") ->
+                "That authorization prompt belongs to a different invitation link than the seat enrolled in this app."
+            low.contains("clock skew") ->
+                "Your phone's clock is out of sync with the server. Enable automatic date & time in Android Settings and try again."
+            httpCode == 401 || low.contains("signature") ->
+                "This app build's hardware key does not match the key bound to this seat. Approve Trust Both or Approve Rebind in Hub → Permissions, or open the originally enrolled Kokoho app."
+            low.contains("not active") || low.contains("revoked") ->
+                "This invitation seat is not currently active on the Hub."
+            cleaned.isNotBlank() -> cleaned
+            else ->
+                "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again."
+        }
+    }
+
+    private fun postGrantWebOnce(
+        app: Context,
+        seatId: String,
+        challengeId: String,
+        secret: String,
+        privateKey: PrivateKey
+    ): Triple<Boolean, Int, String> {
+        val ts = System.currentTimeMillis()
+        val msg = "grant|$seatId|${challengeId.trim()}|${secret.trim()}|$ts"
+        val sig = signMessageBase64(privateKey, msg)
+            ?: return Triple(false, -1, "Hardware key signature failed on this device.")
+        val payload = mapOf(
+            "seat_id" to seatId,
+            "challenge_id" to challengeId.trim(),
+            "secret" to secret.trim(),
+            "timestamp_ms" to ts,
+            "signature_b64" to sig
+        )
+        val base = KokohoHubClient.hubUrl(app)
+        return runCatching {
+            val conn = (URL("$base/v1/auth/grant-web").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                readTimeout = 8_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+            try {
+                conn.outputStream.use { it.write(gson.toJson(payload).toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                if (code in 200..299) {
+                    Triple(
+                        true,
+                        code,
+                        "Single-session browser access is now unlocked. Switch back to your browser to use Kokoho Hub."
+                    )
+                } else {
+                    val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }
+                        .getOrNull()
+                        .orEmpty()
+                    Triple(false, code, err)
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrElse { Triple(false, 0, "") }
     }
 
     fun grantWebSession(
@@ -404,66 +540,89 @@ object DeviceTrustManager {
         val app = context.applicationContext ?: context
         scope.launch {
             var seat = loadOrExtractSeatIdentity(app)
-            if ((seat == null || seat.seatId.isBlank()) && !slugHint.isNullOrBlank()) {
-                enrollBlocking(app, SeatIdentity(seatId = "", slug = slugHint.trim(), voucher = ""))
-                seat = loadOrExtractSeatIdentity(app)
-            } else if (seat != null && !isEnrolled(app)) {
-                enrollBlocking(app, seat)
-                seat = loadOrExtractSeatIdentity(app)
+            var enr: AuthResponseDto? = null
+
+            if (!isEnrolled(app)) {
+                if (seat != null && seat.seatId.isNotBlank()) {
+                    enr = checkDeviceStatusBlocking(app, seat)
+                    seat = loadOrExtractSeatIdentity(app)
+                }
+                if (!isEnrolled(app)) {
+                    enr = if (!slugHint.isNullOrBlank()) {
+                        enrollBlocking(
+                            app,
+                            SeatIdentity(
+                                seatId = seat?.seatId.orEmpty(),
+                                slug = slugHint.trim(),
+                                voucher = seat?.voucher.orEmpty()
+                            )
+                        )
+                    } else if (seat != null) {
+                        enrollBlocking(app, seat)
+                    } else {
+                        enr
+                    }
+                    seat = loadOrExtractSeatIdentity(app)
+                }
+                if (seat == null || seat.seatId.isBlank() || !isEnrolled(app)) {
+                    val hasSeatRef = (seat != null && (seat.seatId.isNotBlank() || seat.slug.isNotBlank())) ||
+                        !slugHint.isNullOrBlank()
+                    val status = enr?.status?.takeIf { it.isNotBlank() } ?: enrollmentStatus(app)
+                    val msg = formatUnenrolledGrantMessage(status, enr, hasSeatRef)
+                    withContext(Dispatchers.Main) { onResult(false, msg) }
+                    return@launch
+                }
             }
 
-            if (seat == null || seat.seatId.isBlank() || !isEnrolled(app)) {
-                withContext(Dispatchers.Main) {
-                    onResult(false, "This phone is not yet enrolled. Scan your onboarding QR or install your seat APK first.")
-                }
+            val currentSeat = seat ?: run {
+                val msg = formatUnenrolledGrantMessage(enrollmentStatus(app), enr, !slugHint.isNullOrBlank())
+                withContext(Dispatchers.Main) { onResult(false, msg) }
                 return@launch
             }
 
             val keys = getOrCreateSigningKeys()
             if (keys == null) {
-                withContext(Dispatchers.Main) { onResult(false, "Hardware keystore unavailable") }
-                return@launch
-            }
-            val ts = System.currentTimeMillis()
-            val msg = "grant|${seat.seatId}|${challengeId.trim()}|${secret.trim()}|$ts"
-            val sig = signMessageBase64(keys.first, msg)
-            if (sig == null) {
-                withContext(Dispatchers.Main) { onResult(false, "Signature failed") }
+                withContext(Dispatchers.Main) {
+                    onResult(false, "Android hardware keystore is unavailable on this device.")
+                }
                 return@launch
             }
 
-            val payload = mapOf(
-                "seat_id" to seat.seatId,
-                "challenge_id" to challengeId.trim(),
-                "secret" to secret.trim(),
-                "timestamp_ms" to ts,
-                "signature_b64" to sig
-            )
-            val base = KokohoHubClient.hubUrl(app)
-            val okPair = runCatching {
-                val conn = (URL("$base/v1/auth/grant-web").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 8_000
-                    readTimeout = 8_000
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            var attempt = postGrantWebOnce(app, currentSeat.seatId, challengeId, secret, keys.first)
+            if (!attempt.first && (attempt.second == 403 || attempt.second == 401) && !slugHint.isNullOrBlank()) {
+                var recResp = checkDeviceStatusBlocking(app, currentSeat)
+                if (!isEnrolled(app)) {
+                    recResp = enrollBlocking(
+                        app,
+                        SeatIdentity(
+                            seatId = currentSeat.seatId,
+                            slug = slugHint.trim(),
+                            voucher = currentSeat.voucher
+                        )
+                    )
                 }
-                try {
-                    conn.outputStream.use { it.write(gson.toJson(payload).toByteArray(Charsets.UTF_8)) }
-                    val code = conn.responseCode
-                    if (code in 200..299) {
-                        true to "Single-session browser access authorized"
-                    } else {
-                        val err = runCatching { conn.errorStream?.bufferedReader()?.readText() }.getOrNull().orEmpty()
-                        false to (err.takeIf { it.isNotBlank() } ?: "QR challenge expired — try scanning again")
-                    }
-                } finally {
-                    conn.disconnect()
+                val refreshedSeat = loadOrExtractSeatIdentity(app)
+                if (refreshedSeat != null && refreshedSeat.seatId.isNotBlank() && isEnrolled(app)) {
+                    attempt = postGrantWebOnce(app, refreshedSeat.seatId, challengeId, secret, keys.first)
+                } else {
+                    val st = recResp?.status?.takeIf { it.isNotBlank() } ?: enrollmentStatus(app)
+                    val msg = formatUnenrolledGrantMessage(st, recResp, hasSeatRef = true)
+                    withContext(Dispatchers.Main) { onResult(false, msg) }
+                    return@launch
                 }
-            }.getOrElse { false to "Network error reaching Hub" }
+            }
+
+            val finalOk = attempt.first
+            val finalMsg = if (finalOk) {
+                attempt.third
+            } else if (attempt.second == -1) {
+                attempt.third
+            } else {
+                formatGrantErrorMessage(attempt.second, attempt.third)
+            }
 
             withContext(Dispatchers.Main) {
-                onResult(okPair.first, okPair.second)
+                onResult(finalOk, finalMsg)
             }
         }
     }

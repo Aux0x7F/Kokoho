@@ -329,13 +329,17 @@ class MainActivity : AppCompatActivity() {
                 requestPermissionsAndStart()
             }
         }
-        org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent?.data)
+        if (org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent?.data)) {
+            intent?.data = null
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent.data)) {
+            intent.data = null
+        }
         setIntent(intent)
-        org.tucsoncommunity.kokoho.ui.WebAuthQrDialog.handleDeepLinkUri(this, intent.data)
     }
 
     override fun onRequestPermissionsResult(
