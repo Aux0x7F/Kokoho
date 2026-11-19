@@ -161,11 +161,14 @@ class KokohoViews(
 
     private val tabRow: LinearLayout
     private val tabButtons = LinkedHashMap<Tab, TextView>()
-    val visibleTabs: List<Tab>
+    var visibleTabs: List<Tab> = emptyList()
+        private set
     fun tabButton(tab: Tab): TextView? = tabButtons[tab]
 
     private val monitorContainer: LinearLayout
-    val searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView?
+    var searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView? = null
+        private set
+    private var unregisterTrustListener: (() -> Unit)? = null
     private val bluetoothNoticePill: MaterialButton
     private val postureBadge: TextView
     val postureHeadline: TextView
@@ -179,10 +182,6 @@ class KokohoViews(
     init {
         KokohoSignatures.ensureLoaded(activity)
         KokohoSignatures.ensureSharingStartsOff(activity)
-        DeviceTrustManager.ensureEnrolledAsync(activity) {
-            searchView?.scheduleSearch()
-            onFilterChanged()
-        }
         syncSdrTargets()
 
         // Hide legacy top controls and filter chips so Kokoho has a clean, unified layout
@@ -320,36 +319,11 @@ class KokohoViews(
             addView(menuButton)
         }
 
-        // 2. Segmented Tab Bar (Monitor | Map, plus Search when extended directory capability is packaged)
-        val hasSearchTab = KokohoDirectory.hasExtendedDirectoryCapability(activity)
-        visibleTabs = if (hasSearchTab) {
-            listOf(Tab.MONITOR, Tab.MAP, Tab.SEARCH)
-        } else {
-            listOf(Tab.MONITOR, Tab.MAP)
-        }
-
+        // 2. Segmented Tab Bar (Monitor | Map, plus Search when enrolled or PriorityVault holds synced data)
         tabRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(2), dp(12), dp(8))
-        }
-
-        for (tab in visibleTabs) {
-            val tv = TextView(activity).apply {
-                text = tab.title
-                textSize = 13f
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                setSingleLine(true)
-                setPadding(dp(6), dp(8), dp(6), dp(8))
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginStart = dp(2)
-                    marginEnd = dp(2)
-                }
-                setOnClickListener { selectTab(tab) }
-            }
-            tabButtons[tab] = tv
-            tabRow.addView(tv)
         }
 
         rootLinear.addView(topHeaderBar, 0)
@@ -525,17 +499,78 @@ class KokohoViews(
             addView(bottomFooterWrapper)
         }
 
-        searchView = if (hasSearchTab) {
-            org.tucsoncommunity.kokoho.ui.KokohoSearchView(activity)
-        } else {
-            null
-        }
-
         binding.contentArea.addView(monitorContainer)
-        searchView?.let { binding.contentArea.addView(it.root) }
+        refreshSearchTabVisibility()
+
+        val selfRef = java.lang.ref.WeakReference(this)
+        unregisterTrustListener = DeviceTrustManager.addTrustStateListener {
+            val v = selfRef.get()
+            if (v == null || v.activity.isDestroyed) {
+                unregisterTrustListener?.invoke()
+                unregisterTrustListener = null
+            } else {
+                v.refreshSearchTabVisibility()
+                v.searchView?.scheduleSearch()
+                v.onFilterChanged()
+            }
+        }
+        DeviceTrustManager.ensureEnrolledAsync(activity) {
+            refreshSearchTabVisibility()
+            searchView?.scheduleSearch()
+            onFilterChanged()
+        }
 
         syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
+    }
+
+    fun refreshSearchTabVisibility() {
+        val wantSearch = DeviceTrustManager.isEnrolled(activity) || PriorityVault.hasAnySyncedData(activity)
+        val nextTabs = if (wantSearch) {
+            listOf(Tab.MONITOR, Tab.MAP, Tab.SEARCH)
+        } else {
+            listOf(Tab.MONITOR, Tab.MAP)
+        }
+
+        if (wantSearch && searchView == null) {
+            val sv = org.tucsoncommunity.kokoho.ui.KokohoSearchView(activity)
+            sv.root.visibility = View.GONE
+            searchView = sv
+            binding.contentArea.addView(sv.root)
+        } else if (!wantSearch && searchView != null) {
+            if (currentTab == Tab.SEARCH) {
+                selectTab(Tab.MONITOR)
+            }
+            val oldSv = searchView
+            searchView = null
+            oldSv?.onTabUnselected()
+            oldSv?.root?.let { binding.contentArea.removeView(it) }
+        }
+
+        if (nextTabs != visibleTabs) {
+            visibleTabs = nextTabs
+            tabButtons.clear()
+            tabRow.removeAllViews()
+            for (tab in visibleTabs) {
+                val tv = TextView(activity).apply {
+                    text = tab.title
+                    textSize = 13f
+                    typeface = Typeface.DEFAULT_BOLD
+                    gravity = Gravity.CENTER
+                    setSingleLine(true)
+                    setPadding(dp(6), dp(8), dp(6), dp(8))
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                        marginStart = dp(2)
+                        marginEnd = dp(2)
+                    }
+                    setOnClickListener { selectTab(tab) }
+                }
+                tabButtons[tab] = tv
+                tabRow.addView(tv)
+            }
+            lastAppliedThemeKey = ""
+            applySurfaceThemeColors()
+        }
     }
 
     private fun startSharePulse() {
@@ -727,6 +762,7 @@ class KokohoViews(
     }
 
     fun updatePosture(nowMs: Long = System.currentTimeMillis(), precomputed: PostureSnapshot? = null) {
+        refreshSearchTabVisibility()
         syncSharePillState()
         if (ScanForegroundService.isRunning && KokohoSignatures.isAuxnetEnabled(activity)) {
             KokohoHubClient.start(activity)

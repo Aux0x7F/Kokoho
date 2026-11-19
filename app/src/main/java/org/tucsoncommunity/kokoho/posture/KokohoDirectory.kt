@@ -1,34 +1,28 @@
 package org.tucsoncommunity.kokoho.posture
 
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import org.tucsoncommunity.kokoho.BuildConfig
 import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.File
-import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.GZIPInputStream
 
 /**
- * Unified civic facility & personnel directory repository for Kokoho `v1.3.x`.
+ * Unified civic facility & personnel directory repository for Kokoho `v1.3.12`.
  *
  *  - Loads `reference/public_locations.tsv.gz` (publicly listed federal offices,
  *    police stations/substations, sheriff district offices, and fire stations) plus any user-created
  *    local witness person records.
- *  - When an optional digested `reference/directory_ext.sqlite3.gz` asset is packaged in the build,
- *    seamlessly hydrates additional facility locations, stationed personnel tables
- *    (`Full Name | Title | Agency | Suite`), unassociated person search/autocomplete, and
- *    organizational `Managed by` / `Manages` links.
+ *  - When enrolled on a Hub seat, hydrates `p2_sector_dir` and `p3_ext_dir` directly in RAM from
+ *    hardware-sealed `PriorityVault` `.seal` blobs (zero `directory.db` ever written to `/data`),
+ *    clearing decrypted RAM caches automatically whenever `Intent.ACTION_SCREEN_OFF` fires.
  */
 object KokohoDirectory {
 
     private const val PUBLIC_LOCATIONS_ASSET = "reference/public_locations.tsv.gz"
-    private const val ENCRYPTED_DIRECTORY_DB_ASSET = "reference/directory_ext.sqlite3.enc"
-    private const val OPTIONAL_DIRECTORY_DB_ASSET = "reference/directory_ext.sqlite3.gz"
-    private const val EXTRACTED_DB_NAME = "directory.db"
+    private const val LEGACY_EXTRACTED_DB_NAME = "directory.db"
     private const val USER_PERSONS_PREF = "kokoho_user_persons_json"
 
     data class FacilityLocation(
@@ -70,22 +64,29 @@ object KokohoDirectory {
         val resolvedAgencyDisplay: String
             get() = agencyDisplay.ifBlank { agency.friendlyLabel }
 
+        private val searchHaystackLower: String by lazy(LazyThreadSafetyMode.PUBLICATION) {
+            buildString(192) {
+                append(fullName.lowercase(Locale.US)).append('\n')
+                append(title.lowercase(Locale.US)).append('\n')
+                append(resolvedAgencyDisplay.lowercase(Locale.US)).append('\n')
+                append(agency.friendlyLabel.lowercase(Locale.US)).append('\n')
+                append(agency.shortName.lowercase(Locale.US)).append('\n')
+                append(agencyCode.lowercase(Locale.US)).append('\n')
+                append(suite.lowercase(Locale.US)).append('\n')
+                append(streetAddress.lowercase(Locale.US)).append('\n')
+                append(stateCode.lowercase(Locale.US)).append('\n')
+                append(email.lowercase(Locale.US)).append('\n')
+                append(secondEmail.lowercase(Locale.US)).append('\n')
+                append(primaryPhone.lowercase(Locale.US)).append('\n')
+                append(mobilePhone.lowercase(Locale.US)).append('\n')
+                append(badgeNumber.lowercase(Locale.US))
+            }
+        }
+
         fun matchesToken(rawToken: String): Boolean {
             val t = rawToken.trim().lowercase(Locale.US)
             if (t.isEmpty()) return true
-            return fullName.lowercase(Locale.US).contains(t) ||
-                title.lowercase(Locale.US).contains(t) ||
-                resolvedAgencyDisplay.lowercase(Locale.US).contains(t) ||
-                agency.friendlyLabel.lowercase(Locale.US).contains(t) ||
-                agencyCode.lowercase(Locale.US).contains(t) ||
-                suite.lowercase(Locale.US).contains(t) ||
-                streetAddress.lowercase(Locale.US).contains(t) ||
-                stateCode.lowercase(Locale.US).contains(t) ||
-                email.lowercase(Locale.US).contains(t) ||
-                secondEmail.lowercase(Locale.US).contains(t) ||
-                primaryPhone.lowercase(Locale.US).contains(t) ||
-                mobilePhone.lowercase(Locale.US).contains(t) ||
-                badgeNumber.lowercase(Locale.US).contains(t)
+            return searchHaystackLower.contains(t)
         }
     }
 
@@ -93,55 +94,73 @@ object KokohoDirectory {
     private var initialized = false
 
     @Volatile
-    private var hasPackagedDirectoryDb = false
+    private var hydratedVaultDir: PriorityVault.HydratedDirectoryData? = null
+
+    @Volatile
+    private var hydratedRevision: Long = -1L
+
+    @Volatile
+    private var legacyFilesCleaned = false
 
     private var locationsMap: Map<String, FacilityLocation> = emptyMap()
     private var locationsList: List<FacilityLocation> = emptyList()
-    private var sqliteDb: SQLiteDatabase? = null
     private val userPersons = ConcurrentHashMap<String, PersonRecord>()
 
     val isDirectoryAvailable: Boolean
-        get() = hasPackagedDirectoryDb
+        get() = hydratedVaultDir != null
 
     /**
-     * Fast capability check (`< 0.5 ms`, no gunzip I/O) indicating whether the extended directory
-     * database asset is packaged in this build.
+     * Fast capability check indicating whether this install is enrolled on a Hub seat or holds
+     * hardware-sealed `PriorityVault` tiers.
      */
-    fun hasExtendedDirectoryCapability(context: Context): Boolean {
-        if (hasPackagedDirectoryDb) return true
-        val app = context.applicationContext ?: context
-        val stream = runCatching { app.assets.open(ENCRYPTED_DIRECTORY_DB_ASSET) }.getOrElse {
-            runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET) }.getOrElse {
-                runCatching { app.assets.open(OPTIONAL_DIRECTORY_DB_ASSET.removeSuffix(".gz")) }.getOrNull()
-            }
-        } ?: return false
-        runCatching { stream.close() }
-        return true
-    }
+    fun hasExtendedDirectoryCapability(context: Context): Boolean =
+        DeviceTrustManager.isEnrolled(context) || PriorityVault.hasAnySyncedData(context)
 
     @Synchronized
     fun invalidateForReload() {
         initialized = false
+        hydratedRevision = -1L
         visibleCacheKey = ""
     }
 
     @Synchronized
-    fun reloadAfterKeyUnlock(context: Context) {
+    fun onVaultTierUpdated(context: Context) {
         initialized = false
+        hydratedVaultDir = null
+        hydratedRevision = -1L
         visibleCacheKey = ""
         ensureLoaded(context)
     }
 
     @Synchronized
-    fun purgeDecryptedCache(context: Context) {
-        runCatching { sqliteDb?.close() }
-        sqliteDb = null
-        hasPackagedDirectoryDb = false
+    fun clearInMemoryVaultCache() {
+        hydratedVaultDir = null
+        hydratedRevision = -1L
         initialized = false
+        locationsMap = emptyMap()
+        locationsList = emptyList()
         visibleCacheKey = ""
+        visibleCacheList = emptyList()
+    }
+
+    @Synchronized
+    fun reloadAfterKeyUnlock(context: Context) {
+        onVaultTierUpdated(context)
+    }
+
+    @Synchronized
+    fun purgeDecryptedCache(context: Context) {
+        clearInMemoryVaultCache()
+        deleteLegacyDbArtifacts(context)
+    }
+
+    private fun deleteLegacyDbArtifacts(context: Context) {
         val app = context.applicationContext ?: context
-        runCatching { File(app.noBackupFilesDir, EXTRACTED_DB_NAME).delete() }
-        runCatching { File(app.noBackupFilesDir, "$EXTRACTED_DB_NAME.vc").delete() }
+        for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
+            runCatching { File(dir, LEGACY_EXTRACTED_DB_NAME).delete() }
+            runCatching { File(dir, "$LEGACY_EXTRACTED_DB_NAME.vc").delete() }
+            runCatching { File(dir, "$LEGACY_EXTRACTED_DB_NAME.tmp").delete() }
+        }
     }
 
     private fun openAssetStreamSmart(context: Context, pathWithGz: String): java.io.InputStream? {
@@ -156,37 +175,25 @@ object KokohoDirectory {
         return if (b0 == 0x1f && b1 == 0x8b) GZIPInputStream(pb) else pb
     }
 
-    private fun openDecryptedDirectoryStream(context: Context): java.io.InputStream? {
-        val encBytes = runCatching {
-            context.assets.open(ENCRYPTED_DIRECTORY_DB_ASSET).use { it.readBytes() }
-        }.getOrNull()
-        if (encBytes != null && encBytes.size > 28) {
-            val keyBytes = DeviceTrustManager.getDirectoryKeyBytes(context) ?: return null
-            if (keyBytes.size != 32) return null
-            val iv = encBytes.copyOfRange(0, 12)
-            val ctAndTag = encBytes.copyOfRange(12, encBytes.size)
-            val decrypted = DeviceTrustManager.aes256GcmDecrypt(keyBytes, iv, ctAndTag) ?: return null
-            val bais = java.io.ByteArrayInputStream(decrypted)
-            return if (decrypted.size >= 2 &&
-                (decrypted[0].toInt() and 0xFF) == 0x1f &&
-                (decrypted[1].toInt() and 0xFF) == 0x8b
-            ) {
-                GZIPInputStream(bais)
-            } else {
-                bais
-            }
-        }
-        return openAssetStreamSmart(context, OPTIONAL_DIRECTORY_DB_ASSET)
-    }
-
     @Synchronized
     fun ensureLoaded(context: Context) {
         val app = context.applicationContext ?: context
-        if (initialized && locationsList.isNotEmpty() &&
-            (sqliteDb == null || (sqliteDb!!.isOpen && File(sqliteDb!!.path).exists()))
-        ) {
-            return
+        PriorityVault.ensureScreenOffReceiverRegistered(app)
+        if (!legacyFilesCleaned) {
+            legacyFilesCleaned = true
+            deleteLegacyDbArtifacts(app)
         }
+
+        val currentRev = PriorityVault.vaultDataRevision
+        if (initialized && locationsList.isNotEmpty()) {
+            if (hydratedVaultDir != null && hydratedRevision == currentRev) {
+                return
+            }
+            if (hydratedVaultDir == null && !PriorityVault.hasSyncedDirectoryFiles(app)) {
+                return
+            }
+        }
+
         val mergedLocations = LinkedHashMap<String, FacilityLocation>()
 
         // 1. Load baseline public facility locations (transparently handles both .tsv.gz and AAPT2-decompressed .tsv)
@@ -200,7 +207,7 @@ object KokohoDirectory {
                         val lat = p[3].toDoubleOrNull() ?: continue
                         val lon = p[4].toDoubleOrNull() ?: continue
                         val loc = FacilityLocation(
-                            id = p[0].trim(),
+                            id = canonicalLocationId(p[0].trim()),
                             title = p[1].trim(),
                             agencyCode = p[2].trim(),
                             lat = lat,
@@ -215,41 +222,13 @@ object KokohoDirectory {
             }
         }
 
-        // 2. Optionally hydrate packaged SQLite directory when present in build assets
-        runCatching {
-            sqliteDb?.takeIf { !it.isOpen || !File(it.path).exists() }?.let {
-                runCatching { it.close() }
-                sqliteDb = null
-                hasPackagedDirectoryDb = false
-            }
-            val dbFile = extractAssetDbIfPresent(app)
-            if (dbFile != null && dbFile.exists()) {
-                val db = sqliteDb ?: SQLiteDatabase.openDatabase(
-                    dbFile.absolutePath,
-                    null,
-                    SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS
-                )
-                sqliteDb = db
-                hasPackagedDirectoryDb = true
-                db.rawQuery(
-                    "SELECT location_id, title, agency_code, lat, lon, address, description, location_group, state_code FROM facility_locations",
-                    null
-                ).use { c ->
-                    while (c.moveToNext()) {
-                        val loc = FacilityLocation(
-                            id = c.getString(0),
-                            title = c.getString(1),
-                            agencyCode = c.getString(2),
-                            lat = c.getDouble(3),
-                            lon = c.getDouble(4),
-                            address = c.getString(5),
-                            description = c.getString(6),
-                            locationGroup = c.getString(7),
-                            stateCode = c.getString(8)
-                        )
-                        mergedLocations[loc.id] = loc
-                    }
-                }
+        // 2. Hydrate hardware-sealed PriorityVault directory tiers in RAM on demand (zero disk SQLite files)
+        val vaultHydrated = runCatching { PriorityVault.getHydratedDirectory(app) }.getOrNull()
+        hydratedVaultDir = vaultHydrated
+        hydratedRevision = currentRev
+        if (vaultHydrated != null) {
+            for (loc in vaultHydrated.locations) {
+                mergedLocations[loc.id] = loc
             }
         }
 
@@ -258,36 +237,13 @@ object KokohoDirectory {
 
         locationsMap = mergedLocations
         locationsList = mergedLocations.values.toList()
+        visibleCacheKey = ""
         initialized = true
-    }
-
-    private fun extractAssetDbIfPresent(context: Context): File? {
-        val dir = context.noBackupFilesDir ?: context.filesDir
-        dir.mkdirs()
-        val outFile = File(dir, EXTRACTED_DB_NAME)
-        val stampFile = File(dir, "$EXTRACTED_DB_NAME.vc")
-        val currentStamp = "${BuildConfig.VERSION_CODE}:${BuildConfig.VERSION_NAME}"
-        if (outFile.exists() && outFile.length() > 4096L && stampFile.exists() &&
-            runCatching { stampFile.readText().trim() }.getOrNull() == currentStamp &&
-            DeviceTrustManager.getDirectoryKeyBytes(context) != null
-        ) {
-            return outFile
-        }
-        val decodedStream = openDecryptedDirectoryStream(context) ?: return null
-        val tmp = File(dir, "$EXTRACTED_DB_NAME.tmp")
-        decodedStream.use { input ->
-            FileOutputStream(tmp).use { out ->
-                input.copyTo(out, bufferSize = 32 * 1024)
-            }
-        }
-        if (outFile.exists()) outFile.delete()
-        tmp.renameTo(outFile)
-        runCatching { stampFile.writeText(currentStamp) }
-        return outFile
     }
 
     @Volatile
     private var visibleCacheKey: String = ""
+
     @Volatile
     private var visibleCacheList: List<FacilityLocation> = emptyList()
 
@@ -307,7 +263,7 @@ object KokohoDirectory {
         if (!KokohoSignatures.isMapLocationsVisible(context)) return emptyList()
         val mapVisibleAgencies = KokohoSignatures.getMapVisibleAgencies(context)
         val dhsMaster = KokohoSignatures.isDhsMasterMapVisible(context)
-        val key = "${locationsList.size}|$dhsMaster|${mapVisibleAgencies.joinToString(",") { it.id }}"
+        val key = "${locationsList.size}|$hydratedRevision|$dhsMaster|${mapVisibleAgencies.joinToString(",") { it.id }}"
         if (key == visibleCacheKey) return visibleCacheList
         val filtered = locationsList.filter { loc ->
             when (loc.locationGroup) {
@@ -348,14 +304,12 @@ object KokohoDirectory {
     fun stationedPersonnelCount(context: Context, locationId: String): Int {
         ensureLoaded(context)
         val canonLoc = canonicalLocationId(locationId)
-        val localCount = userPersons.values.count { canonicalLocationId(it.locationId) == canonLoc }
-        val db = sqliteDb ?: return localCount
-        val dbCount = runCatching {
-            db.rawQuery("SELECT COUNT(*) FROM directory_persons WHERE location_id = ?", arrayOf(canonLoc)).use { c ->
-                if (c.moveToFirst()) c.getInt(0) else 0
-            }
-        }.getOrDefault(0)
-        return dbCount + localCount
+        val vaultRows = hydratedVaultDir?.personsByLocation?.get(canonLoc).orEmpty()
+        val vaultIds = if (vaultRows.isEmpty()) emptySet() else vaultRows.mapTo(HashSet(vaultRows.size)) { it.personId }
+        val localExtra = userPersons.values.count {
+            canonicalLocationId(it.locationId) == canonLoc && it.personId !in vaultIds
+        }
+        return vaultRows.size + localExtra
     }
 
     fun stationedPersonnel(
@@ -367,21 +321,14 @@ object KokohoDirectory {
         ensureLoaded(context)
         val canonLoc = canonicalLocationId(locationId)
         val rows = ArrayList<PersonRecord>()
-        sqliteDb?.let { db ->
-            runCatching {
-                db.rawQuery(
-                    "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                        "FROM directory_persons WHERE location_id = ? ORDER BY full_name COLLATE NOCASE ASC",
-                    arrayOf(canonLoc)
-                ).use { c ->
-                    while (c.moveToNext()) {
-                        rows += cursorToPerson(c)
-                    }
-                }
+        val seenIds = HashSet<String>()
+        for (vp in hydratedVaultDir?.personsByLocation?.get(canonLoc).orEmpty()) {
+            if (seenIds.add(vp.personId)) {
+                rows += vp
             }
         }
         for (up in userPersons.values) {
-            if (canonicalLocationId(up.locationId) == canonLoc && rows.none { it.personId == up.personId }) {
+            if (canonicalLocationId(up.locationId) == canonLoc && seenIds.add(up.personId)) {
                 rows += up
             }
         }
@@ -444,26 +391,22 @@ object KokohoDirectory {
         if (q.isEmpty()) return emptyList()
         val tokens = q.split(Regex("\\s+")).filter { it.isNotEmpty() }
         val results = ArrayList<PersonRecord>()
+        val seenIds = HashSet<String>()
 
         for (up in userPersons.values) {
-            if (tokens.all { up.matchesToken(it) }) results += up
+            if (tokens.all { up.matchesToken(it) } && seenIds.add(up.personId)) {
+                results += up
+            }
         }
 
-        sqliteDb?.let { db ->
-            val firstTok = "%${tokens.first()}%"
-            runCatching {
-                db.rawQuery(
-                    "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                        "FROM directory_persons WHERE search_tokens LIKE ? ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT 120",
-                    arrayOf(firstTok)
-                ).use { c ->
-                    while (c.moveToNext()) {
-                        val p = cursorToPerson(c)
-                        if (tokens.all { p.matchesToken(it) } && results.none { it.personId == p.personId }) {
-                            results += p
-                        }
-                    }
-                }
+        val scanCap = maxOf(limit * 4, 120)
+        for (vp in hydratedVaultDir?.orderedPersons.orEmpty()) {
+            if (vp.personId in seenIds) continue
+            if (tokens.all { vp.matchesToken(it) }) {
+                seenIds.add(vp.personId)
+                results += vp
+                if (agencyHint == null && results.size >= limit) break
+                if (results.size >= scanCap) break
             }
         }
 
@@ -479,25 +422,22 @@ object KokohoDirectory {
 
     fun browsePersons(context: Context, limit: Int = 20): List<PersonRecord> {
         ensureLoaded(context)
-        val results = ArrayList<PersonRecord>()
-        results.addAll(userPersons.values.sortedBy { it.fullName.lowercase(Locale.US) })
-        sqliteDb?.let { db ->
-            runCatching {
-                db.rawQuery(
-                    "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                        "FROM directory_persons ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT ?",
-                    arrayOf(limit.coerceAtLeast(1).toString())
-                ).use { c ->
-                    while (c.moveToNext()) {
-                        val p = cursorToPerson(c)
-                        if (results.none { it.personId == p.personId }) {
-                            results += p
-                        }
-                    }
-                }
+        val cap = limit.coerceAtLeast(1)
+        val results = ArrayList<PersonRecord>(cap)
+        val seenIds = HashSet<String>()
+        for (up in userPersons.values.sortedBy { it.fullName.lowercase(Locale.US) }) {
+            if (seenIds.add(up.personId)) {
+                results += up
+                if (results.size >= cap) return results
             }
         }
-        return results.take(limit)
+        for (vp in hydratedVaultDir?.orderedPersons.orEmpty()) {
+            if (seenIds.add(vp.personId)) {
+                results += vp
+                if (results.size >= cap) break
+            }
+        }
+        return results
     }
 
     fun searchPersonsWithTokens(
@@ -511,44 +451,37 @@ object KokohoDirectory {
             .filter { it.isNotEmpty() }
         if (cleanTokens.isEmpty()) return browsePersons(context, limit)
 
-        val results = ArrayList<PersonRecord>()
-        for (up in userPersons.values) {
-            if (cleanTokens.all { up.matchesToken(it) }) results += up
-        }
-
-        // Map agency friendly labels / short names to agency_code when querying SQLite so pills like "ICE" or "DHS Air" hit indexed rows too!
-        val matchedAgencyCode = cleanTokens.firstNotNullOfOrNull { tok ->
+        val matchedAgency = if (cleanTokens.size == 1) {
+            val tok = cleanTokens.first()
             KokohoAgency.entries.firstOrNull { ag ->
                 ag.friendlyLabel.equals(tok, ignoreCase = true) || ag.id.equals(tok, ignoreCase = true)
-            }?.id
+            }
+        } else {
+            null
         }
 
-        sqliteDb?.let { db ->
-            val longestTok = cleanTokens.maxByOrNull { it.length } ?: cleanTokens.first()
-            val sql = if (matchedAgencyCode != null && cleanTokens.size == 1) {
-                "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                    "FROM directory_persons WHERE (agency_code = ? OR search_tokens LIKE ?) ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT 160"
-            } else {
-                "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                    "FROM directory_persons WHERE search_tokens LIKE ? ORDER BY CASE WHEN state_code='AZ' THEN 0 ELSE 1 END, full_name COLLATE NOCASE ASC LIMIT 160"
-            }
-            val args = if (matchedAgencyCode != null && cleanTokens.size == 1) {
-                arrayOf(matchedAgencyCode, "%$longestTok%")
-            } else {
-                arrayOf("%$longestTok%")
-            }
-            runCatching {
-                db.rawQuery(sql, args).use { c ->
-                    while (c.moveToNext()) {
-                        val p = cursorToPerson(c)
-                        if (cleanTokens.all { p.matchesToken(it) } && results.none { it.personId == p.personId }) {
-                            results += p
-                        }
-                    }
-                }
+        val results = ArrayList<PersonRecord>(limit)
+        val seenIds = HashSet<String>()
+
+        fun personMatchesAll(p: PersonRecord): Boolean {
+            if (matchedAgency != null && p.agency == matchedAgency) return true
+            return cleanTokens.all { p.matchesToken(it) }
+        }
+
+        for (up in userPersons.values) {
+            if (personMatchesAll(up) && seenIds.add(up.personId)) {
+                results += up
+                if (results.size >= limit) return results
             }
         }
-        return results.take(limit)
+        for (vp in hydratedVaultDir?.orderedPersons.orEmpty()) {
+            if (vp.personId !in seenIds && personMatchesAll(vp)) {
+                seenIds.add(vp.personId)
+                results += vp
+                if (results.size >= limit) break
+            }
+        }
+        return results
     }
 
     fun suggestPersonPills(
@@ -579,16 +512,7 @@ object KokohoDirectory {
         ensureLoaded(context)
         val clean = canonicalPersonId(personId)
         userPersons[clean]?.let { return it }
-        val db = sqliteDb ?: return null
-        return runCatching {
-            db.rawQuery(
-                "SELECT person_id, full_name, title, agency_code, agency_display, location_id, street_address, suite, state_code, email, second_email, primary_phone, mobile_phone, badge_number " +
-                    "FROM directory_persons WHERE person_id = ? LIMIT 1",
-                arrayOf(clean)
-            ).use { c ->
-                if (c.moveToFirst()) cursorToPerson(c) else null
-            }
-        }.getOrNull()
+        return hydratedVaultDir?.personsById?.get(clean)
     }
 
     fun managedBy(context: Context, personId: String): PersonRecord? {
@@ -599,37 +523,27 @@ object KokohoDirectory {
             personById(context, userRec.managedByNameOrId)?.let { return it }
             searchPersons(context, userRec.managedByNameOrId, limit = 1).firstOrNull()?.let { return it }
         }
-        val db = sqliteDb ?: return null
-        return runCatching {
-            db.rawQuery(
-                "SELECT p.person_id, p.full_name, p.title, p.agency_code, p.agency_display, p.location_id, p.street_address, p.suite, p.state_code, p.email, p.second_email, p.primary_phone, p.mobile_phone, p.badge_number " +
-                    "FROM directory_reporting_edges e JOIN directory_persons p ON p.person_id = e.manager_person_id " +
-                    "WHERE e.report_person_id = ? LIMIT 1",
-                arrayOf(clean)
-            ).use { c ->
-                if (c.moveToFirst()) cursorToPerson(c) else null
-            }
-        }.getOrNull()
+        hydratedVaultDir?.managerByReportId?.get(clean)?.let { return it }
+        val vaultRec = hydratedVaultDir?.personsById?.get(clean)
+        if (vaultRec != null && vaultRec.managedByNameOrId.isNotBlank()) {
+            personById(context, vaultRec.managedByNameOrId)?.let { return it }
+            searchPersons(context, vaultRec.managedByNameOrId, limit = 1).firstOrNull()?.let { return it }
+        }
+        return null
     }
 
     fun manages(context: Context, personId: String): List<PersonRecord> {
         ensureLoaded(context)
         val clean = canonicalPersonId(personId)
         val out = ArrayList<PersonRecord>()
-        sqliteDb?.let { db ->
-            runCatching {
-                db.rawQuery(
-                    "SELECT p.person_id, p.full_name, p.title, p.agency_code, p.agency_display, p.location_id, p.street_address, p.suite, p.state_code, p.email, p.second_email, p.primary_phone, p.mobile_phone, p.badge_number " +
-                        "FROM directory_reporting_edges e JOIN directory_persons p ON p.person_id = e.report_person_id " +
-                        "WHERE e.manager_person_id = ? ORDER BY p.full_name COLLATE NOCASE ASC",
-                    arrayOf(clean)
-                ).use { c ->
-                    while (c.moveToNext()) out += cursorToPerson(c)
-                }
+        val seenIds = HashSet<String>()
+        for (rep in hydratedVaultDir?.reportsByManagerId?.get(clean).orEmpty()) {
+            if (seenIds.add(rep.personId)) {
+                out += rep
             }
         }
         for (up in userPersons.values) {
-            if (up.managedByNameOrId == clean && out.none { it.personId == up.personId }) {
+            if (up.managedByNameOrId == clean && seenIds.add(up.personId)) {
                 out += up
             }
         }
@@ -700,21 +614,4 @@ object KokohoDirectory {
             .putString(USER_PERSONS_PREF, arr.toString())
             .apply()
     }
-
-    private fun cursorToPerson(c: android.database.Cursor): PersonRecord = PersonRecord(
-        personId = c.getString(0) ?: "",
-        fullName = c.getString(1) ?: "",
-        title = c.getString(2) ?: "",
-        agencyCode = c.getString(3) ?: "DHS_INTEROP",
-        agencyDisplay = c.getString(4) ?: "",
-        locationId = c.getString(5) ?: "",
-        streetAddress = c.getString(6) ?: "",
-        suite = c.getString(7) ?: "",
-        stateCode = c.getString(8) ?: "AZ",
-        email = c.getString(9) ?: "",
-        secondEmail = c.getString(10) ?: "",
-        primaryPhone = c.getString(11) ?: "",
-        mobilePhone = c.getString(12) ?: "",
-        badgeNumber = c.getString(13) ?: ""
-    )
 }

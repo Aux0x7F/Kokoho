@@ -573,7 +573,7 @@ class KokohoSearchView(
 
         // 0. Synced License Plates (`KokohoHubClient.SyncedPlateRecord`)
         if (includePlates) {
-            val allPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity)
+            val allPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncedPlates(activity)
             if (allPlates.isNotEmpty()) {
                 val plateTokens = contentTokens.filterNot { parseSchemaPill(it) == SchemaKind.PLATE }
                 val matchedPlates = if (plateTokens.isEmpty()) {
@@ -759,7 +759,7 @@ class KokohoSearchView(
     ): List<String> {
         val q = rawQuery.trim().lowercase(Locale.US)
         val hasPersons = KokohoDirectory.isDirectoryAvailable || KokohoDirectory.browsePersons(activity, limit = 1).isNotEmpty()
-        val hasPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity).isNotEmpty()
+        val hasPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncedPlates(activity).isNotEmpty()
 
         val baseFilters = buildList {
             add("Detection")
@@ -1013,7 +1013,7 @@ class KokohoSearchView(
         when {
             row.targetDetailKey.startsWith("plate:", ignoreCase = true) -> {
                 val pid = row.targetDetailKey.removePrefix("plate:")
-                val plate = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedPlates(activity)
+                val plate = org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncedPlates(activity)
                     .firstOrNull { it.plateId == pid }
                 if (plate != null) {
                     val veh = listOf(plate.color, plate.make, plate.model, plate.bodyType)

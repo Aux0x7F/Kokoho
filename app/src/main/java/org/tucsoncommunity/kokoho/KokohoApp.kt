@@ -16,6 +16,9 @@ import kotlinx.coroutines.launch
 
 class KokohoApp : Application() {
     companion object {
+        /** Application context reference for background Hub helpers. */
+        @Volatile var appContext: android.content.Context? = null
+            private set
         /** Number of this app's activities currently started (visible). */
         @Volatile var visibleActivities = 0
             private set
@@ -94,6 +97,8 @@ class KokohoApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        appContext = applicationContext
+        org.tucsoncommunity.kokoho.posture.PriorityVault.ensureScreenOffReceiverRegistered(this)
         org.tucsoncommunity.kokoho.util.HwLog.init(this)
         org.tucsoncommunity.kokoho.util.CrashLog.install(this)
         appScope.launch(Dispatchers.IO) { org.tucsoncommunity.kokoho.util.CrashLog.recordExits(this@KokohoApp) }

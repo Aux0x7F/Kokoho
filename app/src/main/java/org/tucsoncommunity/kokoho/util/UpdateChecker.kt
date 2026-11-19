@@ -9,6 +9,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import org.tucsoncommunity.kokoho.BuildConfig
 import org.tucsoncommunity.kokoho.KokohoApp
+import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
 import org.tucsoncommunity.kokoho.posture.KokohoHubClient
 import org.tucsoncommunity.kokoho.posture.KokohoSignatures
 import kotlinx.coroutines.Dispatchers
@@ -173,9 +174,16 @@ object UpdateChecker {
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Cache-Control", "no-cache")
             setRequestProperty("User-Agent", "${context.packageName}/${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            DeviceTrustManager.attachSignedHeaders(context, this)
         }
         try {
-            if (conn.responseCode != 200) throw IllegalStateException("Update server answered HTTP ${conn.responseCode}")
+            val code = conn.responseCode
+            if (code != 200) {
+                val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
+                val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                DeviceTrustManager.inspectResponseForRevocation(context, code, seatHdr, err)
+                throw IllegalStateException("Update server answered HTTP $code")
+            }
             val text = conn.inputStream.bufferedReader().use { it.readText() }
             val parsed = parseLatest(text)
             val resolvedApk = parsed.apkUrl?.let { raw ->

@@ -86,6 +86,9 @@ object UpdateInstaller {
             connectTimeout = 15_000; readTimeout = 30_000
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", "${BuildConfig.APPLICATION_ID}/${BuildConfig.VERSION_NAME}")
+            if (url.startsWith(org.tucsoncommunity.kokoho.posture.KokohoHubClient.hubUrl(context), ignoreCase = true)) {
+                org.tucsoncommunity.kokoho.posture.DeviceTrustManager.attachSignedHeaders(context, this)
+            }
         }
         try {
             if (c.responseCode != 200) throw IllegalStateException("The download server answered ${c.responseCode}")

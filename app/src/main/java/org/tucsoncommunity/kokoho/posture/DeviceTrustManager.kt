@@ -2,6 +2,8 @@ package org.tucsoncommunity.kokoho.posture
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -15,38 +17,49 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
+import java.math.BigInteger
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.MessageDigest
 import java.security.PrivateKey
+import java.security.SecureRandom
+import java.security.Security
 import java.security.Signature
+import java.security.interfaces.ECPrivateKey
+import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.X509EncodedKeySpec
+import java.util.concurrent.CopyOnWriteArrayList
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
+import javax.crypto.KeyAgreement
+import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
- * Single-instance hardware trust & web-session grant manager (`v1.3.11`).
+ * Hardware trust, ephemeral ECDH AEAD transport, web-session grant, and revocation wipe manager (`v1.3.12`).
  *
  *  - Extracts per-seat voucher metadata (`0x54434B56`) from the APK Signing Block on first launch
  *    and persists it inside `noBackupFilesDir` so subsequent universal OTA updates retain seat trust.
  *  - Generates a non-exportable `EC P-256` (`SHA256withECDSA`) keypair in `AndroidKeyStore`
  *    (StrongBox when available, TEE fallback) and binds it to the Hub via `/v1/auth/enroll`.
- *  - Wraps any provisioned asset decryption key under a non-exportable `AndroidKeyStore`
- *    `AES/GCM/NoPadding` key (`kokoho_dir_wrap_v1`) stored only in `noBackupFilesDir`.
- *  - Signs ephemeral single-session web QR grants (`/v1/auth/grant-web`) and authenticated Hub headers.
+ *  - Negotiates ephemeral `secp256r1` ECDH session keys (`/v1/auth/session-key`), derives 32-byte
+ *    `AES-256-GCM` keys via RFC 5869 `HKDF-SHA256`, and wraps/unwraps `application/vnd.kokoho.env+json`
+ *    envelopes (`AAD = kid.encode("utf-8")`), auto-renegotiating once on HTTP `419`.
+ *  - Atomically destroys hardware vault keys, `.seal` files, and RAM caches on seat revocation or displacement.
  */
 object DeviceTrustManager {
 
     private const val APK_SEAT_BLOCK_ID = 0x54434B56
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
     private const val EC_KEY_ALIAS = "kokoho_seat_ec_v1"
-    private const val AES_WRAP_ALIAS = "kokoho_dir_wrap_v1"
+    private const val LEGACY_AES_WRAP_ALIAS = "kokoho_dir_wrap_v1"
 
     private const val PREFS = "kokoho_trust_prefs"
     private const val KEY_STATUS = "trust_status"
@@ -54,7 +67,10 @@ object DeviceTrustManager {
     private const val KEY_LABEL = "trust_label"
 
     private const val SEAT_FILE_NAME = "seat_identity.json"
-    private const val WRAPPED_DIR_KEY_FILE = "dir_key.wrap"
+    private const val LEGACY_WRAPPED_DIR_KEY_FILE = "dir_key.wrap"
+
+    const val ENV_CONTENT_TYPE = "application/vnd.kokoho.env+json"
+    private val HKDF_INFO_BYTES = "kokoho-app-aead-v1".toByteArray(Charsets.UTF_8) + byteArrayOf(0x01)
 
     data class SeatIdentity(
         @SerializedName("seat_id") val seatId: String = "",
@@ -69,26 +85,67 @@ object DeviceTrustManager {
         @SerializedName("slug") val slug: String = "",
         @SerializedName("role") val role: String = "MEMBER",
         @SerializedName("label") val label: String = "",
-        @SerializedName("dir_key_hex") val dirKeyHex: String? = null,
         @SerializedName("message") val message: String? = null
+    )
+
+    data class SessionKeyRequestDto(
+        @SerializedName("client_ephemeral_spki_b64") val clientEphemeralSpkiB64: String = ""
+    )
+
+    data class SessionKeyResponseDto(
+        @SerializedName("ok") val ok: Boolean = false,
+        @SerializedName("kid") val kid: String = "",
+        @SerializedName("server_ephemeral_spki_b64") val serverEphemeralSpkiB64: String = "",
+        @SerializedName("expires_at_ms") val expiresAtMs: Long = 0L
+    )
+
+    data class AeadEnvelopeDto(
+        @SerializedName("kid") val kid: String = "",
+        @SerializedName("iv") val iv: String = "",
+        @SerializedName("ct") val ct: String = ""
+    )
+
+    data class EnvelopedHttpResponse(
+        val code: Int,
+        val body: String?,
+        val etag: String? = null
+    )
+
+    private class ActiveSessionKey(
+        val kid: String,
+        val aeadKey: ByteArray,
+        val expiresAtMs: Long
     )
 
     private val gson = Gson()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val keyLock = Any()
+    private val sessionLock = Any()
+    private val trustListeners = CopyOnWriteArrayList<() -> Unit>()
 
     @Volatile
-    private var cachedDirKeyBytes: ByteArray? = null
+    private var currentSessionKey: ActiveSessionKey? = null
 
     @Volatile
     private var fallbackJvmKeyPair: KeyPair? = null
 
-    /** Test-only hook for JVM/Robolectric unit tests where AndroidKeyStore hardware is unavailable. */
-    fun injectTestDirectoryKeyHex(context: Context, hex: String?) {
-        cachedDirKeyBytes = hex?.trim()?.takeIf { it.length == 64 }?.let { hexToBytes(it) }
-        KokohoDirectory.invalidateForReload()
-        if (cachedDirKeyBytes != null) {
-            KokohoDirectory.ensureLoaded(context)
+    fun addTrustStateListener(listener: () -> Unit): () -> Unit {
+        trustListeners.add(listener)
+        return { trustListeners.remove(listener) }
+    }
+
+    fun notifyTrustStateListeners(context: Context? = null) {
+        if (trustListeners.isEmpty()) return
+        val dispatch = Runnable {
+            for (l in trustListeners) {
+                runCatching { l() }
+            }
+        }
+        val mainLooper = runCatching { Looper.getMainLooper() }.getOrNull()
+        if (mainLooper != null && Looper.myLooper() != mainLooper) {
+            Handler(mainLooper).post(dispatch)
+        } else {
+            dispatch.run()
         }
     }
 
@@ -112,7 +169,6 @@ object DeviceTrustManager {
         val app = context.applicationContext ?: context
         val seatFile = File(app.noBackupFilesDir, SEAT_FILE_NAME)
 
-        // Always check APK Signing Block first in case user installed a newly stamped seat APK
         val apkPath = runCatching { app.applicationInfo?.sourceDir }.getOrNull()
         if (!apkPath.isNullOrBlank()) {
             val fromApk = runCatching { readSeatIdentityFromApk(File(apkPath)) }.getOrNull()
@@ -214,7 +270,7 @@ object DeviceTrustManager {
 
     private fun getOrCreateSigningKeys(): Pair<PrivateKey, String>? = synchronized(keyLock) {
         val isRobolectric = Build.FINGERPRINT == null || Build.FINGERPRINT.equals("robolectric", ignoreCase = true)
-        val hasAndroidKeyStore = java.security.Security.getProvider(KEYSTORE_PROVIDER) != null
+        val hasAndroidKeyStore = Security.getProvider(KEYSTORE_PROVIDER) != null
 
         // 1. Real Android hardware: strictly use AndroidKeyStore (never fall back to an ephemeral RAM key!)
         if (!isRobolectric && hasAndroidKeyStore) {
@@ -241,7 +297,7 @@ object DeviceTrustManager {
             }.getOrNull()
         }
 
-        if (hasAndroidKeyStore) {
+        if (hasAndroidKeyStore && !isRobolectric) {
             return null
         }
 
@@ -279,76 +335,9 @@ object DeviceTrustManager {
         Base64.encodeToString(sig.sign(), Base64.NO_WRAP)
     }.getOrNull()
 
-    private fun getOrCreateWrapSecretKey(): SecretKey? = runCatching {
-        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-        val existing = (ks.getEntry(AES_WRAP_ALIAS, null) as? KeyStore.SecretKeyEntry)?.secretKey
-        if (existing != null) return existing
-        val kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE_PROVIDER)
-        kg.init(
-            KeyGenParameterSpec.Builder(
-                AES_WRAP_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .build()
-        )
-        kg.generateKey()
-    }.getOrNull()
-
-    private fun persistDirectoryKeyHex(context: Context, hex: String): Unit = synchronized(keyLock) {
-        val raw = hexToBytes(hex.trim())
-        if (raw.size != 32) return
-        cachedDirKeyBytes = raw
-        val app = context.applicationContext ?: context
-        val secretKey = getOrCreateWrapSecretKey() ?: return
-        runCatching {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-            val iv = cipher.iv
-            val ct = cipher.doFinal(raw)
-            val out = ByteArray(1 + iv.size + ct.size)
-            out[0] = iv.size.toByte()
-            System.arraycopy(iv, 0, out, 1, iv.size)
-            System.arraycopy(ct, 0, out, 1 + iv.size, ct.size)
-            app.noBackupFilesDir.mkdirs()
-            File(app.noBackupFilesDir, WRAPPED_DIR_KEY_FILE).writeBytes(out)
-        }
-    }
-
-    fun getDirectoryKeyBytes(context: Context): ByteArray? {
-        cachedDirKeyBytes?.let { return it }
-        synchronized(keyLock) {
-            cachedDirKeyBytes?.let { return it }
-            val app = context.applicationContext ?: context
-            val wrapFile = File(app.noBackupFilesDir, WRAPPED_DIR_KEY_FILE)
-            if (!wrapFile.exists()) return null
-            val secretKey = getOrCreateWrapSecretKey() ?: return null
-            return runCatching {
-                val blob = wrapFile.readBytes()
-                if (blob.size < 29) return null
-                val ivLen = blob[0].toInt() and 0xFF
-                if (ivLen !in 12..16 || blob.size <= 1 + ivLen + 16) return null
-                val iv = blob.copyOfRange(1, 1 + ivLen)
-                val ct = blob.copyOfRange(1 + ivLen, blob.size)
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
-                cipher.doFinal(ct).takeIf { it.size == 32 }?.also { cachedDirKeyBytes = it }
-            }.getOrNull()
-        }
-    }
-
-    private fun clearDirectoryKey(context: Context) = synchronized(keyLock) {
-        cachedDirKeyBytes = null
-        val app = context.applicationContext ?: context
-        runCatching { File(app.noBackupFilesDir, WRAPPED_DIR_KEY_FILE).delete() }
-        KokohoDirectory.purgeDecryptedCache(app)
-    }
-
     /**
      * Attaches signed hardware-key seat headers (`x-kokoho-seat-id`, `x-kokoho-ts`, `x-kokoho-sig`)
-     * to outgoing Hub HTTP connections when enrolled.
+     * to outgoing Hub HTTP connections when enrolled or holding a seat identity.
      */
     fun attachSignedHeaders(context: Context, conn: HttpURLConnection) {
         val seat = loadOrExtractSeatIdentity(context) ?: return
@@ -361,25 +350,387 @@ object DeviceTrustManager {
         conn.setRequestProperty("x-kokoho-sig", sig)
     }
 
+    // ---- Ephemeral ECDH + HKDF-SHA256 + AES-256-GCM Envelope Transport -------------------------
+
+    fun clearSessionKey() = synchronized(sessionLock) {
+        currentSessionKey?.aeadKey?.fill(0)
+        currentSessionKey = null
+    }
+
+    fun hasActiveSessionKey(): Boolean = synchronized(sessionLock) {
+        val sk = currentSessionKey ?: return false
+        System.currentTimeMillis() < sk.expiresAtMs
+    }
+
     /**
-     * Automatically performs hardware enrollment (or status verification) in the background when
-     * a seat voucher is bundled or previously claimed.
+     * Computes the 32-byte `secp256r1` ECDH shared secret X-coordinate using JCE `KeyAgreement`,
+     * falling back to pure-Kotlin NIST P-256 scalar multiplication under Robolectric sandboxed JVMs.
+     */
+    fun computeEcdhSharedSecret(clientPrivateKey: PrivateKey, serverSpkiBytes: ByteArray): ByteArray? {
+        val serverPub = runCatching {
+            KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(serverSpkiBytes))
+        }.getOrNull() ?: return null
+
+        val jceSecret = runCatching {
+            val ka = KeyAgreement.getInstance("ECDH")
+            ka.init(clientPrivateKey)
+            ka.doPhase(serverPub, true)
+            normalizeFixed32(ka.generateSecret())
+        }.getOrNull()
+        if (jceSecret != null && jceSecret.size == 32) {
+            return jceSecret
+        }
+
+        if (clientPrivateKey is ECPrivateKey && serverPub is ECPublicKey) {
+            return PureP256Ecdh.sharedSecret32(clientPrivateKey, serverPub)
+        }
+        return null
+    }
+
+    /**
+     * RFC 5869 `HKDF-SHA256` exact derivation per `v1312_wire_spec.md`:
+     *  - `prk = HMAC-SHA256(key = kid.encode("utf-8"), msg = shared_secret)`
+     *  - `aead_key = HMAC-SHA256(key = prk, msg = b"kokoho-app-aead-v1\x01")` (32 bytes)
+     */
+    fun deriveSessionAeadKey(sharedSecret32: ByteArray, kid: String): ByteArray {
+        val prk = hmacSha256(kid.toByteArray(Charsets.UTF_8), sharedSecret32)
+        val aeadKey = hmacSha256(prk, HKDF_INFO_BYTES)
+        prk.fill(0)
+        return aeadKey
+    }
+
+    fun hmacSha256(key: ByteArray, message: ByteArray): ByteArray {
+        try {
+            val mac = Mac.getInstance("HmacSHA256")
+            mac.init(SecretKeySpec(if (key.isEmpty()) ByteArray(1) else key, "HmacSHA256"))
+            if (key.isNotEmpty()) {
+                return mac.doFinal(message)
+            }
+        } catch (_: Throwable) {
+            // Fall through to RFC 2104 SHA-256 implementation under sandboxed Robolectric JceSecurity
+        }
+        return pureHmacSha256(key, message)
+    }
+
+    private fun pureHmacSha256(key: ByteArray, message: ByteArray): ByteArray {
+        val md = MessageDigest.getInstance("SHA-256")
+        val normalizedKey = if (key.size > 64) md.digest(key) else key
+        val ipad = ByteArray(64)
+        val opad = ByteArray(64)
+        for (i in 0 until 64) {
+            val kb = if (i < normalizedKey.size) normalizedKey[i].toInt() and 0xFF else 0
+            ipad[i] = (kb xor 0x36).toByte()
+            opad[i] = (kb xor 0x5c).toByte()
+        }
+        md.reset()
+        md.update(ipad)
+        md.update(message)
+        val inner = md.digest()
+        md.reset()
+        md.update(opad)
+        md.update(inner)
+        return md.digest()
+    }
+
+    fun sealEnvelope(kid: String, aeadKey: ByteArray, plaintextUtf8: String): AeadEnvelopeDto? {
+        if (aeadKey.size != 32 || kid.isEmpty()) return null
+        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        val aad = kid.toByteArray(Charsets.UTF_8)
+        val ctAndTag = aes256GcmEncrypt(aeadKey, iv, plaintextUtf8.toByteArray(Charsets.UTF_8), aad)
+            ?: return null
+        return AeadEnvelopeDto(
+            kid = kid,
+            iv = Base64.encodeToString(iv, Base64.NO_WRAP),
+            ct = Base64.encodeToString(ctAndTag, Base64.NO_WRAP)
+        )
+    }
+
+    fun openEnvelope(expectedKid: String?, aeadKey: ByteArray, envelopeJson: String): String? {
+        if (aeadKey.size != 32 || envelopeJson.isBlank()) return null
+        val dto = runCatching { gson.fromJson(envelopeJson, AeadEnvelopeDto::class.java) }.getOrNull()
+            ?: return null
+        if (dto.kid.isBlank() || dto.iv.isBlank() || dto.ct.isBlank()) return null
+        if (!expectedKid.isNullOrBlank() && dto.kid != expectedKid) return null
+        val iv = runCatching { Base64.decode(dto.iv, Base64.DEFAULT) }.getOrNull() ?: return null
+        val ctAndTag = runCatching { Base64.decode(dto.ct, Base64.DEFAULT) }.getOrNull() ?: return null
+        if (iv.size != 12 || ctAndTag.size < 16) return null
+        val aad = dto.kid.toByteArray(Charsets.UTF_8)
+        val plain = aes256GcmDecrypt(aeadKey, iv, ctAndTag, aad) ?: return null
+        return String(plain, Charsets.UTF_8)
+    }
+
+    private fun getOrNegotiateSessionKeyBlocking(context: Context, forceRefresh: Boolean = false): ActiveSessionKey? =
+        synchronized(sessionLock) {
+            val app = context.applicationContext ?: context
+            val now = System.currentTimeMillis()
+            if (!forceRefresh) {
+                currentSessionKey?.takeIf { now < it.expiresAtMs - 15_000L }?.let { return it }
+            }
+            currentSessionKey?.aeadKey?.fill(0)
+            currentSessionKey = null
+
+            val seat = loadOrExtractSeatIdentity(app) ?: return null
+            if (seat.seatId.isBlank()) return null
+
+            val ephemKp = runCatching {
+                KeyPairGenerator.getInstance("EC").apply {
+                    initialize(ECGenParameterSpec("secp256r1"))
+                }.generateKeyPair()
+            }.getOrNull() ?: return null
+
+            val clientSpkiB64 = Base64.encodeToString(ephemKp.public.encoded, Base64.NO_WRAP)
+            val reqJson = gson.toJson(SessionKeyRequestDto(clientEphemeralSpkiB64 = clientSpkiB64))
+            val base = KokohoHubClient.hubUrl(app)
+
+            return runCatching {
+                val conn = (URL("$base/v1/auth/session-key").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    setRequestProperty("Accept", "application/json")
+                    attachSignedHeaders(app, this)
+                }
+                try {
+                    conn.outputStream.use { it.write(reqJson.toByteArray(Charsets.UTF_8)) }
+                    val code = conn.responseCode
+                    val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
+                    if (code !in 200..299) {
+                        val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                        inspectResponseForRevocation(app, code, seatHdr, err)
+                        return@runCatching null
+                    }
+                    val respText = conn.inputStream.bufferedReader().use { it.readText() }
+                    val dto = gson.fromJson(respText, SessionKeyResponseDto::class.java)
+                    if (dto == null || !dto.ok || dto.kid.isBlank() || dto.serverEphemeralSpkiB64.isBlank()) {
+                        return@runCatching null
+                    }
+                    val serverSpkiBytes = Base64.decode(dto.serverEphemeralSpkiB64, Base64.DEFAULT)
+                    val sharedSecret = computeEcdhSharedSecret(ephemKp.private, serverSpkiBytes)
+                        ?: return@runCatching null
+                    val aeadKey = deriveSessionAeadKey(sharedSecret, dto.kid)
+                    sharedSecret.fill(0)
+                    val expiresAt = dto.expiresAtMs.takeIf { it > now } ?: (now + 15 * 60_000L)
+                    ActiveSessionKey(dto.kid, aeadKey, expiresAt).also { currentSessionKey = it }
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrNull()
+        }
+
+    fun executeEnvelopedGet(
+        context: Context,
+        pathAndQuery: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): EnvelopedHttpResponse? = executeEnvelopedInternal(
+        context = context,
+        method = "GET",
+        pathAndQuery = pathAndQuery,
+        plainJsonBody = null,
+        extraHeaders = extraHeaders
+    )
+
+    fun executeEnvelopedPost(
+        context: Context,
+        pathAndQuery: String,
+        plainJsonBody: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): EnvelopedHttpResponse? = executeEnvelopedInternal(
+        context = context,
+        method = "POST",
+        pathAndQuery = pathAndQuery,
+        plainJsonBody = plainJsonBody,
+        extraHeaders = extraHeaders
+    )
+
+    private fun executeEnvelopedInternal(
+        context: Context,
+        method: String,
+        pathAndQuery: String,
+        plainJsonBody: String?,
+        extraHeaders: Map<String, String>
+    ): EnvelopedHttpResponse? {
+        val app = context.applicationContext ?: context
+        val cleanPath = if (pathAndQuery.startsWith("/")) pathAndQuery else "/$pathAndQuery"
+        val base = KokohoHubClient.hubUrl(app)
+
+        for (attempt in 0..1) {
+            val sk = getOrNegotiateSessionKeyBlocking(app, forceRefresh = attempt > 0) ?: return null
+            val wireBodyBytes: ByteArray? = if (method == "POST") {
+                val env = sealEnvelope(sk.kid, sk.aeadKey, plainJsonBody ?: "{}") ?: return null
+                gson.toJson(env).toByteArray(Charsets.UTF_8)
+            } else {
+                null
+            }
+
+            val result = runCatching {
+                val conn = (URL("$base$cleanPath").openConnection() as HttpURLConnection).apply {
+                    requestMethod = method
+                    connectTimeout = 10_000
+                    readTimeout = 12_000
+                    setRequestProperty("Accept", "$ENV_CONTENT_TYPE, application/json")
+                    setRequestProperty("x-kokoho-env-kid", sk.kid)
+                    attachSignedHeaders(app, this)
+                    for ((hk, hv) in extraHeaders) {
+                        setRequestProperty(hk, hv)
+                    }
+                    if (wireBodyBytes != null) {
+                        doOutput = true
+                        setRequestProperty("Content-Type", ENV_CONTENT_TYPE)
+                    }
+                }
+                try {
+                    if (wireBodyBytes != null) {
+                        conn.outputStream.use { it.write(wireBodyBytes) }
+                    }
+                    val code = conn.responseCode
+                    val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
+                    val etagHdr = conn.getHeaderField("ETag")
+
+                    if (code == 419) {
+                        clearSessionKey()
+                        return@runCatching EnvelopedHttpResponse(419, null, etagHdr)
+                    }
+                    if (code == 304) {
+                        return@runCatching EnvelopedHttpResponse(304, null, etagHdr)
+                    }
+                    if (code !in 200..299) {
+                        val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
+                        inspectResponseForRevocation(app, code, seatHdr, err)
+                        return@runCatching EnvelopedHttpResponse(code, null, etagHdr)
+                    }
+
+                    val rawResp = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val cType = conn.contentType.orEmpty()
+                    val looksEnveloped = cType.contains("vnd.kokoho.env+json", ignoreCase = true) ||
+                        (rawResp.trimStart().startsWith("{") &&
+                            rawResp.contains("\"kid\"") &&
+                            rawResp.contains("\"iv\"") &&
+                            rawResp.contains("\"ct\""))
+                    val plainBody = if (looksEnveloped) {
+                        openEnvelope(sk.kid, sk.aeadKey, rawResp) ?: return@runCatching null
+                    } else {
+                        rawResp
+                    }
+                    EnvelopedHttpResponse(code, plainBody, etagHdr)
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrNull() ?: return null
+
+            if (result.code == 419 && attempt == 0) {
+                continue
+            }
+            return if (result.code == 304 || result.code in 200..299) result else null
+        }
+        return null
+    }
+
+    // ---- Complete Revocation & Displacement Wipe -----------------------------------------------
+
+    /**
+     * Inspects Hub HTTP error responses and triggers [handleSeatRevokedOrDisplaced] whenever
+     * HTTP `403` carries `x-kokoho-seat-status: REVOKED` or a `"REVOKED"` payload.
+     */
+    fun inspectResponseForRevocation(
+        context: Context,
+        httpCode: Int,
+        seatStatusHeader: String?,
+        errorBody: String?
+    ): Boolean {
+        if (httpCode != 403) return false
+        val headerRevoked = seatStatusHeader?.trim()?.equals("REVOKED", ignoreCase = true) == true
+        val bodyRevoked = errorBody?.contains("REVOKED", ignoreCase = true) == true
+        if (headerRevoked || bodyRevoked) {
+            handleSeatRevokedOrDisplaced(context, newStatus = "REVOKED")
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Atomically wipes all hardware vault/wrap keys, sealed disk tiers, legacy files, and RAM caches
+     * upon seat revocation or displacement, while preserving `seat_identity.json` and `kokoho_seat_ec_v1`
+     * so `Restore` in `Permissions` can cleanly re-authorize the phone later.
+     */
+    fun handleSeatRevokedOrDisplaced(context: Context, newStatus: String = "REVOKED") {
+        val app = context.applicationContext ?: context
+
+        // 1. Destroy hardware vault key (`kokoho_vault_aes_v1`), legacy wrap key (`kokoho_dir_wrap_v1`),
+        //    and all files in `noBackupFilesDir/vault/` (`p1_plates.seal`, `p2_sector_dir.seal`, `p3_ext_dir.seal`, `vault_meta.json`).
+        PriorityVault.destroyVaultKeyAndFiles(app)
+        synchronized(keyLock) {
+            runCatching {
+                if (Security.getProvider(KEYSTORE_PROVIDER) != null) {
+                    val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                    if (ks.containsAlias(PriorityVault.VAULT_KEY_ALIAS)) {
+                        ks.deleteEntry(PriorityVault.VAULT_KEY_ALIAS)
+                    }
+                    if (ks.containsAlias(LEGACY_AES_WRAP_ALIAS)) {
+                        ks.deleteEntry(LEGACY_AES_WRAP_ALIAS)
+                    }
+                }
+            }
+            for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
+                runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
+                runCatching { File(dir, "directory.db").delete() }
+                runCatching { File(dir, "directory.db.vc").delete() }
+                runCatching { File(dir, "directory.db.tmp").delete() }
+            }
+        }
+
+        // 2. Clear ECDH session key and update enrollment status (leaving seat_identity.json & kokoho_seat_ec_v1 intact).
+        clearSessionKey()
+        val resolvedStatus = newStatus.trim().ifEmpty { "REVOKED" }.let {
+            if (it.equals("ENROLLED", ignoreCase = true)) "REVOKED" else it
+        }
+        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_STATUS, resolvedStatus)
+        }
+
+        // 3. Clear legacy SharedPreferences synced plates & KokohoHubClient in-RAM active objects/plates.
+        KokohoHubClient.clearAllOnRevocation(app)
+
+        // 4. Clear PriorityVault & KokohoDirectory in-RAM caches and reload down to public-only baseline stations.
+        PriorityVault.clearInMemoryCaches(app)
+        KokohoDirectory.purgeDecryptedCache(app)
+        KokohoDirectory.ensureLoaded(app)
+
+        notifyTrustStateListeners(app)
+    }
+
+    // ---- Enrollment & Single-Session Web QR Grant ----------------------------------------------
+
+    /**
+     * Automatically performs hardware status verification (or initial enrollment) in the background
+     * when a seat voucher is bundled or previously claimed, and kicks off priority vault sync.
      */
     fun ensureEnrolledAsync(context: Context, onComplete: ((AuthResponseDto?) -> Unit)? = null) {
         val app = context.applicationContext ?: context
+        PriorityVault.ensureScreenOffReceiverRegistered(app)
         val seat = loadOrExtractSeatIdentity(app)
         if (seat == null) {
             onComplete?.invoke(null)
             return
         }
         scope.launch {
-            val resp = if (isEnrolled(app) && getDirectoryKeyBytes(app) != null && seat.seatId.isNotBlank()) {
-                checkDeviceStatusBlocking(app, seat) ?: enrollBlocking(app, seat)
-            } else if (seat.seatId.isNotBlank()) {
-                checkDeviceStatusBlocking(app, seat)?.takeIf { it.status.equals("ENROLLED", ignoreCase = true) }
-                    ?: enrollBlocking(app, seat)
+            val wasEnrolled = isEnrolled(app)
+            val resp = if (seat.seatId.isNotBlank()) {
+                val statusResp = checkDeviceStatusBlocking(app, seat)
+                when {
+                    statusResp != null && statusResp.status.equals("ENROLLED", ignoreCase = true) -> statusResp
+                    statusResp != null && wasEnrolled -> statusResp // Displaced/revoked/agreed already wiped in applyAuthOutcome
+                    statusResp != null && statusResp.status.uppercase() in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") -> statusResp
+                    !wasEnrolled && (seat.slug.isNotBlank() || seat.voucher.isNotBlank()) -> enrollBlocking(app, seat)
+                    else -> statusResp
+                }
             } else {
                 enrollBlocking(app, seat)
+            }
+            if (resp == null && isEnrolled(app)) {
+                // Offline while enrolled: ensure any deferred sync runs if network recovers later
+                KokohoDirectory.ensureLoaded(app)
             }
             if (onComplete != null) {
                 withContext(Dispatchers.Main) { onComplete(resp) }
@@ -412,15 +763,15 @@ object DeviceTrustManager {
                         false,
                         "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
                     )
-                    resp.status == "ENROLLED" -> onResult(
+                    resp.status.equals("ENROLLED", ignoreCase = true) -> onResult(
                         true,
                         "This phone is enrolled (${resp.role.lowercase().replaceFirstChar { it.uppercase() }})."
                     )
-                    resp.status == "PENDING_REBIND" -> onResult(
+                    resp.status.equals("PENDING_REBIND", ignoreCase = true) -> onResult(
                         false,
                         formatUnenrolledGrantMessage("PENDING_REBIND", resp, hasSeatRef = true)
                     )
-                    resp.status == "REVOKED" -> onResult(
+                    resp.status.equals("REVOKED", ignoreCase = true) -> onResult(
                         false,
                         "This invitation seat has been revoked."
                     )
@@ -512,6 +863,7 @@ object DeviceTrustManager {
             try {
                 conn.outputStream.use { it.write(gson.toJson(payload).toByteArray(Charsets.UTF_8)) }
                 val code = conn.responseCode
+                val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
                 if (code in 200..299) {
                     Triple(
                         true,
@@ -522,6 +874,7 @@ object DeviceTrustManager {
                     val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }
                         .getOrNull()
                         .orEmpty()
+                    inspectResponseForRevocation(app, code, seatHdr, err)
                     Triple(false, code, err)
                 }
             } finally {
@@ -548,7 +901,10 @@ object DeviceTrustManager {
                     seat = loadOrExtractSeatIdentity(app)
                 }
                 if (!isEnrolled(app)) {
-                    enr = if (!slugHint.isNullOrBlank()) {
+                    val blockedStatus = enr?.status?.uppercase().orEmpty()
+                    enr = if (blockedStatus in setOf("REVOKED", "PENDING_REBIND", "DISPLACED")) {
+                        enr
+                    } else if (!slugHint.isNullOrBlank()) {
                         enrollBlocking(
                             app,
                             SeatIdentity(
@@ -591,7 +947,11 @@ object DeviceTrustManager {
             var attempt = postGrantWebOnce(app, currentSeat.seatId, challengeId, secret, keys.first)
             if (!attempt.first && (attempt.second == 403 || attempt.second == 401)) {
                 var recResp = checkDeviceStatusBlocking(app, currentSeat)
-                if (!isEnrolled(app) && (!slugHint.isNullOrBlank() || currentSeat.voucher.isNotBlank() || currentSeat.slug.isNotBlank())) {
+                val recStatus = recResp?.status?.uppercase().orEmpty()
+                if (!isEnrolled(app) &&
+                    recStatus !in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") &&
+                    (!slugHint.isNullOrBlank() || currentSeat.voucher.isNotBlank() || currentSeat.slug.isNotBlank())
+                ) {
                     recResp = enrollBlocking(
                         app,
                         SeatIdentity(
@@ -604,8 +964,12 @@ object DeviceTrustManager {
                 val refreshedSeat = loadOrExtractSeatIdentity(app)
                 if (refreshedSeat != null && refreshedSeat.seatId.isNotBlank() && isEnrolled(app)) {
                     attempt = postGrantWebOnce(app, refreshedSeat.seatId, challengeId, secret, keys.first)
-                } else if (recResp != null && (recResp.status.equals("PENDING_REBIND", ignoreCase = true) || recResp.status.equals("REVOKED", ignoreCase = true))) {
-                    val msg = formatUnenrolledGrantMessage(recResp.status, recResp, hasSeatRef = true)
+                } else if (recResp != null && recStatus in setOf("PENDING_REBIND", "REVOKED", "DISPLACED")) {
+                    val msg = formatUnenrolledGrantMessage(
+                        if (recStatus == "DISPLACED") "REVOKED" else recResp.status,
+                        recResp,
+                        hasSeatRef = true
+                    )
                     withContext(Dispatchers.Main) { onResult(false, msg) }
                     return@launch
                 }
@@ -626,7 +990,7 @@ object DeviceTrustManager {
         }
     }
 
-    private fun enrollBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
+    internal fun enrollBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
         val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
         val idOrSlug = seat.seatId.ifBlank { seat.slug }
         if (idOrSlug.isBlank()) return null
@@ -645,11 +1009,11 @@ object DeviceTrustManager {
             "signature_b64" to sig
         )
         val dto = postAuthJson(context, "/v1/auth/enroll", bodyMap) ?: return null
-        applyAuthOutcome(context, seat, dto)
+        applyAuthOutcome(context, seat, dto, isStatusPoll = false)
         return dto
     }
 
-    private fun checkDeviceStatusBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
+    internal fun checkDeviceStatusBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
         if (seat.seatId.isBlank()) return null
         val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
         val ts = System.currentTimeMillis()
@@ -662,7 +1026,7 @@ object DeviceTrustManager {
             "signature_b64" to sig
         )
         val dto = postAuthJson(context, "/v1/auth/status", bodyMap) ?: return null
-        applyAuthOutcome(context, seat, dto)
+        applyAuthOutcome(context, seat, dto, isStatusPoll = true)
         return dto
     }
 
@@ -678,19 +1042,35 @@ object DeviceTrustManager {
             }
             try {
                 conn.outputStream.use { it.write(gson.toJson(payload).toByteArray(Charsets.UTF_8)) }
-                if (conn.responseCode in 200..299) {
+                val code = conn.responseCode
+                val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
+                if (code in 200..299) {
                     val txt = conn.inputStream.bufferedReader().use { it.readText() }
                     gson.fromJson(txt, AuthResponseDto::class.java)
                 } else {
-                    null
+                    val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull().orEmpty()
+                    if (inspectResponseForRevocation(context, code, seatHdr, err)) {
+                        AuthResponseDto(ok = false, status = "REVOKED", message = "This invitation seat has been revoked.")
+                    } else {
+                        runCatching { gson.fromJson(err, AuthResponseDto::class.java) }
+                            .getOrNull()
+                            ?.takeIf { it.status.isNotBlank() }
+                    }
                 }
             } finally {
                 conn.disconnect()
             }
         }.getOrNull()
 
-    private fun applyAuthOutcome(context: Context, prevSeat: SeatIdentity, dto: AuthResponseDto) {
+    private fun applyAuthOutcome(
+        context: Context,
+        prevSeat: SeatIdentity,
+        dto: AuthResponseDto,
+        isStatusPoll: Boolean
+    ) {
         val app = context.applicationContext ?: context
+        val wasEnrolled = enrollmentStatus(app).equals("ENROLLED", ignoreCase = true)
+
         if (dto.seatId.isNotBlank() || dto.slug.isNotBlank()) {
             saveSeatIdentity(
                 app,
@@ -701,57 +1081,185 @@ object DeviceTrustManager {
                 )
             )
         }
+
+        val normStatus = dto.status.trim().uppercase()
+        if (normStatus == "ENROLLED") {
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+                putString(KEY_STATUS, "ENROLLED")
+                if (dto.role.isNotBlank()) putString(KEY_ROLE, dto.role)
+                if (dto.label.isNotBlank()) putString(KEY_LABEL, dto.label)
+            }
+            for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
+                runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
+                runCatching { File(dir, "directory.db").delete() }
+                runCatching { File(dir, "directory.db.vc").delete() }
+            }
+            notifyTrustStateListeners(app)
+            PriorityVault.syncAllAsync(app)
+            return
+        }
+
+        if (normStatus == "REVOKED" ||
+            normStatus == "DISPLACED" ||
+            (wasEnrolled && (isStatusPoll || normStatus.isNotEmpty()))
+        ) {
+            handleSeatRevokedOrDisplaced(app, newStatus = normStatus.ifEmpty { "REVOKED" })
+            return
+        }
+
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putString(KEY_STATUS, dto.status.ifBlank { "UNENROLLED" })
             if (dto.role.isNotBlank()) putString(KEY_ROLE, dto.role)
             if (dto.label.isNotBlank()) putString(KEY_LABEL, dto.label)
         }
-        when (dto.status.uppercase()) {
-            "ENROLLED" -> {
-                if (!dto.dirKeyHex.isNullOrBlank()) {
-                    persistDirectoryKeyHex(app, dto.dirKeyHex)
-                    KokohoDirectory.reloadAfterKeyUnlock(app)
-                }
-                KokohoHubClient.syncPlates(app)
-            }
-            "REVOKED" -> clearDirectoryKey(app)
-        }
+        notifyTrustStateListeners(app)
     }
 
-    private fun hexToBytes(hex: String): ByteArray {
-        val clean = hex.trim()
-        if (clean.length % 2 != 0) return ByteArray(0)
-        val out = ByteArray(clean.length / 2)
-        for (i in out.indices) {
-            val hi = Character.digit(clean[i * 2], 16)
-            val lo = Character.digit(clean[i * 2 + 1], 16)
-            if (hi < 0 || lo < 0) return ByteArray(0)
-            out[i] = ((hi shl 4) or lo).toByte()
+    /** Test-only helper for configuring an enrolled seat in Robolectric JVM unit tests. */
+    internal fun setEnrolledForTest(
+        context: Context,
+        seatId: String,
+        slug: String = "inv-test",
+        voucher: String = "vouch-test",
+        role: String = "MEMBER"
+    ) {
+        val app = context.applicationContext ?: context
+        getOrCreateSigningKeys()
+        saveSeatIdentity(app, SeatIdentity(seatId = seatId, slug = slug, voucher = voucher))
+        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_STATUS, "ENROLLED")
+            putString(KEY_ROLE, role)
         }
+        notifyTrustStateListeners(app)
+    }
+
+    internal fun resetTrustForTest(context: Context) {
+        val app = context.applicationContext ?: context
+        clearSessionKey()
+        PriorityVault.destroyVaultKeyAndFiles(app)
+        runCatching { File(app.noBackupFilesDir, SEAT_FILE_NAME).delete() }
+        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { clear() }
+        KokohoDirectory.purgeDecryptedCache(app)
+        notifyTrustStateListeners(app)
+    }
+
+    private fun normalizeFixed32(raw: ByteArray): ByteArray {
+        if (raw.size == 32) return raw
+        if (raw.size > 32) {
+            return raw.copyOfRange(raw.size - 32, raw.size)
+        }
+        val out = ByteArray(32)
+        System.arraycopy(raw, 0, out, 32 - raw.size, raw.size)
         return out
     }
 
-    /**
-     * Decrypts `AES-256-GCM` (`12-byte IV` + `ciphertext || 16-byte tag`) using hardware JCE when
-     * available and falling back cleanly to pure-Kotlin NIST SP 800-38D AES-256-GCM under JVM/Robolectric
-     * sandboxed classloaders where `JceSecurity` cannot initialize.
-     */
-    fun aes256GcmDecrypt(keyBytes: ByteArray, iv12: ByteArray, ctAndTag: ByteArray): ByteArray? {
+    // ---- AES-256-GCM (JCE primary + Pure-Kotlin NIST SP 800-38D fallback with AAD) --------------
+
+    fun aes256GcmEncrypt(
+        keyBytes: ByteArray,
+        iv12: ByteArray,
+        plaintext: ByteArray,
+        aad: ByteArray = ByteArray(0)
+    ): ByteArray? {
+        if (keyBytes.size != 32 || iv12.size != 12) return null
+        try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.ENCRYPT_MODE,
+                SecretKeySpec(keyBytes, "AES"),
+                GCMParameterSpec(128, iv12)
+            )
+            if (aad.isNotEmpty()) cipher.updateAAD(aad)
+            return cipher.doFinal(plaintext)
+        } catch (_: Throwable) {
+            return PureAes256Gcm.encrypt(keyBytes, iv12, plaintext, aad)
+        }
+    }
+
+    fun aes256GcmDecrypt(
+        keyBytes: ByteArray,
+        iv12: ByteArray,
+        ctAndTag: ByteArray,
+        aad: ByteArray = ByteArray(0)
+    ): ByteArray? {
         if (keyBytes.size != 32 || iv12.size != 12 || ctAndTag.size < 16) return null
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(
                 Cipher.DECRYPT_MODE,
-                javax.crypto.spec.SecretKeySpec(keyBytes, "AES"),
+                SecretKeySpec(keyBytes, "AES"),
                 GCMParameterSpec(128, iv12)
             )
+            if (aad.isNotEmpty()) cipher.updateAAD(aad)
             return cipher.doFinal(ctAndTag)
         } catch (_: Throwable) {
-            return PureAes256Gcm.decrypt(keyBytes, iv12, ctAndTag)
+            return PureAes256Gcm.decrypt(keyBytes, iv12, ctAndTag, aad)
         }
     }
 
-    private object PureAes256Gcm {
+    internal object PureP256Ecdh {
+        private val P = BigInteger("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF", 16)
+        private val A = BigInteger("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC", 16)
+        private val B = BigInteger("5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B", 16)
+        private val TWO = BigInteger.valueOf(2L)
+        private val THREE = BigInteger.valueOf(3L)
+
+        private fun isOnCurve(x: BigInteger, y: BigInteger): Boolean {
+            if (x < BigInteger.ZERO || x >= P || y < BigInteger.ZERO || y >= P) return false
+            val lhs = y.multiply(y).mod(P)
+            val rhs = x.modPow(THREE, P).add(A.multiply(x)).add(B).mod(P)
+            return lhs == rhs
+        }
+
+        private fun pointDouble(pt: Pair<BigInteger, BigInteger>?): Pair<BigInteger, BigInteger>? {
+            val (x1, y1) = pt ?: return null
+            if (y1.signum() == 0) return null
+            val num = THREE.multiply(x1.multiply(x1)).add(A).mod(P)
+            val den = TWO.multiply(y1).mod(P).modInverse(P)
+            val lam = num.multiply(den).mod(P)
+            val x3 = lam.multiply(lam).subtract(TWO.multiply(x1)).mod(P)
+            val y3 = lam.multiply(x1.subtract(x3)).subtract(y1).mod(P)
+            return x3 to y3
+        }
+
+        private fun pointAdd(
+            p1: Pair<BigInteger, BigInteger>?,
+            p2: Pair<BigInteger, BigInteger>?
+        ): Pair<BigInteger, BigInteger>? {
+            if (p1 == null) return p2
+            if (p2 == null) return p1
+            val (x1, y1) = p1
+            val (x2, y2) = p2
+            if (x1 == x2) {
+                return if (y1.add(y2).mod(P).signum() == 0) null else pointDouble(p1)
+            }
+            val num = y2.subtract(y1).mod(P)
+            val den = x2.subtract(x1).mod(P).modInverse(P)
+            val lam = num.multiply(den).mod(P)
+            val x3 = lam.multiply(lam).subtract(x1).subtract(x2).mod(P)
+            val y3 = lam.multiply(x1.subtract(x3)).subtract(y1).mod(P)
+            return x3 to y3
+        }
+
+        fun sharedSecret32(priv: ECPrivateKey, pub: ECPublicKey): ByteArray? {
+            val k = priv.s
+            val qx = pub.w.affineX
+            val qy = pub.w.affineY
+            if (k <= BigInteger.ZERO || !isOnCurve(qx, qy)) return null
+            var acc: Pair<BigInteger, BigInteger>? = null
+            val base = qx to qy
+            for (bit in k.bitLength() - 1 downTo 0) {
+                acc = pointDouble(acc)
+                if (k.testBit(bit)) {
+                    acc = pointAdd(acc, base)
+                }
+            }
+            val rx = acc?.first ?: return null
+            return normalizeFixed32(rx.toByteArray())
+        }
+    }
+
+    internal object PureAes256Gcm {
         private val SBOX = IntArray(256)
         private val RCON = intArrayOf(0, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36)
 
@@ -818,12 +1326,10 @@ object DeviceTrustManager {
             val t = IntArray(16)
             for (round in 1..13) {
                 for (i in 0 until 16) t[i] = SBOX[s[i]]
-                // ShiftRows
                 s[0] = t[0]; s[4] = t[4]; s[8] = t[8]; s[12] = t[12]
                 s[1] = t[5]; s[5] = t[9]; s[9] = t[13]; s[13] = t[1]
                 s[2] = t[10]; s[6] = t[14]; s[10] = t[2]; s[14] = t[6]
                 s[3] = t[15]; s[7] = t[3]; s[11] = t[7]; s[15] = t[11]
-                // MixColumns + AddRoundKey
                 val base = round * 4
                 for (c in 0 until 4) {
                     val idx = c * 4
@@ -836,7 +1342,6 @@ object DeviceTrustManager {
                     s[idx + 3] = a3 xor all xor xtime(a3 xor a0) xor (kw and 0xff)
                 }
             }
-            // Final round 14
             for (i in 0 until 16) t[i] = SBOX[s[i]]
             val sr = intArrayOf(
                 t[0], t[5], t[10], t[15],
@@ -887,49 +1392,120 @@ object DeviceTrustManager {
             return r
         }
 
-        fun decrypt(key: ByteArray, iv12: ByteArray, ctAndTag: ByteArray): ByteArray? {
-            val ctLen = ctAndTag.size - 16
+        private fun writeBeLong(v: Long, buf: ByteArray, off: Int) {
+            for (i in 0 until 8) {
+                buf[off + i] = ((v ushr (56 - i * 8)) and 0xffL).toByte()
+            }
+        }
+
+        private fun computeGhash(
+            h0: Long,
+            h1: Long,
+            aad: ByteArray,
+            ctBuf: ByteArray,
+            ctLen: Int
+        ): LongArray {
+            var y0 = 0L
+            var y1 = 0L
+            val block = ByteArray(16)
+
+            var aOff = 0
+            while (aOff < aad.size) {
+                val chunk = minOf(16, aad.size - aOff)
+                java.util.Arrays.fill(block, 0.toByte())
+                System.arraycopy(aad, aOff, block, 0, chunk)
+                val res = gfMul(y0 xor readBeLong(block, 0), y1 xor readBeLong(block, 8), h0, h1)
+                y0 = res[0]
+                y1 = res[1]
+                aOff += chunk
+            }
+
+            var cOff = 0
+            while (cOff < ctLen) {
+                val chunk = minOf(16, ctLen - cOff)
+                java.util.Arrays.fill(block, 0.toByte())
+                System.arraycopy(ctBuf, cOff, block, 0, chunk)
+                val res = gfMul(y0 xor readBeLong(block, 0), y1 xor readBeLong(block, 8), h0, h1)
+                y0 = res[0]
+                y1 = res[1]
+                cOff += chunk
+            }
+
+            return gfMul(y0 xor (aad.size.toLong() * 8L), y1 xor (ctLen.toLong() * 8L), h0, h1)
+        }
+
+        fun encrypt(
+            key: ByteArray,
+            iv12: ByteArray,
+            plaintext: ByteArray,
+            aad: ByteArray = ByteArray(0)
+        ): ByteArray {
             val rk = expandKey256(key)
             val hBytes = ByteArray(16)
             encryptBlock(rk, ByteArray(16), hBytes)
             val h0 = readBeLong(hBytes, 0)
             val h1 = readBeLong(hBytes, 8)
 
-            // GHASH over ciphertext (AAD = empty)
-            var y0 = 0L
-            var y1 = 0L
-            val block = ByteArray(16)
+            val out = ByteArray(plaintext.size + 16)
+            val cb = ByteArray(16)
+            System.arraycopy(iv12, 0, cb, 0, 12)
+            val ks = ByteArray(16)
+            var ctr = 2
             var off = 0
-            while (off < ctLen) {
-                val chunk = minOf(16, ctLen - off)
-                java.util.Arrays.fill(block, 0.toByte())
-                System.arraycopy(ctAndTag, off, block, 0, chunk)
-                val res = gfMul(y0 xor readBeLong(block, 0), y1 xor readBeLong(block, 8), h0, h1)
-                y0 = res[0]
-                y1 = res[1]
+            while (off < plaintext.size) {
+                cb[12] = (ctr ushr 24).toByte()
+                cb[13] = (ctr ushr 16).toByte()
+                cb[14] = (ctr ushr 8).toByte()
+                cb[15] = ctr.toByte()
+                encryptBlock(rk, cb, ks)
+                val chunk = minOf(16, plaintext.size - off)
+                for (i in 0 until chunk) {
+                    out[off + i] = (plaintext[off + i].toInt() xor ks[i].toInt()).toByte()
+                }
+                ctr++
                 off += chunk
             }
-            val resLen = gfMul(y0, y1 xor (ctLen.toLong() * 8L), h0, h1)
-            y0 = resLen[0]
-            y1 = resLen[1]
 
-            // J0 = IV || 0x00000001
+            val ghash = computeGhash(h0, h1, aad, out, plaintext.size)
+            cb[12] = 0; cb[13] = 0; cb[14] = 0; cb[15] = 1
+            val ej0 = ByteArray(16)
+            encryptBlock(rk, cb, ej0)
+            writeBeLong(readBeLong(ej0, 0) xor ghash[0], out, plaintext.size)
+            writeBeLong(readBeLong(ej0, 8) xor ghash[1], out, plaintext.size + 8)
+            return out
+        }
+
+        fun decrypt(
+            key: ByteArray,
+            iv12: ByteArray,
+            ctAndTag: ByteArray,
+            aad: ByteArray = ByteArray(0)
+        ): ByteArray? {
+            val ctLen = ctAndTag.size - 16
+            if (ctLen < 0) return null
+            val rk = expandKey256(key)
+            val hBytes = ByteArray(16)
+            encryptBlock(rk, ByteArray(16), hBytes)
+            val h0 = readBeLong(hBytes, 0)
+            val h1 = readBeLong(hBytes, 8)
+
+            val ghash = computeGhash(h0, h1, aad, ctAndTag, ctLen)
+
             val cb = ByteArray(16)
             System.arraycopy(iv12, 0, cb, 0, 12)
             cb[15] = 1
             val ej0 = ByteArray(16)
             encryptBlock(rk, cb, ej0)
-            val expTag0 = readBeLong(ej0, 0) xor y0
-            val expTag1 = readBeLong(ej0, 8) xor y1
+            val expTag0 = readBeLong(ej0, 0) xor ghash[0]
+            val expTag1 = readBeLong(ej0, 8) xor ghash[1]
             val gotTag0 = readBeLong(ctAndTag, ctLen)
             val gotTag1 = readBeLong(ctAndTag, ctLen + 8)
             if ((expTag0 xor gotTag0) or (expTag1 xor gotTag1) != 0L) return null
 
-            // GCTR decrypt
             val plain = ByteArray(ctLen)
             val ks = ByteArray(16)
             var ctr = 2
-            off = 0
+            var off = 0
             while (off < ctLen) {
                 cb[12] = (ctr ushr 24).toByte()
                 cb[13] = (ctr ushr 16).toByte()

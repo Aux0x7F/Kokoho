@@ -693,18 +693,14 @@ object KokohoJourneyUi {
         body.addView(utilsHeader)
         body.addView(utilsSubmenu)
 
-        // ---- Entry 3: AUTHORIZE WEB SESSION (Shown when extended capability or seat voucher exists) ----
-        if (org.tucsoncommunity.kokoho.posture.KokohoDirectory.hasExtendedDirectoryCapability(activity) ||
-            org.tucsoncommunity.kokoho.posture.DeviceTrustManager.loadOrExtractSeatIdentity(activity) != null
-        ) {
-            val webAuthHeader = buildMenuSectionButton(VectorIconKind.QR_SCAN, "Authorize Web Session", null).apply {
-                setOnClickListener {
-                    dialog.dismiss()
-                    WebAuthQrDialog.openScannerOrRequestPermission(activity)
-                }
+        // ---- Entry 3: AUTHORIZE WEB SESSION (Unified build supports both invite enrollment & browser QR grants) ----
+        val webAuthHeader = buildMenuSectionButton(VectorIconKind.QR_SCAN, "Authorize Web Session", null).apply {
+            setOnClickListener {
+                dialog.dismiss()
+                WebAuthQrDialog.openScannerOrRequestPermission(activity)
             }
-            body.addView(webAuthHeader)
         }
+        body.addView(webAuthHeader)
 
         // ---- Entry 4: SETTINGS ----
         val settingsHeader = buildMenuSectionButton(VectorIconKind.GEAR_SETTINGS, "Settings", null).apply {

@@ -33,8 +33,7 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
-import org.tucsoncommunity.kokoho.posture.KokohoDirectory
-import org.tucsoncommunity.kokoho.posture.KokohoHubClient
+import org.tucsoncommunity.kokoho.posture.PriorityVault
 import java.util.EnumMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -140,50 +139,10 @@ object WebAuthQrDialog {
         val cleanKey = inviteKey.trim().substringAfterLast('/').substringBefore('?').substringBefore('&').substringBefore('#').trim()
         if (cleanKey.isEmpty() || activity.isFinishing || activity.isDestroyed) return
 
-        if (!KokohoDirectory.hasExtendedDirectoryCapability(activity)) {
-            val appLabel = resolveAppLabel(activity)
-            KokohoJourneyUi.showModal(
-                activity = activity,
-                title = "Extended Directory Build Required",
-                subtitle = "Handled by $appLabel"
-            ) { body, dismiss ->
-                val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
-                val msgTv = TextView(activity).apply {
-                    text = "This installed copy of $appLabel does not bundle the extended directory database. Open your invite Guide with your VPN connected to download and install your seat-keyed update over top of this app."
-                    textSize = 14.5f
-                    setTextColor(KokohoJourneyUi.INK_PRIMARY)
-                    setLineSpacing(0f, 1.28f)
-                    setPadding(0, dp(2), 0, dp(14))
-                }
-                body.addView(msgTv)
-
-                val btnRow = LinearLayout(activity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.END
-                }
-                val cancelBtn = KokohoJourneyUi.secondaryActionButton(activity, "Cancel") {
-                    dismiss()
-                }.apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply { marginEnd = dp(8) }
-                }
-                val openBtn = KokohoJourneyUi.primaryActionButton(activity, "Open Invite Guide") {
-                    dismiss()
-                    val guideUri = Uri.parse("${KokohoHubClient.hubUrl(activity)}/dashboard?invite=${Uri.encode(cleanKey)}")
-                    runCatching {
-                        activity.startActivity(Intent(Intent.ACTION_VIEW, guideUri))
-                    }
-                }
-                btnRow.addView(cancelBtn)
-                btnRow.addView(openBtn)
-                body.addView(btnRow)
-            }
-            return
-        }
-
         DeviceTrustManager.claimSeatBySlug(activity, cleanKey) { ok, msg ->
+            if (ok) {
+                PriorityVault.syncAllAsync(activity)
+            }
             showAuthResultModal(
                 activity = activity,
                 ok = ok,
