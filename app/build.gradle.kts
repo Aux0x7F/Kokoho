@@ -7,9 +7,9 @@ plugins {
 }
 
 // Bump both for every release. versionName ends up in the APK file name.
-// Unified single-build versionCode = 1420 (v1.3.12 > 1411 so all prior 1410/1411 installs upgrade cleanly in-place).
-val baseVersionCode = 1420
-val baseVersionName = "1.3.12"
+// Unified single-build versionCode = 1421 (v1.3.13 > 1411 so all prior 1401/1410/1411/1420 installs upgrade cleanly in-place).
+val baseVersionCode = 1421
+val baseVersionName = "1.3.13"
 val releaseChannel = "public"
 val appVersionCode = baseVersionCode
 val appVersionName = baseVersionName

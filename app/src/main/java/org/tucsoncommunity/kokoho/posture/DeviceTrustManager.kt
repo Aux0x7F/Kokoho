@@ -65,6 +65,7 @@ object DeviceTrustManager {
     private const val KEY_STATUS = "trust_status"
     private const val KEY_ROLE = "trust_role"
     private const val KEY_LABEL = "trust_label"
+    private const val KEY_IMPORTED_APK_STAMP = "imported_apk_stamp"
 
     private const val SEAT_FILE_NAME = "seat_identity.json"
     private const val LEGACY_WRAPPED_DIR_KEY_FILE = "dir_key.wrap"
@@ -157,27 +158,43 @@ object DeviceTrustManager {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_ROLE, "MEMBER") ?: "MEMBER"
 
+    fun enrolledLabel(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_LABEL, "") ?: ""
+
+    fun currentSeatSlug(context: Context): String? =
+        loadOrExtractSeatIdentity(context)?.slug?.takeIf { it.isNotBlank() }
+
     fun isEnrolled(context: Context): Boolean =
         enrollmentStatus(context).equals("ENROLLED", ignoreCase = true) &&
             loadOrExtractSeatIdentity(context)?.seatId?.isNotBlank() == true
 
     /**
      * Reads `{ seat_id, slug, voucher }` from `noBackupFilesDir/seat_identity.json`, or extracts it
-     * from the installed APK's Signing Block (`0x54434B56`) on first launch / seat-stamped upgrade.
+     * from the installed APK's Signing Block (`0x54434B56`) on first launch / newly stamped APK upgrade.
+     * Once a given APK stamp has been imported, `seat_identity.json` remains authoritative so claiming
+     * a replacement seat via `kokoho://enroll?invite=...` is never overwritten by the older APK stamp.
      */
     fun loadOrExtractSeatIdentity(context: Context): SeatIdentity? = synchronized(keyLock) {
         val app = context.applicationContext ?: context
         val seatFile = File(app.noBackupFilesDir, SEAT_FILE_NAME)
+        val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
         val apkPath = runCatching { app.applicationInfo?.sourceDir }.getOrNull()
         if (!apkPath.isNullOrBlank()) {
-            val fromApk = runCatching { readSeatIdentityFromApk(File(apkPath)) }.getOrNull()
+            val apkFile = File(apkPath)
+            val fromApk = runCatching { readSeatIdentityFromApk(apkFile) }.getOrNull()
             if (fromApk != null && (fromApk.seatId.isNotBlank() || fromApk.slug.isNotBlank())) {
-                runCatching {
-                    app.noBackupFilesDir.mkdirs()
-                    seatFile.writeText(gson.toJson(fromApk), Charsets.UTF_8)
+                val stamp = "$apkPath:${apkFile.lastModified()}:${fromApk.seatId}:${fromApk.slug}"
+                val lastImported = prefs.getString(KEY_IMPORTED_APK_STAMP, null)
+                if (!seatFile.exists() || lastImported != stamp) {
+                    runCatching {
+                        app.noBackupFilesDir.mkdirs()
+                        seatFile.writeText(gson.toJson(fromApk), Charsets.UTF_8)
+                    }
+                    prefs.edit { putString(KEY_IMPORTED_APK_STAMP, stamp) }
+                    return fromApk
                 }
-                return fromApk
             }
         }
 
@@ -751,11 +768,23 @@ object DeviceTrustManager {
         }
         scope.launch {
             val existing = loadOrExtractSeatIdentity(app)
-            val tempIdentity = SeatIdentity(
-                seatId = existing?.seatId.orEmpty(),
-                slug = cleanSlug,
-                voucher = existing?.voucher.orEmpty()
-            )
+            val sameSlug = existing != null && existing.slug.equals(cleanSlug, ignoreCase = true)
+            if (!sameSlug) {
+                clearSessionKey()
+            }
+            val tempIdentity = if (sameSlug && existing != null) {
+                SeatIdentity(
+                    seatId = existing.seatId,
+                    slug = cleanSlug,
+                    voucher = existing.voucher
+                )
+            } else {
+                SeatIdentity(
+                    seatId = "",
+                    slug = cleanSlug,
+                    voucher = ""
+                )
+            }
             val resp = enrollBlocking(app, tempIdentity)
             withContext(Dispatchers.Main) {
                 when {
@@ -1084,6 +1113,9 @@ object DeviceTrustManager {
 
         val normStatus = dto.status.trim().uppercase()
         if (normStatus == "ENROLLED") {
+            if (prevSeat.seatId.isNotBlank() && dto.seatId.isNotBlank() && dto.seatId != prevSeat.seatId) {
+                clearSessionKey()
+            }
             app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
                 putString(KEY_STATUS, "ENROLLED")
                 if (dto.role.isNotBlank()) putString(KEY_ROLE, dto.role)

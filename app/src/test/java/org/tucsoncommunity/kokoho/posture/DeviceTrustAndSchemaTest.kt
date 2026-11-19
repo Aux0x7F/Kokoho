@@ -60,8 +60,8 @@ class DeviceTrustAndSchemaTest {
     @Test
     fun unifiedSingleBuildVersionAndZeroBundledEncAsset() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals(1420, BuildConfig.VERSION_CODE)
-        assertEquals("1.3.12", BuildConfig.VERSION_NAME)
+        assertEquals(1421, BuildConfig.VERSION_CODE)
+        assertEquals("1.3.13", BuildConfig.VERSION_NAME)
         assertEquals("/v1/update/latest", BuildConfig.UPDATE_MANIFEST_PATH)
 
         val refAssets = runCatching { ctx.assets.list("reference")?.toList().orEmpty() }.getOrDefault(emptyList())
@@ -772,5 +772,60 @@ class DeviceTrustAndSchemaTest {
         )
         assertNull(WebAuthQrDialog.extractInviteKey("https://kokoho.tucsoncommunity.online/dashboard"))
         assertNull(WebAuthQrDialog.extractInviteKey("kokoho://web-auth?c=1122&s=3344"))
+    }
+
+    @Test
+    fun claimSeatBySlugSwitchesCleanlyFromPriorSeatWithoutLeakingOldVoucher() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val gson = Gson()
+        val capturedPayloads = CopyOnWriteArrayList<Map<*, *>>()
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        activeServer = server
+        server.createContext("/v1/auth/enroll") { ex ->
+            val raw = ex.requestBody.bufferedReader(Charsets.UTF_8).readText()
+            capturedPayloads += gson.fromJson(raw, Map::class.java)
+            val resp = DeviceTrustManager.AuthResponseDto(
+                ok = true,
+                status = "ENROLLED",
+                seatId = "seat-new-02",
+                slug = "inv-new-02",
+                role = "MEMBER",
+                label = "Invite 2"
+            )
+            val bytes = gson.toJson(resp).toByteArray(Charsets.UTF_8)
+            ex.responseHeaders.set("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, bytes.size.toLong())
+            ex.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        KokohoHubClient.setHubUrl(ctx, "http://127.0.0.1:${server.address.port}")
+
+        // Seed existing seat-old-01 with voucher
+        File(ctx.noBackupFilesDir, "seat_identity.json").writeText(
+            """{"seat_id":"seat-old-01","slug":"inv-old-01","voucher":"old-voucher-secret"}""",
+            Charsets.UTF_8
+        )
+        DeviceTrustManager.setEnrolledForTest(ctx, seatId = "seat-old-01", slug = "inv-old-01")
+
+        val done = java.util.concurrent.CountDownLatch(1)
+        var claimOk = false
+        DeviceTrustManager.claimSeatBySlug(ctx, "inv-new-02") { ok, _ ->
+            claimOk = ok
+            done.countDown()
+        }
+        for (i in 0 until 40) {
+            if (done.count == 0L) break
+            Thread.sleep(50)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+        }
+        assertTrue("claimSeatBySlug must complete", done.count == 0L && claimOk)
+        assertEquals(1, capturedPayloads.size)
+        val sent = capturedPayloads.first()
+        assertEquals("", sent["seat_id"])
+        assertEquals("inv-new-02", sent["slug"])
+        assertEquals("", sent["voucher"])
+        assertEquals("seat-new-02", DeviceTrustManager.loadOrExtractSeatIdentity(ctx)?.seatId)
+        assertEquals("inv-new-02", DeviceTrustManager.currentSeatSlug(ctx))
     }
 }

@@ -139,6 +139,60 @@ object WebAuthQrDialog {
         val cleanKey = inviteKey.trim().substringAfterLast('/').substringBefore('?').substringBefore('&').substringBefore('#').trim()
         if (cleanKey.isEmpty() || activity.isFinishing || activity.isDestroyed) return
 
+        val existingSlug = DeviceTrustManager.currentSeatSlug(activity)
+        if (DeviceTrustManager.isEnrolled(activity) &&
+            !existingSlug.isNullOrBlank() &&
+            !existingSlug.equals(cleanKey, ignoreCase = true)
+        ) {
+            val appLabel = resolveAppLabel(activity)
+            val curRole = DeviceTrustManager.enrolledRole(activity).lowercase().replaceFirstChar { it.uppercase() }
+            val curLabel = DeviceTrustManager.enrolledLabel(activity).trim()
+            val seatDesc = if (curLabel.isNotEmpty()) "\"$curLabel\" ($curRole)" else curRole
+            KokohoJourneyUi.showModal(
+                activity = activity,
+                title = "Switch Seat in $appLabel?",
+                subtitle = "$appLabel is already enrolled on $seatDesc."
+            ) { body, dismiss ->
+                val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
+                val msgTv = TextView(activity).apply {
+                    text = "Claiming this invitation will switch $appLabel from its current seat ($seatDesc) to the new invitation seat."
+                    textSize = 14.5f
+                    setTextColor(KokohoJourneyUi.INK_PRIMARY)
+                    setLineSpacing(0f, 1.28f)
+                    setPadding(0, dp(2), 0, dp(14))
+                }
+                body.addView(msgTv)
+                val btnRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                }
+                val cancelBtn = KokohoJourneyUi.secondaryActionButton(activity, "Cancel") {
+                    dismiss()
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { marginEnd = dp(8) }
+                }
+                val switchBtn = KokohoJourneyUi.primaryActionButton(activity, "Switch & Claim") {
+                    dismiss()
+                    executeInviteClaim(activity, cleanKey, fromDeepLink)
+                }
+                btnRow.addView(cancelBtn)
+                btnRow.addView(switchBtn)
+                body.addView(btnRow)
+            }
+            return
+        }
+
+        executeInviteClaim(activity, cleanKey, fromDeepLink)
+    }
+
+    private fun executeInviteClaim(
+        activity: AppCompatActivity,
+        cleanKey: String,
+        fromDeepLink: Boolean
+    ) {
         DeviceTrustManager.claimSeatBySlug(activity, cleanKey) { ok, msg ->
             if (ok) {
                 PriorityVault.syncAllAsync(activity)
