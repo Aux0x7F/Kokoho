@@ -17,7 +17,7 @@ import java.util.List;
  * back just the POLICE alerts near a point.
  *
  * <p>This class is Kokoho's own (the classes it drives are vendored from
- * highway-radar-sabre-plus — see LICENSE in this directory). It is a slimmed
+ * highway-radar-sabre-plus: see LICENSE in this directory). It is a slimmed
  * equivalent of that project's WazeProtocolSource: no Highway Radar plumbing, no
  * reporting, no tile decoding, no keepalive thread.
  *
@@ -263,7 +263,7 @@ public final class WazeRtFetcher {
         boolean wasUnregistered = session.getCredentials() == null;
         if (wasUnregistered && !canRegisterToday()) {
             throw new WazeExceptions.WazeOperationException(
-                    "Waze's daily anonymous-account limit is reached — try again tomorrow");
+                    "Waze's daily anonymous-account limit is reached; try again tomorrow");
         }
 
         long sessionBefore = session.currentServerSessionId();

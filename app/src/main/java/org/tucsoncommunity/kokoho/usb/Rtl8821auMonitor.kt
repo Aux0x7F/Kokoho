@@ -53,7 +53,7 @@ class Rtl8821auMonitor {
 
             rxLoop(conn, rx, onFrame, onStatus)
         } catch (e: Exception) {
-            UsbWifi.log("RTL8821AU: bring-up error — ${e.message}")
+            UsbWifi.log("RTL8821AU: bring-up error: ${e.message}")
             onStatus("RTL8821AU: error · ${e.message}")
         } finally {
             runCatching { led(conn, false) }
@@ -93,7 +93,7 @@ class Rtl8821auMonitor {
         w16(conn, Rtl8821auTables.REG_RXFLTMAP1, Rtl8821auTables.RXFLTMAP_ALL)
         w16(conn, Rtl8821auTables.REG_RXFLTMAP2, Rtl8821auTables.RXFLTMAP_ALL)
         channelTune(conn, ch)
-        UsbWifi.log("RTL8821AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch $ch".format(
+        UsbWifi.log("RTL8821AU: RCR=0x%08x BB(0x800)=0x%08x: monitor live ch $ch".format(
             r32(conn, Rtl8821auTables.REG_RCR), r32(conn, 0x800)))
         return true
     }
@@ -216,7 +216,7 @@ class Rtl8821auMonitor {
             return
         }
         UsbWifi.log("RTL8821AU: nothing received for ${silentMs / 1000} s ($regs) - bringing the chip up again (${st.revivals} of $MAX_REVIVALS)")
-        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8821AU: restart failed — ${it.message}") }
+        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8821AU: restart failed: ${it.message}") }
         st.ledOn = !st.ledOn // the light was reset with the chip: the next blink step writes it again
         st.hopAt = System.currentTimeMillis()
     }

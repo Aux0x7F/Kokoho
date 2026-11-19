@@ -72,9 +72,9 @@ class SettingsActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         bgPermSubView?.text = if (granted || Permissions.hasBackgroundLocation(this)) {
-            "Granted — unthrottled background Wi-Fi & BLE scanning active"
+            "Granted: unthrottled background Wi-Fi & BLE scanning active"
         } else {
-            "Not granted — allow 'All the time' in Android Location permissions for background scanning"
+            "Not granted: allow 'All the time' in Android Location permissions for background scanning"
         }
     }
 
@@ -285,9 +285,9 @@ class SettingsActivity : AppCompatActivity() {
             section = secPermissions,
             titleText = "Background Location ('Allow all the time')",
             subtitleText = if (Permissions.hasBackgroundLocation(this)) {
-                "Granted — unthrottled background Wi-Fi & BLE scanning active"
+                "Granted: unthrottled background Wi-Fi & BLE scanning active"
             } else {
-                "Recommended — prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
+                "Recommended: prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
             },
             buttonLabel = if (Permissions.hasBackgroundLocation(this)) "Granted" else "Allow",
             keywords = "background location scan rate permissions wifi ble"
@@ -310,9 +310,9 @@ class SettingsActivity : AppCompatActivity() {
             section = secPermissions,
             titleText = "Unrestricted Battery Usage",
             subtitleText = if (Permissions.isIgnoringBatteryOptimizations(this)) {
-                "Active — Android Doze will not throttle sensor sweeps"
+                "Active: Android Doze will not throttle sensor sweeps"
             } else {
-                "Recommended — exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
+                "Recommended: exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
             },
             buttonLabel = if (Permissions.isIgnoringBatteryOptimizations(this)) "Active" else "Exempt",
             keywords = "battery optimization unrestricted doze scan rate"
@@ -360,7 +360,7 @@ class SettingsActivity : AppCompatActivity() {
         addActionRow(
             section = secDisplay,
             titleText = "Distance Units",
-            subtitleText = if (KokohoSignatures.isImperialUnits(this)) "Imperial (ft / mi) — Default" else "Metric (m / km)",
+            subtitleText = if (KokohoSignatures.isImperialUnits(this)) "Imperial (ft / mi), Default" else "Metric (m / km)",
             buttonLabel = "Change",
             keywords = "units imperial metric miles feet kilometers meters distance"
         ) { subTv ->
@@ -368,9 +368,9 @@ class SettingsActivity : AppCompatActivity() {
                 this,
                 "Distance Units",
                 listOf(
-                    KokohoJourneyUi.SubjourneyMenuItem("Imperial (ft / mi) — Default") {
+                    KokohoJourneyUi.SubjourneyMenuItem("Imperial (ft / mi), Default") {
                         KokohoSignatures.setImperialUnits(this, true)
-                        subTv.text = "Imperial (ft / mi) — Default"
+                        subTv.text = "Imperial (ft / mi), Default"
                     },
                     KokohoJourneyUi.SubjourneyMenuItem("Metric (m / km)") {
                         KokohoSignatures.setImperialUnits(this, false)
@@ -444,14 +444,14 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         bgPermSubView?.text = if (Permissions.hasBackgroundLocation(this)) {
-            "Granted — unthrottled background Wi-Fi & BLE scanning active"
+            "Granted: unthrottled background Wi-Fi & BLE scanning active"
         } else {
-            "Recommended — prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
+            "Recommended: prevents Android from pausing Wi-Fi & BLE scans when Kokoho is in the background"
         }
         batterySubView?.text = if (Permissions.isIgnoringBatteryOptimizations(this)) {
-            "Active — Android Doze will not throttle sensor sweeps"
+            "Active: Android Doze will not throttle sensor sweeps"
         } else {
-            "Recommended — exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
+            "Recommended: exempt Kokoho from battery throttling for continuous RTL-SDR & BLE sweeps"
         }
     }
 

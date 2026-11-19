@@ -16,9 +16,9 @@ import java.util.Map;
 
 /**
  * Kokoho replacement for the SABRE Plus OkHttp-based {@code WazeHttpClient}.
- * Same contract — binary/octet-stream POSTs, per-session cookies (login sets
+ * Same contract: binary/octet-stream POSTs, per-session cookies (login sets
  * {@code Waze-Session-Affinity}, every later command must carry it), three
- * attempts on transport failure — on {@link HttpURLConnection}, so the app takes
+ * attempts on transport failure: on {@link HttpURLConnection}, so the app takes
  * no OkHttp dependency. Only POST is kept; the tile-server GET is not part of the
  * alert fetch path.
  */

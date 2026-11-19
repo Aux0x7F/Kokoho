@@ -488,6 +488,9 @@ object DeviceTrustManager {
 
             val seat = loadOrExtractSeatIdentity(app) ?: return null
             if (seat.seatId.isBlank()) return null
+            if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+                return null
+            }
 
             val ephemKp = runCatching {
                 KeyPairGenerator.getInstance("EC").apply {
@@ -569,6 +572,9 @@ object DeviceTrustManager {
         extraHeaders: Map<String, String>
     ): EnvelopedHttpResponse? {
         val app = context.applicationContext ?: context
+        if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+            return null
+        }
         val cleanPath = if (pathAndQuery.startsWith("/")) pathAndQuery else "/$pathAndQuery"
         val base = KokohoHubClient.hubUrl(app)
 
@@ -726,6 +732,7 @@ object DeviceTrustManager {
     fun ensureEnrolledAsync(context: Context, onComplete: ((AuthResponseDto?) -> Unit)? = null) {
         val app = context.applicationContext ?: context
         PriorityVault.ensureScreenOffReceiverRegistered(app)
+        VpnGeoGate.ensureNetworkCallbackRegistered(app)
         val seat = loadOrExtractSeatIdentity(app)
         if (seat == null) {
             onComplete?.invoke(null)
@@ -736,6 +743,7 @@ object DeviceTrustManager {
             val resp = if (seat.seatId.isNotBlank()) {
                 val statusResp = checkDeviceStatusBlocking(app, seat)
                 when {
+                    statusResp != null && statusResp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> statusResp
                     statusResp != null && statusResp.status.equals("ENROLLED", ignoreCase = true) -> statusResp
                     statusResp != null && wasEnrolled -> statusResp // Displaced/revoked/agreed already wiped in applyAuthOutcome
                     statusResp != null && statusResp.status.uppercase() in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") -> statusResp
@@ -745,8 +753,8 @@ object DeviceTrustManager {
             } else {
                 enrollBlocking(app, seat)
             }
-            if (resp == null && isEnrolled(app)) {
-                // Offline while enrolled: ensure any deferred sync runs if network recovers later
+            if ((resp == null || resp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true)) && isEnrolled(app)) {
+                // Offline or paused on Tucson VPN gate while enrolled: load locally sealed directory
                 KokohoDirectory.ensureLoaded(app)
             }
             if (onComplete != null) {
@@ -790,7 +798,11 @@ object DeviceTrustManager {
                 when {
                     resp == null -> onResult(
                         false,
-                        "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
+                        "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN (such as ProtonVPN) and internet connection are active."
+                    )
+                    resp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> onResult(
+                        false,
+                        resp.message ?: VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
                     )
                     resp.status.equals("ENROLLED", ignoreCase = true) -> onResult(
                         true,
@@ -817,12 +829,14 @@ object DeviceTrustManager {
     ): String {
         val norm = status?.trim()?.uppercase().orEmpty()
         return when {
+            norm == VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON ->
+                VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
             norm == "PENDING_REBIND" ->
                 "This app build's hardware key is pending Owner approval on this seat (for example, if both Kokoho and Kokoho Debug are installed, or if switching phones). Approve it in Hub → Permissions, or open the originally enrolled Kokoho app."
             norm == "REVOKED" ->
                 "This invitation seat has been revoked."
             enr == null && hasSeatRef ->
-                "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
+                "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN (such as ProtonVPN) and internet connection are active."
             else ->
                 "This app is not yet enrolled on a Hub seat. Install your seat APK from the Field Guide first."
         }
@@ -845,9 +859,9 @@ object DeviceTrustManager {
         val low = cleaned.lowercase()
         return when {
             httpCode == 0 ->
-                "Could not reach Kokoho Hub. Make sure your VPN and internet connection are active."
+                "Could not reach Kokoho Hub. Make sure your VPN (such as ProtonVPN) and internet connection are active."
             low.contains("expired") || low.contains("not found") && httpCode == 400 ->
-                "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again."
+                "That authorization prompt expired. Switch back to your browser (it refreshes automatically) and tap or scan again."
             low.contains("mismatch") ->
                 "That authorization prompt belongs to a different invitation link than the seat enrolled in this app."
             low.contains("clock skew") ->
@@ -858,7 +872,7 @@ object DeviceTrustManager {
                 "This invitation seat is not currently active on the Hub."
             cleaned.isNotBlank() -> cleaned
             else ->
-                "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again."
+                "That authorization prompt expired. Switch back to your browser (it refreshes automatically) and tap or scan again."
         }
     }
 
@@ -921,6 +935,12 @@ object DeviceTrustManager {
     ) {
         val app = context.applicationContext ?: context
         scope.launch {
+            if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE)
+                }
+                return@launch
+            }
             var seat = loadOrExtractSeatIdentity(app)
             var enr: AuthResponseDto? = null
 
@@ -1020,6 +1040,13 @@ object DeviceTrustManager {
     }
 
     internal fun enrollBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
+        if (VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+            return AuthResponseDto(
+                ok = false,
+                status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
+                message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+            )
+        }
         val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
         val idOrSlug = seat.seatId.ifBlank { seat.slug }
         if (idOrSlug.isBlank()) return null
@@ -1044,6 +1071,13 @@ object DeviceTrustManager {
 
     internal fun checkDeviceStatusBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
         if (seat.seatId.isBlank()) return null
+        if (VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+            return AuthResponseDto(
+                ok = false,
+                status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
+                message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+            )
+        }
         val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
         val ts = System.currentTimeMillis()
         val msg = "status|${seat.seatId}|$ts"
@@ -1167,6 +1201,7 @@ object DeviceTrustManager {
 
     internal fun resetTrustForTest(context: Context) {
         val app = context.applicationContext ?: context
+        VpnGeoGate.resetForTest()
         clearSessionKey()
         PriorityVault.destroyVaultKeyAndFiles(app)
         runCatching { File(app.noBackupFilesDir, SEAT_FILE_NAME).delete() }

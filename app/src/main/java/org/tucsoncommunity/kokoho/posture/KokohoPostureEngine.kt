@@ -293,7 +293,7 @@ object KokohoPostureEngine {
     private const val LOCAL_TRIANGULATION_DECAY_MS = 45 * 60_000L
     private const val KIT_FUSION_WINDOW_MS = 15_000L
 
-    /** Minimum uncertainty radius (meters) — 200 ft ≈ 61 m — before a wide uncorroborated circle is jittered. */
+    /** Minimum uncertainty radius (meters): 200 ft ≈ 61 m: before a wide uncorroborated circle is jittered. */
     const val WIDE_CIRCLE_JITTER_MIN_M = 61
 
     /**
@@ -1443,7 +1443,7 @@ object KokohoPostureEngine {
         //     - Suppresses fixed `[ESS]` room/WPA-TKIP/long-uptime infrastructure APs (e.g. "101" room APs).
         //     - Matches raw BLE Company IDs (`0x034D` Axon/TASER, `0x04EC` Motorola, `0x01F1` Zebra) & 16-bit Service UUIDs.
         //     - Strict deterministic entity correlation: merges into a router entity ONLY on exact MAC, exact non-generic SSID,
-        //       or matching adjusted 802.11 TSF boot epoch (`|ΔupSince| <= 2000ms`) — never speculative spatial assumptions!
+        //       or matching adjusted 802.11 TSF boot epoch (`|ΔupSince| <= 2000ms`): never speculative spatial assumptions!
         data class KitEntry(
             val capLabel: String,
             val isBodycam: Boolean,
@@ -2201,7 +2201,7 @@ object KokohoPostureEngine {
     ) {
         val dodTrunkActive = RadioLog.activeDodTrunkChannelCount(nowMs) >= 3
 
-        // 3. Evaluate local RTL-SDR RF Hits — suppress wide-area non-localizing emissions along user travel,
+        // 3. Evaluate local RTL-SDR RF Hits: suppress wide-area non-localizing emissions along user travel,
         // corroborate colocated OUI units of the SAME agency (<= 15s & <= 100m, at most 1 RF channel per OUI unit),
         // and anchor standalone RF entities to their initial episode coordinates (zero moving-userLoc grid clones).
         for (rf in localRfHits) {
@@ -2722,7 +2722,7 @@ object KokohoPostureEngine {
             )
             val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()
             val airSummary = when {
-                isUnattributedCircling -> "Unattributed Circling Aircraft — Verify ($identStr)"
+                isUnattributedCircling -> "Unattributed Circling Aircraft: Verify ($identStr)"
                 isCircling -> "Spy Plane / Orbiting Overhead ($identStr)"
                 else -> "ADS-B Aircraft ($identStr)"
             }

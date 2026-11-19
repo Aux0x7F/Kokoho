@@ -68,7 +68,7 @@ class Rtl8822buMonitor {
             onStatus("$label · live · 2.4 + 5 GHz monitor")
             rxLoop(conn, rx, c, label, onFrame, onStatus)
         } catch (e: Exception) {
-            UsbWifi.log("$label: stopped — ${e.message}")
+            UsbWifi.log("$label: stopped: ${e.message}")
             onStatus("$label: error · ${e.message}")
         } finally {
             chip?.let { if (it.up) runCatching { it.powerOff() } }
@@ -95,7 +95,7 @@ class Rtl8822buMonitor {
                        onFrame: (List<MonitorSighting>) -> Unit, onStatus: (String) -> Unit) {
         while (true) {
             val c = commands.poll() ?: break
-            try { command(chip, st, c) } catch (e: Exception) { UsbWifi.log("${st.label}: command '$c' failed — ${e.message}") }
+            try { command(chip, st, c) } catch (e: Exception) { UsbWifi.log("${st.label}: command '$c' failed: ${e.message}") }
         }
         if (now - st.lastLog > 3000) {
             if (st.parked > 0) frames.window().forEach { UsbWifi.log("${st.label}:   $it") }
@@ -108,7 +108,7 @@ class Rtl8822buMonitor {
             pathSense.decided = true
             val name = if (path == 1) "B" else "A"
             UsbWifi.log("${st.label}: antenna on path $name (${pathSense.bVotes} frames stronger on B, ${pathSense.aVotes} on A)" +
-                if (path == 1) " — 2.4 GHz CCK reception moved to path B" else "")
+                if (path == 1) ": 2.4 GHz CCK reception moved to path B" else "")
             if (path == 1) chipIo(st) { chip.setCckPath(1) }
         }
         if (st.dig && now - st.digAt > DIG_MS) {
@@ -160,7 +160,7 @@ class Rtl8822buMonitor {
 
     private inline fun chipIo(st: RxState, op: () -> Unit) {
         try { op(); st.ioFailures = 0 } catch (e: IOException) {
-            if (++st.ioFailures % 10 == 1) UsbWifi.log("${st.label}: register access failed (${st.ioFailures}) — ${e.message}")
+            if (++st.ioFailures % 10 == 1) UsbWifi.log("${st.label}: register access failed (${st.ioFailures}): ${e.message}")
             if (st.ioFailures >= MAX_IO_FAILURES) throw IOException("adapter stopped responding (replug it)")
         }
     }
@@ -254,7 +254,7 @@ class Rtl8822buMonitor {
             var fwOk = false
             for (attempt in 0 until 4) {
                 checkStop()
-                if (attempt > 0) UsbWifi.log("$label: firmware didn't start — full power cycle, try ${attempt + 1}/4")
+                if (attempt > 0) UsbWifi.log("$label: firmware didn't start: full power cycle, try ${attempt + 1}/4")
                 preInitSystemCfg()
                 powerOn()
                 readChipVersion()
@@ -282,7 +282,7 @@ class Rtl8822buMonitor {
             coexWlanOnly(ch > 14)
             enableRx()
             up = true
-            UsbWifi.log("$label: monitor live ch $ch — CR 0x%04x RCR 0x%08x RF18 0x%05x".format(r16(0x100), r32(0x608), rfRead(0, 0x18)))
+            UsbWifi.log("$label: monitor live ch $ch: CR 0x%04x RCR 0x%08x RF18 0x%05x".format(r16(0x100), r32(0x608), rfRead(0, 0x18)))
         }
 
         private fun checkStop() { if (stop) throw IOException("stopped") }

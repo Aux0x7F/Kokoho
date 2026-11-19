@@ -15,10 +15,10 @@ import kotlin.math.abs
 /**
  * Hierarchical agency taxonomy for Kokoho, ordered by strict alerting priority:
  *  1. [DHS_ICE] ("ICE")
- *  2. [DHS_AMO] ("DHS Air" — AMO & circling unlisted spy planes)
+ *  2. [DHS_AMO] ("DHS Air": AMO & circling unlisted spy planes)
  *  3. [DHS_CBP] ("CBP")
  *  4. [DHS_HSI] ("HSI")
- *  5. Other Federal ([DHS_FPS], [DHS_INTEROP] — OFF by default)
+ *  5. Other Federal ([DHS_FPS], [DHS_INTEROP]: OFF by default)
  *  6. Local & Tactical ([SHERIFF], [POLICE], [DRONE])
  *  7. Emergency ([FIRE], [SAR])
  */
@@ -1377,8 +1377,8 @@ object KokohoSignatures {
 
     /**
      * Matches a P25 talkgroup ID against the compiled RadioReference Arizona P25 talkgroup table
-     * (`az_talkgroups.tsv.gz`: PCWIN, AZWINS, Pinal, Marana, FCC Tucson, RWC, TRWC) first — suppressing
-     * municipal non-LE (`IGNORE`: Public Works, Water, Transit, Schools, Hospitals, ADOT) — and falling
+     * (`az_talkgroups.tsv.gz`: PCWIN, AZWINS, Pinal, Marana, FCC Tucson, RWC, TRWC) first: suppressing
+     * municipal non-LE (`IGNORE`: Public Works, Water, Transit, Schools, Hospitals, ADOT): and falling
      * back to the curated range table when unlisted.
      */
     fun matchTalkgroup(tg: Int, systemHint: String? = null): TalkgroupSig? {
@@ -1386,7 +1386,7 @@ object KokohoSignatures {
             if (ref.agencyCode == "IGNORE") return null
             val ag = KokohoAgency.fromCode(ref.agencyCode) ?: return null
             val lbl = if (ref.description.isNotBlank() && !ref.description.equals(ref.alphaTag, ignoreCase = true)) {
-                "${ref.alphaTag} — ${ref.description}"
+                "${ref.alphaTag}: ${ref.description}"
             } else {
                 ref.alphaTag.ifBlank { "${ref.system} TG $tg" }
             }
@@ -1908,7 +1908,7 @@ object KokohoSignatures {
                         }
                         val fixed = when {
                             (upMac.startsWith("00:30:44:74:") || upMac.startsWith("06:30:44:74:")) && m.agencyId != "SHERIFF" ->
-                                m.copy(agencyId = "SHERIFF", label = "Pima County Sheriff — PCSD-Vehicle (IBR1700)")
+                                m.copy(agencyId = "SHERIFF", label = "Pima County Sheriff: PCSD-Vehicle (IBR1700)")
                             upMac.startsWith("00:30:44:22:8") && m.agencyId != "FIRE" ->
                                 m.copy(agencyId = "FIRE", label = "Fire")
                             else -> m

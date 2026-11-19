@@ -13,11 +13,11 @@ import kotlin.math.abs
 /**
  * High-speed, low-memory offline reference lookup tables compiled by `tools/compile_reference_tables.py`
  * from official public-domain & open-source registries:
- *  1. `reference/aircraft_meta.tsv.gz` — 220k+ Mode-S hexes (FAA MASTER + ACFTREF + plane-alert-db + tar1090-db)
- *  2. `reference/az_airfields.tsv` — 968 AZ/Sonora airports, runways, gliderports, & hospital helipads (OurAirports)
- *  3. `reference/az_fcc_rf.tsv.gz` — 4,540 Active AZ FCC ULS Land-Mobile (`l_LMpriv` + `l_LMcomm`) + DHS NIFOG channels
- *  4. `reference/ieee_subblocks.tsv.gz` — 7,207 IEEE 36-bit (MA-S), 28-bit (MA-M), & tactical 24-bit (MA-L) blocks
- *  5. `reference/az_cells.tsv` — Surveyed Southern AZ LTE/NR carrier cell ground truth
+ *  1. `reference/aircraft_meta.tsv.gz`: 220k+ Mode-S hexes (FAA MASTER + ACFTREF + plane-alert-db + tar1090-db)
+ *  2. `reference/az_airfields.tsv`: 968 AZ/Sonora airports, runways, gliderports, & hospital helipads (OurAirports)
+ *  3. `reference/az_fcc_rf.tsv.gz`: 4,540 Active AZ FCC ULS Land-Mobile (`l_LMpriv` + `l_LMcomm`) + DHS NIFOG channels
+ *  4. `reference/ieee_subblocks.tsv.gz`: 7,207 IEEE 36-bit (MA-S), 28-bit (MA-M), & tactical 24-bit (MA-L) blocks
+ *  5. `reference/az_cells.tsv`: Surveyed Southern AZ LTE/NR carrier cell ground truth
  */
 object KokohoReferenceTables {
 

@@ -3,7 +3,7 @@ package org.tucsoncommunity.kokoho.util
 import androidx.appcompat.app.AppCompatActivity
 
 /**
- * Disabled in Kokoho — camera locations are never used or prompted.
+ * Disabled in Kokoho: camera locations are never used or prompted.
  */
 object CameraQuestion {
     fun askIfNeeded(activity: AppCompatActivity, then: () -> Unit) {

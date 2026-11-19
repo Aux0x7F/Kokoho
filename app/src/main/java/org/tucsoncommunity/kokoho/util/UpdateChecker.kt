@@ -161,6 +161,12 @@ object UpdateChecker {
     }
 
     private fun fetchFromHub(context: Context): Latest {
+        if (DeviceTrustManager.loadOrExtractSeatIdentity(context) != null &&
+            org.tucsoncommunity.kokoho.posture.VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) ==
+            org.tucsoncommunity.kokoho.posture.VpnGeoGate.Verdict.BLOCKED_TUCSON
+        ) {
+            throw IllegalStateException(org.tucsoncommunity.kokoho.posture.VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE)
+        }
         val base = KokohoHubClient.hubUrl(context)
         val pkg = Uri.encode(context.packageName)
         val manifestPath = BuildConfig.UPDATE_MANIFEST_PATH.trim().ifEmpty { "/v1/update/latest" }
@@ -330,7 +336,7 @@ object UpdateChecker {
                 when (outcome) {
                     is UpdateInstaller.Outcome.Cancelled -> if (alive()) Toast.makeText(
                         activity,
-                        "Update cancelled — you can install it from Utility anytime",
+                        "Update cancelled. You can install it from Utilities anytime.",
                         Toast.LENGTH_LONG
                     ).show()
                     is UpdateInstaller.Outcome.Failed -> if (alive()) failed(activity, latest, outcome.message)
@@ -375,7 +381,7 @@ object UpdateChecker {
                         if (!left) return
                         activity.lifecycle.removeObserver(this)
                         if (UpdateInstaller.canInstall(activity)) installNow(activity, latest)
-                        else Toast.makeText(activity, "Permission not granted — update not started", Toast.LENGTH_LONG).show()
+                        else Toast.makeText(activity, "Permission not granted. Update not started.", Toast.LENGTH_LONG).show()
                     }
                 })
                 runCatching { activity.startActivity(UpdateInstaller.allowInstallsIntent(activity)) }

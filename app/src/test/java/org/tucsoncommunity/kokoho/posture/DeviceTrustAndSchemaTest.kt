@@ -60,8 +60,8 @@ class DeviceTrustAndSchemaTest {
     @Test
     fun unifiedSingleBuildVersionAndZeroBundledEncAsset() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals(1421, BuildConfig.VERSION_CODE)
-        assertEquals("1.3.13", BuildConfig.VERSION_NAME)
+        assertEquals(1422, BuildConfig.VERSION_CODE)
+        assertEquals("1.3.14", BuildConfig.VERSION_NAME)
         assertEquals("/v1/update/latest", BuildConfig.UPDATE_MANIFEST_PATH)
 
         val refAssets = runCatching { ctx.assets.list("reference")?.toList().orEmpty() }.getOrDefault(emptyList())
@@ -177,7 +177,7 @@ class DeviceTrustAndSchemaTest {
 
         val expiredMsg = DeviceTrustManager.formatGrantErrorMessage(400, "QR challenge expired or not found")
         assertEquals(
-            "That authorization prompt expired. Switch back to your browser — it refreshes automatically — and tap or scan again.",
+            "That authorization prompt expired. Switch back to your browser (it refreshes automatically) and tap or scan again.",
             expiredMsg
         )
 
@@ -827,5 +827,81 @@ class DeviceTrustAndSchemaTest {
         assertEquals("", sent["voucher"])
         assertEquals("seat-new-02", DeviceTrustManager.loadOrExtractSeatIdentity(ctx)?.seatId)
         assertEquals("inv-new-02", DeviceTrustManager.currentSeatSlug(ctx))
+    }
+
+    @Test
+    fun vpnGeoGateBlocksSeatedTucsonEgressRecommendsProtonVpnAndAllowsUnseatedOrVpnExit() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Geographic classification checks
+        assertTrue(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "AZ", "Tucson", 32.2226, -110.9747)))
+        assertTrue(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "Arizona", "Oro Valley", Double.NaN, Double.NaN)))
+        assertTrue(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "AZ", "Marana", 32.4367, -111.2224)))
+        assertFalse(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "AZ", "Phoenix", 33.4484, -112.0740)))
+        assertFalse(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "CO", "Denver", 39.7392, -104.9903)))
+        assertFalse(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("CH", "ZH", "Zurich", 47.3769, 8.5417)))
+
+        // 2. Unseated public install returns UNSEATED without blocking
+        DeviceTrustManager.resetTrustForTest(ctx)
+        assertEquals(VpnGeoGate.Verdict.UNSEATED, VpnGeoGate.checkHubEgressAllowedBlocking(ctx, forceSeatedCheck = false))
+        assertFalse(VpnGeoGate.isBlockedTucson())
+
+        // 3. Mock Hub server verifies zero HTTP requests arrive while seated + BLOCKED_TUCSON
+        val hitCount = AtomicInteger(0)
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        activeServer = server
+        server.createContext("/") { ex ->
+            hitCount.incrementAndGet()
+            val bytes = """{"ok":true,"status":"ENROLLED","seat_id":"seat-vpn-1","slug":"inv-vpn-1","role":"MEMBER","label":"VpnSeat"}""".toByteArray(Charsets.UTF_8)
+            ex.responseHeaders.set("Content-Type", "application/json")
+            ex.sendResponseHeaders(200, bytes.size.toLong())
+            ex.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        KokohoHubClient.setHubUrl(ctx, "http://127.0.0.1:${server.address.port}")
+
+        DeviceTrustManager.setEnrolledForTest(ctx, seatId = "seat-vpn-1", slug = "inv-vpn-1")
+        VpnGeoGate.testOverrideVerdict = VpnGeoGate.Verdict.BLOCKED_TUCSON
+
+        // Status poll & enveloped requests must be withheld locally while preserving ENROLLED state
+        val statusDto = DeviceTrustManager.checkDeviceStatusBlocking(
+            ctx,
+            DeviceTrustManager.SeatIdentity("seat-vpn-1", "inv-vpn-1", "vouch-1")
+        )
+        assertNotNull(statusDto)
+        assertEquals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, statusDto!!.status)
+        assertTrue(statusDto.message.orEmpty().contains("ProtonVPN"))
+        assertTrue("Already-enrolled seat must NOT be wiped by local VPN gate", DeviceTrustManager.isEnrolled(ctx))
+        assertNull(DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=0", "{}"))
+        assertEquals("Zero Hub HTTP calls may fire while Tucson VPN gate is active", 0, hitCount.get())
+
+        // Web grant also surfaces ProtonVPN advisory without hitting Hub
+        val grantLatch = java.util.concurrent.CountDownLatch(1)
+        var grantOk = true
+        var grantMsg = ""
+        DeviceTrustManager.grantWebSession(ctx, "chal-1", "sec-1") { ok, msg ->
+            grantOk = ok
+            grantMsg = msg
+            grantLatch.countDown()
+        }
+        for (i in 0 until 30) {
+            if (grantLatch.count == 0L) break
+            Thread.sleep(40)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+        }
+        assertFalse(grantOk)
+        assertTrue(grantMsg.contains("ProtonVPN"))
+        assertEquals(0, hitCount.get())
+
+        // 4. Switching VPN ON (Verdict.ALLOWED) immediately unblocks Hub communication
+        VpnGeoGate.testOverrideVerdict = VpnGeoGate.Verdict.ALLOWED
+        val allowedDto = DeviceTrustManager.checkDeviceStatusBlocking(
+            ctx,
+            DeviceTrustManager.SeatIdentity("seat-vpn-1", "inv-vpn-1", "vouch-1")
+        )
+        assertNotNull(allowedDto)
+        assertEquals("ENROLLED", allowedDto!!.status)
+        assertEquals(1, hitCount.get())
+        assertFalse(VpnGeoGate.isBlockedTucson())
     }
 }

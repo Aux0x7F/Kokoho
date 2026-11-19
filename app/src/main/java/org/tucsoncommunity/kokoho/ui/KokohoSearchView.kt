@@ -43,9 +43,9 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Unified `Search` tab view (`Monitor | Map | Search`) across all Kokoho schemas:
- *  - `Detection` (`EvaluatedThreat` — live, durable SQLite ledger, witness, & synced Hub entities)
- *  - `Location` (`KokohoDirectory.FacilityLocation` — stations & facilities)
- *  - `Person` (`KokohoDirectory.PersonRecord` — witness personnel & packaged directory personnel)
+ *  - `Detection` (`EvaluatedThreat`: live, durable SQLite ledger, witness, & synced Hub entities)
+ *  - `Location` (`KokohoDirectory.FacilityLocation`: stations & facilities)
+ *  - `Person` (`KokohoDirectory.PersonRecord`: witness personnel & packaged directory personnel)
  *  - `Device` (`DeviceRegistry.Snapshot` & constituent hardware/RF signatures)
  *
  * Supports standardized `Tab` / `Enter` / `+ chip` autocomplete filter pills (`✕` dismissible)
@@ -605,7 +605,7 @@ class KokohoSearchView(
                         schema = SchemaKind.PLATE,
                         title = "${p.plateNumber} (${p.stateCode})",
                         metaLine = "Plate · ${p.suspectedAgency.ifBlank { ag?.friendlyLabel ?: "Unknown" }} · ${p.confidencePct}%$detStr",
-                        detailLine = listOf(vehDesc, p.details).filter { it.isNotBlank() }.joinToString(" — "),
+                        detailLine = listOf(vehDesc, p.details).filter { it.isNotBlank() }.joinToString(" · "),
                         targetDetailKey = "plate:${p.plateId}",
                         agency = ag,
                         detectionIconKind = MapIcons.BadgeIconKind.CAR
@@ -649,7 +649,7 @@ class KokohoSearchView(
             }
         }
 
-        // 3. Personnel (`PersonRecord` — searches witness person records & any packaged directory records)
+        // 3. Personnel (`PersonRecord`: searches witness person records & any packaged directory records)
         if (includePersons) {
             val personTokens = contentTokens.filterNot { parseSchemaPill(it) == SchemaKind.PERSON }
             val matchedPersons = if (personTokens.isEmpty()) {
@@ -1019,7 +1019,7 @@ class KokohoSearchView(
                     val veh = listOf(plate.color, plate.make, plate.model, plate.bodyType)
                         .filter { it.isNotBlank() }
                         .joinToString(" · ")
-                        .ifBlank { "—" }
+                        .ifBlank { "-" }
                     KokohoJourneyUi.showModal(
                         activity = activity,
                         title = "${plate.plateNumber} (${plate.stateCode})",

@@ -15,7 +15,7 @@ import kotlin.math.roundToInt
  *
  * Ensures that local-only detections (when Share is OFF, the default), synced historical matches,
  * and dropped-point reports survive across `30m`, `3h`, `24h`, `1wk`, `1mo`, and `Heat` rolling
- * view windows as well as app restarts — never evaporating after 48 hours and never resetting at midnight.
+ * view windows as well as app restarts: never evaporating after 48 hours and never resetting at midnight.
  *
  * Performance invariant:
  *  - [memoryMirror] serves all reads in O(1) RAM without touching disk after initial one-time open.

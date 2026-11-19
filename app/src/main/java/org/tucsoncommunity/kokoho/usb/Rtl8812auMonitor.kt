@@ -58,7 +58,7 @@ class Rtl8812auMonitor {
 
             rxLoop(conn, rx, onFrame, onStatus)
         } catch (e: Exception) {
-            UsbWifi.log("RTL8812AU: bring-up error — ${e.message}")
+            UsbWifi.log("RTL8812AU: bring-up error: ${e.message}")
             onStatus("RTL8812AU: error · ${e.message}")
         } finally {
             // Scanning stopped, adapter still plugged in: radio and receiver off, so it stops drawing on the battery.
@@ -103,7 +103,7 @@ class Rtl8812auMonitor {
         w16(conn, Rtl8812auTables.REG_RXFLTMAP2, Rtl8812auTables.RXFLTMAP_ALL)
         // The first channel: the band is switched by the tune itself.
         channelTune(conn, ch)
-        UsbWifi.log("RTL8812AU: RCR=0x%08x BB(0x800)=0x%08x — monitor live ch $ch".format(
+        UsbWifi.log("RTL8812AU: RCR=0x%08x BB(0x800)=0x%08x: monitor live ch $ch".format(
             r32(conn, Rtl8812auTables.REG_RCR), r32(conn, 0x800)))
         return true
     }
@@ -245,7 +245,7 @@ class Rtl8812auMonitor {
             return
         }
         UsbWifi.log("RTL8812AU: nothing received for ${silentMs / 1000} s ($regs) - bringing the chip up again (${st.revivals} of $MAX_REVIVALS)")
-        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8812AU: restart failed — ${it.message}") }
+        runCatching { bringUp(conn, HOP[st.hopIdx], onStatus) }.onFailure { UsbWifi.log("RTL8812AU: restart failed: ${it.message}") }
         st.hopAt = System.currentTimeMillis()
     }
 

@@ -355,7 +355,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             if (photos.isNotEmpty()) {
                 KokohoJourneyUi.showPhotoCarouselModal(this, photos, 0)
             } else {
-                Toast.makeText(this, "No photos attached yet — use Submit Report to attach photos", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "No photos attached yet. Use Submit Report to attach photos.", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -378,7 +378,7 @@ class DeviceDetailActivity : AppCompatActivity() {
 
         // Photo Carousel Strip (if photos exist, show tappable count hint)
         if (photos.isNotEmpty()) {
-            val photoHint = buildInfoBadgePill("${photos.size} ${if (photos.size == 1) "Photo" else "Photos"} — Tap thumbnail above to expand") {
+            val photoHint = buildInfoBadgePill("${photos.size} ${if (photos.size == 1) "Photo" else "Photos"}: Tap thumbnail above to expand") {
                 KokohoJourneyUi.showPhotoCarouselModal(this, photos, 0)
             }
             bodyContent.addView(photoHint)
@@ -390,7 +390,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         val coordLine = if (lat != null && lon != null) {
             String.format(Locale.US, "%.5f, %.5f  (Tap to copy)", lat, lon)
         } else {
-            "Proximity only — awaiting GPS fix"
+            "Proximity only (awaiting GPS fix)"
         }
         val coordTv = TextView(this).apply {
             text = coordLine
@@ -589,8 +589,8 @@ class DeviceDetailActivity : AppCompatActivity() {
             val subblock = org.tucsoncommunity.kokoho.posture.KokohoReferenceTables.lookupMacSubblock(normMac)
             addKeyValueRow(card, "MAC / BSSID", normMac)
             addKeyValueRow(card, "Radio Source", snap.source.name)
-            addKeyValueRow(card, "SSID / BLE Name", snap.name ?: "—")
-            addKeyValueRow(card, "IEEE Vendor", subblock?.vendor ?: snap.vendor ?: "—")
+            addKeyValueRow(card, "SSID / BLE Name", snap.name ?: "-")
+            addKeyValueRow(card, "IEEE Vendor", subblock?.vendor ?: snap.vendor ?: "-")
             if (subblock != null) {
                 addKeyValueRow(card, "IEEE Sub-Block", "${subblock.prefixHex} (/${subblock.bitLen} · ${subblock.role})")
             }
@@ -600,7 +600,7 @@ class DeviceDetailActivity : AppCompatActivity() {
             val wifi = snap.advert?.wifi
             if (wifi != null) {
                 addKeyValueRow(card, "Wi-Fi Channel", "${wifi.frequencyMhz} MHz (${if (wifi.client) "Client Station" else "Access Point"})")
-                addKeyValueRow(card, "Capabilities", wifi.capabilities.ifBlank { "—" })
+                addKeyValueRow(card, "Capabilities", wifi.capabilities.ifBlank { "-" })
                 val upSince = snap.upSince ?: wifi.upSince
                 if (upSince != null && snap.lastSeen > upSince) {
                     val upHrs = (snap.lastSeen - upSince) / 3_600_000.0
@@ -692,7 +692,7 @@ class DeviceDetailActivity : AppCompatActivity() {
         // Address & Unstructured Description Card
         val infoCard = buildCard()
         addCardHeader(infoCard, "FACILITY DETAILS")
-        addKeyValueRow(infoCard, "Address", loc.address.ifBlank { "—" })
+        addKeyValueRow(infoCard, "Address", loc.address.ifBlank { "-" })
         val coordStr = String.format(Locale.US, "%.5f, %.5f", loc.lat, loc.lon)
         val coordRow = TextView(this).apply {
             text = "Coordinates: $coordStr  (Tap to copy)"
@@ -836,7 +836,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                     suggestionsContainer.visibility = View.GONE
                 }
 
-                // 3. Render filtered table rows (`Full Name | Title | Agency | Suite` — City/State strictly excluded)
+                // 3. Render filtered table rows (`Full Name | Title | Agency | Suite`: City/State strictly excluded)
                 val filtered = KokohoDirectory.stationedPersonnel(this, loc.id, activePills, liveQ)
                 tableHeaderTv.text = "STATIONED PERSONNEL (${filtered.size} / $totalStationed)"
                 rowsContainer.removeAllViews()
@@ -883,7 +883,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                             }
                         }
                         fun bodyCell(value: String, weight: Float, bold: Boolean = false): TextView = TextView(this).apply {
-                            text = value.ifBlank { "—" }
+                            text = value.ifBlank { "-" }
                             textSize = 12.5f
                             typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
                             setTextColor(if (bold) Color.WHITE else KokohoJourneyUi.INK_SECONDARY)
@@ -1122,7 +1122,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                 listOfNotNull(
                     loc?.let {
                         KokohoJourneyUi.SubjourneyMenuItem("Copy Facility Address") {
-                            copyToClipboard("Address", "${it.title} — ${it.address}")
+                            copyToClipboard("Address", "${it.title}: ${it.address}")
                         }
                     },
                     loc?.let {
@@ -1140,7 +1140,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                     },
                     p?.let {
                         KokohoJourneyUi.SubjourneyMenuItem("Copy Name & Title") {
-                            copyToClipboard("Person", "${it.fullName} — ${it.title}")
+                            copyToClipboard("Person", "${it.fullName}: ${it.title}")
                         }
                     }
                 )

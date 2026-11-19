@@ -330,7 +330,7 @@ object KokohoJourneyUi {
 
     /**
      * Opens the Root Sandwich Menu (`☰`) with 3 top-level entries:
-     *  1. `Filters` (with filter icon — default collapsed; expands inline with per-row Alarm `🔔` & Eye `👁` buttons)
+     *  1. `Filters` (with filter icon: default collapsed; expands inline with per-row Alarm `🔔` & Eye `👁` buttons)
      *  2. `Utilities` (default collapsed; expands inline submenu of utilities)
      *  3. `Settings` (navigates directly to `SettingsActivity`)
      */
@@ -656,7 +656,7 @@ object KokohoJourneyUi {
         UpdateChecker.availableUpdate?.let { rel ->
             addUtilEntry(
                 title = "Update App (v${rel.version})",
-                subtitle = "New release ready on Kokoho Hub — tap to install",
+                subtitle = "New release ready on Kokoho Hub. Tap to install.",
                 highlight = true
             ) { UpdateChecker.installNow(activity, rel) }
         }

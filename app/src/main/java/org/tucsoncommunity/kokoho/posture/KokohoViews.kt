@@ -169,6 +169,8 @@ class KokohoViews(
     var searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView? = null
         private set
     private var unregisterTrustListener: (() -> Unit)? = null
+    private val vpnNoticeWrapper: FrameLayout
+    val vpnNoticePill: MaterialButton
     private val bluetoothNoticePill: MaterialButton
     private val postureBadge: TextView
     val postureHeadline: TextView
@@ -258,7 +260,9 @@ class KokohoViews(
                 }
             })
             setOnClickListener {
-                if (!KokohoSignatures.isContributionAllowedInSettings(activity)) {
+                if (DeviceTrustManager.loadOrExtractSeatIdentity(activity) != null && VpnGeoGate.isBlockedTucson()) {
+                    showTucsonVpnAdvisoryModal(activity) { syncVpnNoticeVisibility() }
+                } else if (!KokohoSignatures.isContributionAllowedInSettings(activity)) {
                     Toast.makeText(
                         activity,
                         "Contribution is disabled. Enable it in Settings > Privacy to share observations.",
@@ -326,8 +330,36 @@ class KokohoViews(
             setPadding(dp(12), dp(2), dp(12), dp(8))
         }
 
+        vpnNoticePill = MaterialButton(activity).apply {
+            text = "VPN Required (Tucson IP) · Connect ProtonVPN & Re-Check"
+            isAllCaps = false
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+            cornerRadius = dp(999)
+            backgroundTintList = ColorStateList.valueOf(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.HIGHLIGHT_AMBER)
+            setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.SURFACE_DARK)
+            strokeColor = ColorStateList.valueOf(Color.WHITE)
+            strokeWidth = dp(1)
+            setOnClickListener {
+                showTucsonVpnAdvisoryModal(activity) { syncVpnNoticeVisibility() }
+            }
+        }
+        vpnNoticeWrapper = FrameLayout(activity).apply {
+            setPadding(dp(14), 0, dp(14), dp(6))
+            visibility = View.GONE
+            addView(
+                vpnNoticePill,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER_HORIZONTAL
+                )
+            )
+        }
+
         rootLinear.addView(topHeaderBar, 0)
         rootLinear.addView(tabRow, 1)
+        rootLinear.addView(vpnNoticeWrapper, 2)
 
         // 3. Build Full-Screen MONITOR View:
         //    - Status pill ("PERIPHERY PRESENCE", "HEADING THIS WAY", "IMMINENT PROXIMITY")
@@ -509,12 +541,14 @@ class KokohoViews(
                 unregisterTrustListener?.invoke()
                 unregisterTrustListener = null
             } else {
+                v.syncVpnNoticeVisibility()
                 v.refreshSearchTabVisibility()
                 v.searchView?.scheduleSearch()
                 v.onFilterChanged()
             }
         }
         DeviceTrustManager.ensureEnrolledAsync(activity) {
+            syncVpnNoticeVisibility()
             refreshSearchTabVisibility()
             searchView?.scheduleSearch()
             onFilterChanged()
@@ -616,7 +650,7 @@ class KokohoViews(
                 shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
-                    "Contribution disabled — enable in Settings > Privacy"
+                    "Contribution disabled. Enable in Settings > Privacy."
                 )
             }
             sharingNow -> {
@@ -636,7 +670,7 @@ class KokohoViews(
                 shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
-                    "Sharing active — tap Stop to pause sharing"
+                    "Sharing active. Tap Stop to pause sharing."
                 )
             }
             else -> {
@@ -653,7 +687,7 @@ class KokohoViews(
                 shareToggleButton.invalidate()
                 TooltipCompat.setTooltipText(
                     shareToggleButton,
-                    "Sharing off — tap Share to contribute observations"
+                    "Sharing off. Tap Share to contribute observations."
                 )
             }
         }
@@ -670,6 +704,7 @@ class KokohoViews(
 
         val btOn = org.tucsoncommunity.kokoho.util.Permissions.isBluetoothEnabled(activity)
         bluetoothNoticePill.visibility = if (!btOn) View.VISIBLE else View.GONE
+        syncVpnNoticeVisibility()
 
         val auxStatus = if (KokohoSignatures.isSharingActive(activity)) {
             "Sharing live"
@@ -761,7 +796,14 @@ class KokohoViews(
         }
     }
 
+    fun syncVpnNoticeVisibility() {
+        val isSeated = DeviceTrustManager.loadOrExtractSeatIdentity(activity) != null
+        val blocked = isSeated && VpnGeoGate.isBlockedTucson()
+        vpnNoticeWrapper.visibility = if (blocked) View.VISIBLE else View.GONE
+    }
+
     fun updatePosture(nowMs: Long = System.currentTimeMillis(), precomputed: PostureSnapshot? = null) {
+        syncVpnNoticeVisibility()
         refreshSearchTabVisibility()
         syncSharePillState()
         if (ScanForegroundService.isRunning && KokohoSignatures.isAuxnetEnabled(activity)) {
@@ -893,7 +935,7 @@ class KokohoViews(
             setPadding(dp(4), 0, 0, dp(10))
         }
         val headerTv = TextView(activity).apply {
-            text = "${group.agency.friendlyLabel} — ${group.totalDistinctCount} Distinct ${if (group.totalDistinctCount == 1) "Detection" else "Detections"}"
+            text = "${group.agency.friendlyLabel}: ${group.totalDistinctCount} Distinct ${if (group.totalDistinctCount == 1) "Detection" else "Detections"}"
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
@@ -1105,7 +1147,7 @@ class KokohoViews(
         UpdateChecker.addListener { rel ->
             if (rel != null) {
                 updateCardTitle.text = "Update App (v${rel.version})"
-                updateCardSubtitle.text = "Kokoho ${rel.version} is available — tap to install"
+                updateCardSubtitle.text = "Kokoho ${rel.version} is available. Tap to install."
                 updateCard.visibility = View.VISIBLE
             } else {
                 updateCard.visibility = View.GONE
@@ -1178,6 +1220,74 @@ class KokohoViews(
     }
 
     companion object {
+        fun showTucsonVpnAdvisoryModal(
+            activity: AppCompatActivity,
+            onUpdated: (() -> Unit)? = null
+        ) {
+            if (activity.isFinishing || activity.isDestroyed) return
+            org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.showModal(
+                activity = activity,
+                title = "Turn On Your VPN Before Connecting",
+                subtitle = "Network Security Advisory · Tucson IP Detected"
+            ) { body, dismiss ->
+                val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
+                val msgTv = TextView(activity).apply {
+                    text = "Client network resolution detected a direct connection from the Tucson area without an active VPN.\n\n" +
+                        "Local scanning continues normally on your phone, while Hub sync, enrollment, and live sharing pause automatically until your traffic routes outside Southern Arizona.\n\n" +
+                        "1. Connect a trusted no-log VPN (ProtonVPN recommended) to an exit outside Southern Arizona.\n" +
+                        "2. Enable Always-On VPN and Kill-Switch protection in your VPN settings.\n" +
+                        "3. Tap Re-Check VPN below once connected."
+                    textSize = 14f
+                    setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.INK_PRIMARY)
+                    setLineSpacing(0f, 1.28f)
+                    setPadding(0, dp(2), 0, dp(14))
+                }
+                body.addView(msgTv)
+
+                val statusTv = TextView(activity).apply {
+                    textSize = 13f
+                    setTextColor(org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.HIGHLIGHT_AMBER)
+                    setPadding(0, 0, 0, dp(10))
+                    visibility = View.GONE
+                }
+                body.addView(statusTv)
+
+                val btnRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                }
+                val closeBtn = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.secondaryActionButton(activity, "Close") {
+                    dismiss()
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { marginEnd = dp(8) }
+                }
+                lateinit var recheckBtn: MaterialButton
+                recheckBtn = org.tucsoncommunity.kokoho.ui.KokohoJourneyUi.primaryActionButton(activity, "Re-Check VPN") {
+                    recheckBtn.isEnabled = false
+                    recheckBtn.text = "Checking…"
+                    statusTv.visibility = View.GONE
+                    VpnGeoGate.recheckAsync(activity, forceSeatedCheck = true) { verdict ->
+                        onUpdated?.invoke()
+                        if (verdict == VpnGeoGate.Verdict.ALLOWED) {
+                            dismiss()
+                            Toast.makeText(activity, "VPN verified outside Tucson. Hub sync resumed.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            recheckBtn.isEnabled = true
+                            recheckBtn.text = "Re-Check VPN"
+                            statusTv.text = "Tucson IP still detected. Verify ProtonVPN (or your trusted VPN) is connected outside Southern Arizona."
+                            statusTv.visibility = View.VISIBLE
+                        }
+                    }
+                }
+                btnRow.addView(closeBtn)
+                btnRow.addView(recheckBtn)
+                body.addView(btnRow)
+            }
+        }
+
         /**
          * Renders either the Witness Report uploaded photo (if present) or a deterministic
          * 5x5 symmetric Gravatar/Identicon avatar for `entityUuid`.

@@ -83,7 +83,7 @@ object DeviceActions {
             .show()
     }
 
-    /** Long-press menu for list/log items — aligned with Kokoho Entity Details menu. */
+    /** Long-press menu for list/log items: aligned with Kokoho Entity Details menu. */
     fun showQuickActions(activity: AppCompatActivity, mac: String, onChanged: (() -> Unit)? = null) {
         org.tucsoncommunity.kokoho.posture.KokohoSignatures.ensureLoaded(activity)
         val postureSnap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(activity)

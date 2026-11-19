@@ -293,7 +293,7 @@ object KokohoReportWizard {
         form.addView(sectionCaption("1. Select Agency"))
         val agencyPickerBtn = KokohoJourneyUi.secondaryActionButton(
             activity,
-            "${selectedAgency.friendlyLabel} — ${selectedAgency.fullName}  ▾"
+            "${selectedAgency.friendlyLabel}: ${selectedAgency.fullName}  ▾"
         ) {}
         agencyPickerBtn.setOnClickListener {
             val agencies = KokohoAgency.entries.sortedBy { it.priorityRank }
@@ -301,9 +301,9 @@ object KokohoReportWizard {
                 activity,
                 "Select Agency",
                 agencies.map { ag ->
-                    KokohoJourneyUi.SubjourneyMenuItem("${ag.friendlyLabel} — ${ag.fullName}") {
+                    KokohoJourneyUi.SubjourneyMenuItem("${ag.friendlyLabel}: ${ag.fullName}") {
                         selectedAgency = ag
-                        agencyPickerBtn.text = "${ag.friendlyLabel} — ${ag.fullName}  ▾"
+                        agencyPickerBtn.text = "${ag.friendlyLabel}: ${ag.fullName}  ▾"
                     }
                 }
             )
@@ -473,7 +473,7 @@ object KokohoReportWizard {
                         agentNameInput.setSelection(person.fullName.length)
                         if (person.title.isNotBlank()) agentTitleInput.setText(person.title)
                         selectedAgency = person.agency
-                        agencyPickerBtn.text = "${selectedAgency.friendlyLabel} — ${selectedAgency.fullName}  ▾"
+                        agencyPickerBtn.text = "${selectedAgency.friendlyLabel}: ${selectedAgency.fullName}  ▾"
                         if (person.email.isNotBlank()) {
                             extraEmailInput.setText(person.email)
                             extraEmailInput.visibility = View.VISIBLE
@@ -919,9 +919,9 @@ object KokohoReportWizard {
                 includeDiagnostics = diagCheck.isChecked
             ) { uploadedNow ->
                 val msg = if (uploadedNow) {
-                    "Bug report submitted — thank you!"
+                    "Bug report submitted. Thank you!"
                 } else {
-                    "Bug report saved — will send automatically when connected"
+                    "Bug report saved. It will send automatically when connected."
                 }
                 Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
             }

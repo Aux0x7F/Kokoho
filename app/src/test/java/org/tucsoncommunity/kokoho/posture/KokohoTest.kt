@@ -296,7 +296,7 @@ class KokohoTest {
         assertEquals("No threats detected", greenSnap.headline)
         renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#0B0F14"), "kokoho_sandbox_monitor_green_dark.png")
 
-        // 2. YELLOW state (Periphery Presence — AMO Air 1 at ±1850m)
+        // 2. YELLOW state (Periphery Presence: AMO Air 1 at ±1850m)
         KokohoHubClient.clearCachedObjects()
         KokohoHubClient.ingestThreatObjectJson(
             """
@@ -335,7 +335,7 @@ class KokohoTest {
         assertEquals(PostureColor.YELLOW, yellowSnap.color)
         renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#0B0F14"), "kokoho_sandbox_monitor_yellow.png")
 
-        // 3. ORANGE state (Heading This Way — ICE Tactical moving at 14.5 m/s)
+        // 3. ORANGE state (Heading This Way: ICE Tactical moving at 14.5 m/s)
         KokohoHubClient.clearCachedObjects()
         KokohoHubClient.ingestThreatObjectJson(
             """
@@ -376,7 +376,7 @@ class KokohoTest {
         assertEquals(PostureColor.ORANGE, orangeSnap.color)
         renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#0B0F14"), "kokoho_sandbox_monitor_orange.png")
 
-        // 4. RED state (Imminent Proximity — Colocated CBP VS2 173.7375 MHz + Cradlepoint OUI 00:30:44 at ±150m)
+        // 4. RED state (Imminent Proximity: Colocated CBP VS2 173.7375 MHz + Cradlepoint OUI 00:30:44 at ±150m)
         KokohoHubClient.clearCachedObjects()
         KokohoHubClient.ingestThreatObjectJson(
             """

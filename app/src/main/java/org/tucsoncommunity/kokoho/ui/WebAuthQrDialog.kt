@@ -235,7 +235,7 @@ object WebAuthQrDialog {
         val bodyCopy = buildString {
             append(message.trim())
             if (ok && fromDeepLink && !message.contains("Switch back to your browser", ignoreCase = true)) {
-                append("\n\nSwitch back to your browser — your Hub session is now unlocked.")
+                append("\n\nSwitch back to your browser. Your Hub session is now unlocked.")
             }
             if (!ok) {
                 append("\n\nHandled by app: ")
@@ -260,6 +260,32 @@ object WebAuthQrDialog {
             val btnRow = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
+            }
+            if (!ok && message.contains("ProtonVPN", ignoreCase = true)) {
+                val recheckBtn = KokohoJourneyUi.secondaryActionButton(activity, "Re-Check VPN") {
+                    org.tucsoncommunity.kokoho.posture.VpnGeoGate.recheckAsync(activity, forceSeatedCheck = true) { verdict ->
+                        if (verdict == org.tucsoncommunity.kokoho.posture.VpnGeoGate.Verdict.ALLOWED) {
+                            dismiss()
+                            android.widget.Toast.makeText(
+                                activity,
+                                "VPN verified outside Tucson. Tap or scan again to continue.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            android.widget.Toast.makeText(
+                                activity,
+                                "Tucson IP still detected. Connect ProtonVPN outside Southern Arizona first.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { marginEnd = dp(8) }
+                }
+                btnRow.addView(recheckBtn)
             }
             val doneBtn = KokohoJourneyUi.primaryActionButton(activity, if (ok) "Done" else "OK") {
                 dismiss()

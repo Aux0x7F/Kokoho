@@ -370,6 +370,11 @@ object KokohoHubClient {
                         delay(15_000L)
                         continue
                     }
+                    if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+                        statusLabel = "vpn-required (Tucson IP)"
+                        delay(10_000L)
+                        continue
+                    }
                     val nowLoop = System.currentTimeMillis()
                     if (nowLoop - lastTrendsRefreshAt >= 60_000L) {
                         lastTrendsRefreshAt = nowLoop
