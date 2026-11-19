@@ -3,6 +3,7 @@ package org.tucsoncommunity.kokoho.ui
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.SurfaceTexture
@@ -32,12 +33,14 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
 import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
+import org.tucsoncommunity.kokoho.posture.KokohoDirectory
+import org.tucsoncommunity.kokoho.posture.KokohoHubClient
 import java.util.EnumMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Zero-GMS Camera2 + ZXing QR scanner & deep-link handler for single-session Hub authorization
- * (`kokoho://web-auth?c=...&s=...&u=...`) and desktop onboarding QR enrollment (`/s/<slug>`).
+ * (`kokoho://web-auth?c=...&s=...`) and invite seat enrollment (`kokoho://enroll?invite=...` / `/dashboard?invite=...`).
  */
 object WebAuthQrDialog {
 
@@ -55,6 +58,32 @@ object WebAuthQrDialog {
         showScannerDialog(activity)
     }
 
+    internal fun extractInviteKey(raw: String): String? {
+        val text = raw.trim()
+        if (text.isEmpty()) return null
+        val uri = runCatching { Uri.parse(text) }.getOrNull()
+        if (uri != null) {
+            if (uri.scheme.equals("kokoho", ignoreCase = true) &&
+                uri.host.equals("enroll", ignoreCase = true)
+            ) {
+                val inv = (uri.getQueryParameter("invite") ?: uri.getQueryParameter("slug"))?.trim().orEmpty()
+                if (inv.isNotEmpty()) return inv
+            }
+            if (uri.scheme.equals("https", ignoreCase = true) || uri.scheme.equals("http", ignoreCase = true)) {
+                val path = uri.path.orEmpty()
+                if (path == "/dashboard" || path == "/dashboard/") {
+                    val inv = uri.getQueryParameter("invite")?.trim().orEmpty()
+                    if (inv.isNotEmpty()) return inv
+                }
+            }
+        }
+        if (text.contains("/s/")) {
+            val slug = text.substringAfter("/s/").substringBefore('?').substringBefore('/').trim()
+            if (slug.isNotEmpty()) return slug
+        }
+        return null
+    }
+
     fun handleDeepLinkUri(activity: AppCompatActivity, uri: Uri?): Boolean {
         if (uri == null) return false
         if (uri.scheme.equals("kokoho", ignoreCase = true) &&
@@ -62,9 +91,18 @@ object WebAuthQrDialog {
         ) {
             val c = uri.getQueryParameter("c")?.trim().orEmpty()
             val s = uri.getQueryParameter("s")?.trim().orEmpty()
-            val u = uri.getQueryParameter("u")?.trim()
+            val u = uri.getQueryParameter("u")?.trim()?.takeIf { it.isNotEmpty() }
             if (c.isNotEmpty() && s.isNotEmpty()) {
                 promptConfirmWebGrant(activity, c, s, u, fromDeepLink = true)
+                return true
+            }
+        }
+        if (uri.scheme.equals("kokoho", ignoreCase = true) &&
+            uri.host.equals("enroll", ignoreCase = true)
+        ) {
+            val inviteKey = (uri.getQueryParameter("invite") ?: uri.getQueryParameter("slug"))?.trim().orEmpty()
+            if (inviteKey.isNotEmpty()) {
+                handleInviteClaim(activity, inviteKey, fromDeepLink = true)
                 return true
             }
         }
@@ -80,22 +118,80 @@ object WebAuthQrDialog {
         ) {
             val c = uri.getQueryParameter("c")?.trim().orEmpty()
             val s = uri.getQueryParameter("s")?.trim().orEmpty()
-            val u = uri.getQueryParameter("u")?.trim()
+            val u = uri.getQueryParameter("u")?.trim()?.takeIf { it.isNotEmpty() }
             if (c.isNotEmpty() && s.isNotEmpty()) {
                 promptConfirmWebGrant(activity, c, s, u, fromDeepLink = false)
                 return true
             }
         }
-        if (text.contains("/s/")) {
-            val slug = text.substringAfter("/s/").substringBefore('?').substringBefore('/').trim()
-            if (slug.isNotEmpty()) {
-                DeviceTrustManager.claimSeatBySlug(activity, slug) { ok, msg ->
-                    showAuthResultModal(activity, ok = ok, message = msg, isSeatClaim = true, fromDeepLink = false)
-                }
-                return true
-            }
+        val inviteKey = extractInviteKey(text)
+        if (!inviteKey.isNullOrEmpty()) {
+            handleInviteClaim(activity, inviteKey, fromDeepLink = false)
+            return true
         }
         return false
+    }
+
+    fun handleInviteClaim(
+        activity: AppCompatActivity,
+        inviteKey: String,
+        fromDeepLink: Boolean = false
+    ) {
+        val cleanKey = inviteKey.trim().substringAfterLast('/').substringBefore('?').substringBefore('&').substringBefore('#').trim()
+        if (cleanKey.isEmpty() || activity.isFinishing || activity.isDestroyed) return
+
+        if (!KokohoDirectory.hasExtendedDirectoryCapability(activity)) {
+            val appLabel = resolveAppLabel(activity)
+            KokohoJourneyUi.showModal(
+                activity = activity,
+                title = "Extended Directory Build Required",
+                subtitle = "Handled by $appLabel"
+            ) { body, dismiss ->
+                val dp = { v: Int -> (v * activity.resources.displayMetrics.density).toInt() }
+                val msgTv = TextView(activity).apply {
+                    text = "This installed copy of $appLabel does not bundle the extended directory database. Open your invite Guide with your VPN connected to download and install your seat-keyed update over top of this app."
+                    textSize = 14.5f
+                    setTextColor(KokohoJourneyUi.INK_PRIMARY)
+                    setLineSpacing(0f, 1.28f)
+                    setPadding(0, dp(2), 0, dp(14))
+                }
+                body.addView(msgTv)
+
+                val btnRow = LinearLayout(activity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                }
+                val cancelBtn = KokohoJourneyUi.secondaryActionButton(activity, "Cancel") {
+                    dismiss()
+                }.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply { marginEnd = dp(8) }
+                }
+                val openBtn = KokohoJourneyUi.primaryActionButton(activity, "Open Invite Guide") {
+                    dismiss()
+                    val guideUri = Uri.parse("${KokohoHubClient.hubUrl(activity)}/dashboard?invite=${Uri.encode(cleanKey)}")
+                    runCatching {
+                        activity.startActivity(Intent(Intent.ACTION_VIEW, guideUri))
+                    }
+                }
+                btnRow.addView(cancelBtn)
+                btnRow.addView(openBtn)
+                body.addView(btnRow)
+            }
+            return
+        }
+
+        DeviceTrustManager.claimSeatBySlug(activity, cleanKey) { ok, msg ->
+            showAuthResultModal(
+                activity = activity,
+                ok = ok,
+                message = msg,
+                isSeatClaim = true,
+                fromDeepLink = fromDeepLink
+            )
+        }
     }
 
     private fun resolveAppLabel(activity: AppCompatActivity): String =
@@ -114,6 +210,7 @@ object WebAuthQrDialog {
         val appLabel = resolveAppLabel(activity)
         val title = when {
             ok && isSeatClaim -> "Device Enrolled"
+            isSeatClaim -> "Enrollment Not Completed"
             ok -> "Browser Session Authorized"
             else -> "Authorization Not Completed"
         }

@@ -1,13 +1,22 @@
 package org.tucsoncommunity.kokoho.posture
 
+import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.tucsoncommunity.kokoho.ui.WebAuthQrDialog
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34])
 class DeviceTrustAndSchemaTest {
 
     @Test
@@ -126,5 +135,54 @@ class DeviceTrustAndSchemaTest {
         val jsonStripped = DeviceTrustManager.formatGrantErrorMessage(403, """{"message":"Custom seat error"}""")
         assertEquals("Custom seat error", jsonStripped)
         assertTrue(!jsonStripped.contains("{") && !jsonStripped.contains("}"))
+    }
+
+    @Test
+    fun seatIdentityAndAuthResponseDtoHaveExplicitSerializedNameOnEveryField() {
+        val seatFields = DeviceTrustManager.SeatIdentity::class.java.declaredFields
+            .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
+        assertEquals(3, seatFields.size)
+        for (f in seatFields) {
+            assertNotNull("SeatIdentity.${f.name} must carry @SerializedName", f.getAnnotation(SerializedName::class.java))
+        }
+
+        val authFields = DeviceTrustManager.AuthResponseDto::class.java.declaredFields
+            .filterNot { it.isSynthetic || java.lang.reflect.Modifier.isStatic(it.modifiers) }
+        assertEquals(8, authFields.size)
+        for (f in authFields) {
+            assertNotNull("AuthResponseDto.${f.name} must carry @SerializedName", f.getAnnotation(SerializedName::class.java))
+        }
+
+        val gson = Gson()
+        val parsedAuth = gson.fromJson(
+            """{"ok":true,"status":"ENROLLED","seat_id":"seat-009","slug":"inv-abc","role":"OWNER","label":"Alpha","dir_key_hex":"0011","message":"ok"}""",
+            DeviceTrustManager.AuthResponseDto::class.java
+        )
+        assertTrue(parsedAuth.ok)
+        assertEquals("ENROLLED", parsedAuth.status)
+        assertEquals("seat-009", parsedAuth.seatId)
+        assertEquals("inv-abc", parsedAuth.slug)
+        assertEquals("OWNER", parsedAuth.role)
+        assertEquals("Alpha", parsedAuth.label)
+        assertEquals("0011", parsedAuth.dirKeyHex)
+        assertEquals("ok", parsedAuth.message)
+    }
+
+    @Test
+    fun webAuthQrDialogExtractsDashboardInviteDeepLinkAndLegacySlug() {
+        assertEquals(
+            "invite-token-alpha1",
+            WebAuthQrDialog.extractInviteKey("kokoho://enroll?invite=invite-token-alpha1")
+        )
+        assertEquals(
+            "invite-token-beta2",
+            WebAuthQrDialog.extractInviteKey("https://kokoho.tucsoncommunity.online/dashboard?invite=invite-token-beta2")
+        )
+        assertEquals(
+            "invite-token-gamma3",
+            WebAuthQrDialog.extractInviteKey("https://kokoho.tucsoncommunity.online/s/invite-token-gamma3")
+        )
+        assertNull(WebAuthQrDialog.extractInviteKey("https://kokoho.tucsoncommunity.online/dashboard"))
+        assertNull(WebAuthQrDialog.extractInviteKey("kokoho://web-auth?c=1122&s=3344"))
     }
 }

@@ -97,6 +97,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="kokoho" android:host="web-auth" />
+                <data android:scheme="kokoho" android:host="enroll" />
             </intent-filter>
         </activity>
 

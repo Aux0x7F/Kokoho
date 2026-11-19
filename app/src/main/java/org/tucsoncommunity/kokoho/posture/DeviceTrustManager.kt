@@ -31,7 +31,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Single-instance hardware trust & web-session grant manager (`v1.3.10`).
+ * Single-instance hardware trust & web-session grant manager (`v1.3.11`).
  *
  *  - Extracts per-seat voucher metadata (`0x54434B56`) from the APK Signing Block on first launch
  *    and persists it inside `noBackupFilesDir` so subsequent universal OTA updates retain seat trust.
@@ -58,19 +58,19 @@ object DeviceTrustManager {
 
     data class SeatIdentity(
         @SerializedName("seat_id") val seatId: String = "",
-        val slug: String = "",
-        val voucher: String = ""
+        @SerializedName("slug") val slug: String = "",
+        @SerializedName("voucher") val voucher: String = ""
     )
 
     data class AuthResponseDto(
-        val ok: Boolean = false,
-        val status: String = "",
+        @SerializedName("ok") val ok: Boolean = false,
+        @SerializedName("status") val status: String = "",
         @SerializedName("seat_id") val seatId: String = "",
-        val slug: String = "",
-        val role: String = "MEMBER",
-        val label: String = "",
+        @SerializedName("slug") val slug: String = "",
+        @SerializedName("role") val role: String = "MEMBER",
+        @SerializedName("label") val label: String = "",
         @SerializedName("dir_key_hex") val dirKeyHex: String? = null,
-        val message: String? = null
+        @SerializedName("message") val message: String? = null
     )
 
     private val gson = Gson()
@@ -534,7 +534,7 @@ object DeviceTrustManager {
         context: Context,
         challengeId: String,
         secret: String,
-        slugHint: String?,
+        slugHint: String? = null,
         onResult: (ok: Boolean, message: String) -> Unit
     ) {
         val app = context.applicationContext ?: context
@@ -557,7 +557,7 @@ object DeviceTrustManager {
                                 voucher = seat?.voucher.orEmpty()
                             )
                         )
-                    } else if (seat != null) {
+                    } else if (seat != null && (seat.voucher.isNotBlank() || seat.slug.isNotBlank())) {
                         enrollBlocking(app, seat)
                     } else {
                         enr
@@ -589,14 +589,14 @@ object DeviceTrustManager {
             }
 
             var attempt = postGrantWebOnce(app, currentSeat.seatId, challengeId, secret, keys.first)
-            if (!attempt.first && (attempt.second == 403 || attempt.second == 401) && !slugHint.isNullOrBlank()) {
+            if (!attempt.first && (attempt.second == 403 || attempt.second == 401)) {
                 var recResp = checkDeviceStatusBlocking(app, currentSeat)
-                if (!isEnrolled(app)) {
+                if (!isEnrolled(app) && (!slugHint.isNullOrBlank() || currentSeat.voucher.isNotBlank() || currentSeat.slug.isNotBlank())) {
                     recResp = enrollBlocking(
                         app,
                         SeatIdentity(
                             seatId = currentSeat.seatId,
-                            slug = slugHint.trim(),
+                            slug = slugHint?.trim()?.takeIf { it.isNotEmpty() } ?: currentSeat.slug,
                             voucher = currentSeat.voucher
                         )
                     )
@@ -604,9 +604,8 @@ object DeviceTrustManager {
                 val refreshedSeat = loadOrExtractSeatIdentity(app)
                 if (refreshedSeat != null && refreshedSeat.seatId.isNotBlank() && isEnrolled(app)) {
                     attempt = postGrantWebOnce(app, refreshedSeat.seatId, challengeId, secret, keys.first)
-                } else {
-                    val st = recResp?.status?.takeIf { it.isNotBlank() } ?: enrollmentStatus(app)
-                    val msg = formatUnenrolledGrantMessage(st, recResp, hasSeatRef = true)
+                } else if (recResp != null && (recResp.status.equals("PENDING_REBIND", ignoreCase = true) || recResp.status.equals("REVOKED", ignoreCase = true))) {
+                    val msg = formatUnenrolledGrantMessage(recResp.status, recResp, hasSeatRef = true)
                     withContext(Dispatchers.Main) { onResult(false, msg) }
                     return@launch
                 }
