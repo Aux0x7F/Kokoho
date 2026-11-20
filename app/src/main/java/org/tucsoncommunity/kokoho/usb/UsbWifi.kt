@@ -274,8 +274,103 @@ object UsbWifi {
     }
     /** [all]'s channels in the chosen band (2.4 GHz is 1-14); all of them when none are (a 2.4 GHz-only adapter on 5 GHz). */
     fun hops(all: IntArray): IntArray = (share(all.toList()).filter { inBand(it > 14) }.takeIf { it.isNotEmpty() }
-        ?: all.filter { inBand(it > 14) }.takeIf { it.isNotEmpty() } ?: all.toList()).let { p -> mostlyLow(p) { it <= 14 } }.toIntArray()
+        ?: all.filter { inBand(it > 14) }.takeIf { it.isNotEmpty() } ?: all.toList())
+        .let { p -> mostlyLow(p) { it <= 14 } }
+        .let { p -> prioritizeDroneBeaconChannels(p, hasActiveUnpositionedDrone()) { it } }
+        .toIntArray()
         .also { p -> current.get()?.planned?.addAll(p.asList()) }
+
+    /** Primary Wi-Fi beacon / NAN Remote ID & DJI DroneID channels interleaved sparingly until GPS locks. */
+    internal val DRONE_BEACON_PRIORITY_CHANNELS = setOf(1, 6, 11, 149)
+    private val DRONE_PRIORITY_ORDER = listOf(6, 149, 1, 11)
+    internal const val DRONE_ACTIVE_WINDOW_MS = 30_000L
+    internal const val DRONE_FRESH_POS_MS = 15_000L
+    private const val DRONE_PRIORITY_STRIDE = 6
+
+    private val DRONE_PRIORITY_HEX_PREFIXES = listOf(
+        // DJI + DJI Baiwang + DJI DroneID IE OUI
+        "60601F", "34D262", "481CB9", "E47A2C", "58B858", "04A85A", "8C5823", "0C9AE6",
+        "882985", "4C43F6", "9C5A8A", "EC72F7", "3491F0", "263712",
+        // Skydio
+        "381D14",
+        // Autel Robotics
+        "EC5B73", "18D793", "EC5BCDE",
+        // Parrot
+        "9003B7", "A0143D", "00121C", "00267E", "903AE6",
+        // Tactical sUAS & Remote ID modules
+        "FA0BBC", "6A5C35", "D88039", "B030C8", "001AF9", "8C1F64B07",
+        "14DD48", "E8B470C", "AC86D17", "34B5F32", "EC715E", "04714B1", "546F71"
+    )
+
+    private data class DroneBeaconState(val lastSeenMs: Long, val lastPositionedAtMs: Long)
+    private val activeDroneBeacons = java.util.concurrent.ConcurrentHashMap<String, DroneBeaconState>()
+
+    fun isDronePriorityOui(mac: String): Boolean {
+        val hex = mac.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
+        if (hex.length < 6) return false
+        if (((hex.substring(0, 2).toIntOrNull(16) ?: 0) and 0x02) != 0 && !hex.startsWith("263712") && !hex.startsWith("FA0BBC") && !hex.startsWith("6A5C35")) {
+            return false
+        }
+        return DRONE_PRIORITY_HEX_PREFIXES.any { hex.startsWith(it) }
+    }
+
+    fun noteDroneActivity(mac: String, hasPosition: Boolean, nowMs: Long = System.currentTimeMillis()) {
+        val hex = mac.uppercase().filter { it in '0'..'9' || it in 'A'..'F' }
+        if (hex.length < 6) return
+        activeDroneBeacons.compute(hex) { _, prev ->
+            val seen = maxOf(prev?.lastSeenMs ?: 0L, nowMs)
+            val posAt = if (hasPosition) maxOf(prev?.lastPositionedAtMs ?: 0L, nowMs) else (prev?.lastPositionedAtMs ?: 0L)
+            DroneBeaconState(seen, posAt)
+        }
+        if (activeDroneBeacons.size > 64) {
+            activeDroneBeacons.entries.removeIf { nowMs - it.value.lastSeenMs > DRONE_ACTIVE_WINDOW_MS * 2 }
+        }
+    }
+
+    fun clearDroneBeaconPriorityForTest() {
+        activeDroneBeacons.clear()
+    }
+
+    fun hasActiveUnpositionedDrone(nowMs: Long = System.currentTimeMillis()): Boolean {
+        activeDroneBeacons.entries.removeIf { nowMs - it.value.lastSeenMs > DRONE_ACTIVE_WINDOW_MS }
+        val inFastTable = activeDroneBeacons.values.any { st ->
+            nowMs - st.lastSeenMs in 0L..DRONE_ACTIVE_WINDOW_MS &&
+                (st.lastPositionedAtMs == 0L || nowMs - st.lastPositionedAtMs > DRONE_FRESH_POS_MS)
+        }
+        if (inFastTable) return true
+        return org.tucsoncommunity.kokoho.service.DeviceRegistry.hasActiveUnpositionedDrone(
+            nowMs = nowMs,
+            activeWindowMs = DRONE_ACTIVE_WINDOW_MS,
+            freshPosMs = DRONE_FRESH_POS_MS
+        )
+    }
+
+    /**
+     * When a tactical drone OUI or Remote ID beacon is active (<= 30 s) without a fresh GPS fix,
+     * front-loads and sparingly interleaves primary beacon channels (1, 6, 11, 149) every
+     * [DRONE_PRIORITY_STRIDE] hops while still visiting every channel in [plan] once per round.
+     */
+    internal fun <T> prioritizeDroneBeaconChannels(
+        plan: List<T>,
+        active: Boolean,
+        channelOf: (T) -> Int
+    ): List<T> {
+        if (!active || plan.size <= 4) return plan
+        val priority = plan.filter { channelOf(it) in DRONE_BEACON_PRIORITY_CHANNELS }
+            .sortedBy { ch -> DRONE_PRIORITY_ORDER.indexOf(channelOf(ch)).let { if (it >= 0) it else 99 } }
+        val others = plan.filter { channelOf(it) !in DRONE_BEACON_PRIORITY_CHANNELS }
+        if (priority.isEmpty() || others.isEmpty()) return plan
+        val out = ArrayList<T>(plan.size + (others.size / DRONE_PRIORITY_STRIDE) + 1)
+        out.addAll(priority)
+        var pIdx = 0
+        for (i in others.indices) {
+            out.add(others[i])
+            if ((i + 1) % DRONE_PRIORITY_STRIDE == 0 && (others.size - 1 - i) >= 2) {
+                out.add(priority[pIdx++ % priority.size])
+            }
+        }
+        return out
+    }
 
     /** Settings › Log everything the USB WiFi adapter hears: each device as it comes and goes ([MonitorFrames]). */
     @Volatile var logAll = false
@@ -544,6 +639,7 @@ object UsbWifi {
         for (s in sessions.filter { device == null || it.device == device }) { s.stop(); sessions -= s }
         if (sessions.isEmpty()) {
             idle = newStatus
+            activeDroneBeacons.clear()
             org.tucsoncommunity.kokoho.esp.HeardBy.usb.clear() // unplugged or stopped: nothing is "heard by USB" any more
         }
     }

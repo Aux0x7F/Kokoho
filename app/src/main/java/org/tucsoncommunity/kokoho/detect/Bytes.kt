@@ -17,6 +17,7 @@ object Bytes {
 
     fun u8(b: ByteArray, i: Int): Int = b[i].toInt() and 0xFF
     fun u16le(b: ByteArray, i: Int): Int = u8(b, i) or (u8(b, i + 1) shl 8)
+    fun i16le(b: ByteArray, i: Int): Int = u16le(b, i).toShort().toInt()
     fun i32le(b: ByteArray, i: Int): Int =
         u8(b, i) or (u8(b, i + 1) shl 8) or (u8(b, i + 2) shl 16) or (u8(b, i + 3) shl 24)
 

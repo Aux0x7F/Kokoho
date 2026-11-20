@@ -45,6 +45,9 @@ object SdrRadio {
     private const val SLOT_READS = 16         // ~64 ms: more than one TETRA or DMR frame, so a radio's slot is always in it
     private const val STALL_CHUNKS = 8        // chunks in a row without samples before the stream is restarted
     private const val ADSB_PUSH_MS = 2_000L
+    /** Sparing 1090 MHz extension to catch the complementary Even/Odd CPR frame for an unlocated LE/DHS aircraft. */
+    internal const val ADSB_CPR_HOLD_EXTEND_MS = 1_800L
+    internal const val ADSB_CPR_HOLD_COOLDOWN_MS = 30_000L
     private const val TUNED_READS = 4          // ~16 ms of samples per waterfall row
     private const val TUNED_ROW_MS = 40L       // at most ~25 rows a second
     private const val TUNED_LOG_MS = 5_000L    // "log everything": what the waterfall hears, every 5 s
@@ -169,8 +172,26 @@ object SdrRadio {
     private var freqFix: FreqCorrection? = null
     private var freqFixes = 0
     private var biasOn = false
-    /** The ADS-B gain, kept from one ADS-B turn to the next while the dongle stays open. */
+    /** The ADS-B gain and tracker, kept from one ADS-B turn to the next while the dongle stays open. */
     private var adsbGain = AdsbGain()
+    private var adsbTracker = AdsbTracker()
+    @Volatile private var lastAdsbCprHoldAtMs = 0L
+
+    internal fun maybeExtendAdsbForCprLock(
+        tracker: AdsbTracker,
+        nowMs: Long,
+        currentTurnEndMs: Long,
+        lastHoldAtMs: Long,
+        alreadyExtendedThisTurn: Boolean,
+        multiMode: Boolean,
+        sweepHeldByWaterfall: Boolean
+    ): Pair<Long, Long>? {
+        if (!multiMode || sweepHeldByWaterfall || alreadyExtendedThisTurn) return null
+        if (nowMs < currentTurnEndMs) return null
+        if (lastHoldAtMs > 0L && nowMs - lastHoldAtMs < ADSB_CPR_HOLD_COOLDOWN_MS) return null
+        if (!tracker.hasPendingUnlocatedTacticalHex(nowMs)) return null
+        return (nowMs + ADSB_CPR_HOLD_EXTEND_MS) to nowMs
+    }
 
     /** Settings › bias-tee or frequency correction changed; [afterTyping]: a moment after the typing stops, not per key. */
     fun deviceSettingsChanged(afterTyping: Boolean = false) {
@@ -689,7 +710,7 @@ object SdrRadio {
             return false
         }
         sweepWatch = null; p25Hunt = null; p25Lock = null; pagerHz = null
-        biasOn = false; freqFixes = 0; adsbGain = AdsbGain()
+        biasOn = false; freqFixes = 0; adsbGain = AdsbGain(); adsbTracker = AdsbTracker(); lastAdsbCprHoldAtMs = 0L
         applyDeviceSettings(sdr, start = true)
         var tuned = false
         // The scan the open waterfall cut short: its turn again once the screen closes.
@@ -766,15 +787,58 @@ object SdrRadio {
         val mag = IntArray(xfer / 2 + 2 * ModeS.OVERLAP)
         var have = 0
         val demod = ModeS.Demod()
-        val tracker = AdsbTracker()
+        val tracker = adsbTracker
         val frames = ArrayList<ModeS.Frame>()
         val loggedPlanes = HashSet<String>()
         var lastPush = 0L; var lastLog = System.currentTimeMillis(); var fails = 0; var messages = 0L; var logged = 0L
         var lastCheck = System.currentTimeMillis()
         var blockSamples = 0
+        var cprHoldUsed = false
+        fun pushSnapshot(now: Long) {
+            lastPush = now
+            tracker.prune(now)
+            val located = tracker.located(now)
+            val unlocated = tracker.unlocated(now)
+            // Each aircraft once per turn; no position (it would be near you).
+            if (logAll) {
+                for (p in located) if (loggedPlanes.add(p.hex)) logHeard("aircraft ${p.hex}" + (p.callsign?.let { " $it" } ?: "") + (p.altitudeFt?.let { " at $it ft" } ?: ""))
+                for (hex in unlocated) if (loggedPlanes.add(hex)) logHeard("aircraft $hex, no position")
+            }
+            onAircraft?.invoke(located, unlocated)
+            if (!halted) status = "$deviceLabel · ADS-B · ${located.size + unlocated.size} aircraft heard, ${located.size} with a position" + turnNote()
+        }
+        fun keepsAdsbTurn(): Boolean {
+            if (keeps(Mode.ADSB)) return true
+            if (mode != Mode.ADSB || tuneHz != null || antennaCheck != null || reapplyNow || sweepHeld || Mode.ADSB !in active) {
+                return false
+            }
+            val now = System.currentTimeMillis()
+            val extended = synchronized(turnLock) {
+                maybeExtendAdsbForCprLock(
+                    tracker = tracker,
+                    nowMs = now,
+                    currentTurnEndMs = turnEnd,
+                    lastHoldAtMs = lastAdsbCprHoldAtMs,
+                    alreadyExtendedThisTurn = cprHoldUsed,
+                    multiMode = active.size > 1,
+                    sweepHeldByWaterfall = sweepHeld
+                )?.also { (newEnd, holdAt) ->
+                    turnEnd = newEnd
+                    lastAdsbCprHoldAtMs = holdAt
+                    cprHoldUsed = true
+                }
+            }
+            if (extended != null) {
+                org.tucsoncommunity.kokoho.util.HwLogs.sdr.log(
+                    "$deviceLabel: holding 1090 MHz for ${ADSB_CPR_HOLD_EXTEND_MS} ms to complete tactical ADS-B CPR lock"
+                )
+                return true
+            }
+            return false
+        }
         // A reader thread keeps a read waiting on the dongle while the last one is decoded: no samples lost in between.
         val ahead = ReadAhead(sdr, xfer)
-        try { while (!halted && !sdr.lost && keeps(Mode.ADSB)) {
+        try { while (!halted && !sdr.lost && keepsAdsbTurn()) {
             val n = ahead.read(buf)
             // Every couple of seconds: still plugged in? (Reads alone can fail quietly for a long time.)
             if (System.currentTimeMillis() - lastCheck >= 2_000L) { lastCheck = System.currentTimeMillis(); if (gone(name)) break }
@@ -808,18 +872,12 @@ object SdrRadio {
             adsbMessages += frames.size
             System.arraycopy(mag, total - ModeS.OVERLAP, mag, 0, ModeS.OVERLAP)
             have = ModeS.OVERLAP
-            if (now - lastPush >= ADSB_PUSH_MS) {
-                lastPush = now
-                tracker.prune(now)
-                val located = tracker.located(now)
-                val unlocated = tracker.unlocated(now)
-                // Each aircraft once per turn; no position (it would be near you).
-                if (logAll) {
-                    for (p in located) if (loggedPlanes.add(p.hex)) logHeard("aircraft ${p.hex}" + (p.callsign?.let { " $it" } ?: "") + (p.altitudeFt?.let { " at $it ft" } ?: ""))
-                    for (hex in unlocated) if (loggedPlanes.add(hex)) logHeard("aircraft $hex, no position")
+            val cprResolvedDuringHold = cprHoldUsed && frames.isNotEmpty() && !tracker.hasPendingUnlocatedTacticalHex(now)
+            if (now - lastPush >= ADSB_PUSH_MS || cprResolvedDuringHold) {
+                pushSnapshot(now)
+                if (cprResolvedDuringHold) {
+                    synchronized(turnLock) { if (turnEnd > now) turnEnd = now }
                 }
-                onAircraft?.invoke(located, unlocated)
-                if (!halted) status = "$deviceLabel · ADS-B · ${located.size + unlocated.size} aircraft heard, ${located.size} with a position" + turnNote()
             }
             if (now - lastLog >= 60_000) {
                 org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: ADS-B ${messages - logged} messages in ${(now - lastLog) / 1000} s, " +
@@ -830,6 +888,7 @@ object SdrRadio {
         } } finally { ahead.close() }
         // Only its turn ended: the aircraft stay listed until they go stale, and come back on the next turn.
         if (Mode.ADSB !in active) onAircraft?.invoke(emptyList(), emptyList())
+        else if (!halted && messages > 0) pushSnapshot(System.currentTimeMillis())
         org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: ADS-B receiver stopped after $messages messages")
     }
 

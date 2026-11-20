@@ -342,7 +342,12 @@ object PoliceAircraft {
     /** One aircraft as last heard, with what it matched (null: ordinary traffic). */
     data class Seen(val plane: Plane, val hit: Hit?)
 
-    data class FlightFix(val timeMs: Long, val lat: Double, val lon: Double)
+    data class FlightFix(
+        val timeMs: Long,
+        val lat: Double,
+        val lon: Double,
+        val altM: Double? = null
+    )
 
     data class LandedSpot(
         val hex: String,
@@ -375,9 +380,17 @@ object PoliceAircraft {
 
     private val airborneTrails = java.util.concurrent.ConcurrentHashMap<String, ArrayDeque<FlightFix>>()
     private val droneTrails = java.util.concurrent.ConcurrentHashMap<String, DroneTrailState>()
+    private val trailAliases = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val groundedAtByHex = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val landedSpotsByKey = java.util.concurrent.ConcurrentHashMap<String, LandedSpot>()
     @Volatile private var landedSpotsLoaded = false
+
+    private fun normalizeTrailKey(raw: String): String {
+        val stripped = raw.trim()
+            .replace(Regex("^(?i)(adsb:icao:|uas:mac:|hw:mac:)"), "")
+            .uppercase()
+        return trailAliases[stripped] ?: stripped
+    }
 
     /**
      * Non-destructively clips a timestamped [FlightFix] sequence to `[nowMs - windowMs, nowMs]`,
@@ -414,15 +427,79 @@ object PoliceAircraft {
         return if (out.size >= 2) out else emptyList()
     }
 
-    fun recordAirborneFix(hex: String, lat: Double, lon: Double, nowMs: Long = System.currentTimeMillis()) {
-        val normHex = hex.trim().uppercase()
-        if (normHex.isEmpty()) return
-        groundedAtByHex.remove(normHex)
-        val q = airborneTrails.getOrPut(normHex) { ArrayDeque() }
+    @JvmOverloads
+    fun recordAirborneFix(
+        hex: String,
+        lat: Double,
+        lon: Double,
+        nowMs: Long = System.currentTimeMillis(),
+        altM: Double? = null,
+        entityUuid: String? = null
+    ) {
+        recordPinpoint4DFix(
+            rawKey = hex,
+            lat = lat,
+            lon = lon,
+            altM = altM,
+            nowMs = nowMs,
+            minGapMs = 4_000L,
+            minDistM = 75.0,
+            minAltDeltaM = 15.0,
+            entityUuid = entityUuid
+        )
+    }
+
+    fun recordDroneFlightFix(
+        droneKey: String,
+        lat: Double,
+        lon: Double,
+        altM: Double?,
+        nowMs: Long = System.currentTimeMillis(),
+        entityUuid: String? = null
+    ) {
+        recordPinpoint4DFix(
+            rawKey = droneKey,
+            lat = lat,
+            lon = lon,
+            altM = altM,
+            nowMs = nowMs,
+            minGapMs = 1_000L,
+            minDistM = 10.0,
+            minAltDeltaM = 5.0,
+            entityUuid = entityUuid
+        )
+    }
+
+    private fun recordPinpoint4DFix(
+        rawKey: String,
+        lat: Double,
+        lon: Double,
+        altM: Double?,
+        nowMs: Long,
+        minGapMs: Long,
+        minDistM: Double,
+        minAltDeltaM: Double,
+        entityUuid: String?
+    ) {
+        if (!lat.isFinite() || !lon.isFinite() || lat !in -90.0..90.0 || lon !in -180.0..180.0) return
+        if (abs(lat) < 1e-5 && abs(lon) < 1e-5) return
+        val normKey = normalizeTrailKey(rawKey)
+        if (normKey.isEmpty()) return
+        if (!entityUuid.isNullOrBlank()) {
+            trailAliases[entityUuid.trim().uppercase()] = normKey
+        }
+        val validAltM = altM?.takeIf { it.isFinite() && it in -500.0..20_000.0 }
+        groundedAtByHex.remove(normKey)
+        val q = airborneTrails.getOrPut(normKey) { ArrayDeque() }
         synchronized(q) {
             val last = q.lastOrNull()
-            if (last == null || (nowMs - last.timeMs >= 4_000L && DeviceRegistry.metersBetween(last.lat, last.lon, lat, lon) >= 75.0)) {
-                q.addLast(FlightFix(nowMs, lat, lon))
+            val movedHoriz = last != null && DeviceRegistry.metersBetween(last.lat, last.lon, lat, lon) >= minDistM
+            val movedVert = last != null && validAltM != null && last.altM != null && abs(validAltM - last.altM) >= minAltDeltaM
+            if (last == null || (nowMs - last.timeMs >= minGapMs && (movedHoriz || movedVert))) {
+                q.addLast(FlightFix(nowMs, lat, lon, validAltM ?: last?.altM))
+            } else if (nowMs >= last.timeMs && last.altM == null && validAltM != null) {
+                q.removeLast()
+                q.addLast(last.copy(altM = validAltM))
             }
             while (q.isNotEmpty() && nowMs - q.first().timeMs > TRAIL_MAX_AGE_MS) q.removeFirst()
             while (q.size > 360) q.removeFirst()
@@ -435,8 +512,8 @@ object PoliceAircraft {
         maxAgeMs: Long = TRAIL_MAX_AGE_MS,
         includeLandedWithinWindow: Boolean = false
     ): List<Pair<Double, Double>> {
-        val normHex = hex.trim().uppercase()
-        if (!includeLandedWithinWindow && normHex in currentlyGroundedHexes(nowMs)) return emptyList()
+        val normHex = normalizeTrailKey(hex)
+        if (normHex.isEmpty() || (!includeLandedWithinWindow && normHex in currentlyGroundedHexes(nowMs))) return emptyList()
         val q = airborneTrails[normHex] ?: return emptyList()
         val snapshot = synchronized(q) {
             while (q.isNotEmpty() && nowMs - q.first().timeMs > TRAIL_MAX_AGE_MS) q.removeFirst()
@@ -503,6 +580,28 @@ object PoliceAircraft {
     internal fun clearTrailsForTest() {
         airborneTrails.clear()
         droneTrails.clear()
+        trailAliases.clear()
+        groundedAtByHex.clear()
+    }
+
+    fun recentFlightFixes4D(
+        key: String,
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = TRAIL_MAX_AGE_MS
+    ): List<FlightFix> {
+        val normKey = normalizeTrailKey(key)
+        if (normKey.isEmpty() || normKey in currentlyGroundedHexes(nowMs)) return emptyList()
+        val q = airborneTrails[normKey] ?: return emptyList()
+        synchronized(q) {
+            while (q.isNotEmpty() && nowMs - q.first().timeMs > maxAgeMs) q.removeFirst()
+            return q.toList()
+        }
+    }
+
+    fun clearAirborneTrailsForTest() {
+        airborneTrails.clear()
+        droneTrails.clear()
+        trailAliases.clear()
         groundedAtByHex.clear()
     }
 

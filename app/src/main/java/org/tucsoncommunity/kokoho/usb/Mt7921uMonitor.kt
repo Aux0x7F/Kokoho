@@ -549,7 +549,13 @@ class Mt7921uMonitor {
                 // With other adapters running, only this one's share of the channels.
                 val mine = UsbWifi.share(HOP.map { monitorChannel(it.first, it.second) }).toSet()
                 plan.filter { monitorChannel(it.first, it.second) in mine }.ifEmpty { plan }
-            }.ifEmpty { HOP }.let { plan -> UsbWifi.mostlyLow(plan) { it.first == 0 } }
+            }.ifEmpty { HOP }
+                .let { plan -> UsbWifi.mostlyLow(plan) { it.first == 0 } }
+                .let { plan ->
+                    UsbWifi.prioritizeDroneBeaconChannels(plan, UsbWifi.hasActiveUnpositionedDrone()) {
+                        monitorChannel(it.first, it.second)
+                    }
+                }
         }
         /** Both antennas as a mask (SET_RX_PATH), and as a count (CHANNEL_SWITCH): mt7921_mcu_set_chan_info sends each its own. */
         private const val RX_ANTENNAS = 0x3

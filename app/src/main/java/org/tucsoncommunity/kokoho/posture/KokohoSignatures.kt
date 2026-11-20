@@ -1801,6 +1801,7 @@ object KokohoSignatures {
         "04:71:4B:1", "54:6F:71",                       // uAvionix (UAS Remote ID / Avionics)
         "EC:5B:73", "18:D7:93",                         // Autel Robotics (EVO II Dual Enterprise)
         "60:60:1F", "48:1C:B9", "34:D2:62", "04:A8:5A", // DJI Enterprise (Matrice / Mavic Enterprise)
+        "26:37:12",                                     // DJI DroneID Wi-Fi Beacon OUI
         "FA:0B:BC"                                      // ASTM F3411 Wi-Fi Beacon / NAN Remote ID
     )
 

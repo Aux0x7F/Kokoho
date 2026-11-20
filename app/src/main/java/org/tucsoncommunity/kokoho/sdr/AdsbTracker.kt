@@ -1,7 +1,10 @@
 package org.tucsoncommunity.kokoho.sdr
 
 import org.tucsoncommunity.kokoho.online.PoliceAircraft
+import org.tucsoncommunity.kokoho.posture.KokohoReferenceTables
+import org.tucsoncommunity.kokoho.posture.KokohoSignatures
 import org.tucsoncommunity.kokoho.service.DeviceRegistry
+import java.util.Locale
 
 /**
  * Aircraft heard by the RTL-SDR's own ADS-B receiver ([ModeS]), put together from their
@@ -19,6 +22,7 @@ class AdsbTracker {
         var altitudeFt: Int? = null
         var speedKt: Double? = null
         var trackDeg: Double? = null
+        var onGround = false
         var even: Cpr? = null; var odd: Cpr? = null
         var lat = 0.0; var lon = 0.0; var positionAt = 0L
     }
@@ -36,6 +40,7 @@ class AdsbTracker {
         info.altitudeFt?.let { p.altitudeFt = it }
         info.speedKt?.let { p.speedKt = it }
         info.trackDeg?.let { p.trackDeg = it }
+        if (info.onGround) p.onGround = true else if ((info.altitudeFt ?: 0) > 100) p.onGround = false
         val odd = info.cprOdd ?: return
         val cpr = Cpr(info.cprLat, info.cprLon, now)
         if (odd) p.odd = cpr else p.even = cpr
@@ -52,19 +57,77 @@ class AdsbTracker {
         p.lat = pos.first; p.lon = pos.second; p.positionAt = now
     }
 
-    /** Aircraft with a recent position, as the police-aircraft check takes them. */
+    /** Aircraft with a recent position, enriched offline via [KokohoReferenceTables]. */
     fun located(now: Long): List<PoliceAircraft.Plane> = planes.values
         .filter { now - it.lastSeen <= STALE_MS && it.positionAt > 0 && now - it.positionAt <= STALE_MS }
         .map { p ->
-            PoliceAircraft.Plane(hex = "%06x".format(p.icao), callsign = p.callsign, registration = null, type = null,
-                owner = null, lat = p.lat, lon = p.lon, altitudeFt = p.altitudeFt, speedKt = p.speedKt,
-                trackDeg = p.trackDeg, military = false)
+            val hex = "%06x".format(Locale.US, p.icao)
+            val ref = KokohoReferenceTables.lookupAircraft(hex)
+            PoliceAircraft.Plane(
+                hex = hex,
+                callsign = p.callsign,
+                registration = ref?.registration?.takeIf { it.isNotBlank() },
+                type = ref?.icaoType?.takeIf { it.isNotBlank() },
+                owner = ref?.owner?.takeIf { it.isNotBlank() },
+                lat = p.lat,
+                lon = p.lon,
+                altitudeFt = p.altitudeFt,
+                speedKt = p.speedKt,
+                trackDeg = p.trackDeg,
+                military = ref?.disposition == "MIL",
+                onGround = p.onGround
+            )
         }
 
     /** Addresses heard recently without a position (Mode S replies, or ADS-B without GPS). */
     fun unlocated(now: Long): List<String> = planes.values
         .filter { now - it.lastSeen <= STALE_MS && (it.positionAt == 0L || now - it.positionAt > STALE_MS) }
-        .map { "%06x".format(it.icao) }
+        .map { "%06x".format(Locale.US, it.icao) }
+
+    /**
+     * True when a recently heard (<= [PENDING_TACTICAL_MS]) aircraft still lacks a fresh CPR position
+     * lock and matches a non-suppressed LE/DHS/GOV entry in [KokohoReferenceTables] or tactical callsign.
+     */
+    fun hasPendingUnlocatedTacticalHex(now: Long): Boolean {
+        for (p in planes.values) {
+            val age = now - p.lastSeen
+            if (p.lastSeen <= 0L || age < 0L || age > PENDING_TACTICAL_MS) continue
+            if (p.positionAt > 0L && now - p.positionAt <= PAIR_MS) continue
+            if (p.onGround || (p.altitudeFt != null && p.altitudeFt!! <= 100)) continue
+            if (p.speedKt != null && p.speedKt!! < 15.0) continue
+            val hex = "%06x".format(Locale.US, p.icao)
+            val ref = KokohoReferenceTables.lookupAircraft(hex)
+            if (ref != null && ref.isExcludedNonThreat && p.callsign.isNullOrBlank()) continue
+            val probe = PoliceAircraft.Plane(
+                hex = hex,
+                callsign = p.callsign,
+                registration = ref?.registration?.takeIf { it.isNotBlank() },
+                type = ref?.icaoType?.takeIf { it.isNotBlank() },
+                owner = ref?.owner?.takeIf { it.isNotBlank() },
+                lat = 0.0,
+                lon = 0.0,
+                altitudeFt = p.altitudeFt,
+                speedKt = p.speedKt,
+                trackDeg = p.trackDeg,
+                military = ref?.disposition == "MIL",
+                onGround = p.onGround
+            )
+            if (PoliceAircraft.isGliderOrExcludedTrainer(probe)) continue
+            val isExplicitRef = ref != null && !ref.isExcludedNonThreat && ref.isExplicitLeOrGov
+            val agency = KokohoSignatures.classifyAircraftAgency(
+                owner = probe.owner,
+                registration = probe.registration,
+                callsign = p.callsign,
+                hitLabel = null,
+                type = probe.type,
+                hex = hex,
+                speedKt = p.speedKt,
+                isCircling = false
+            )
+            if (isExplicitRef || agency != null) return true
+        }
+        return false
+    }
 
     val count get() = planes.size
 
@@ -74,6 +137,7 @@ class AdsbTracker {
         /** Even and odd frames this close together decode globally. */
         const val PAIR_MS = 10_000L
         const val STALE_MS = 60_000L
+        const val PENDING_TACTICAL_MS = 12_000L
         /** Further than a 1090 MHz receiver on a phone can hear: a bad decode. */
         const val MAX_RANGE_M = 450_000.0
     }

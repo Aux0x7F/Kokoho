@@ -130,6 +130,7 @@ object DeviceRegistry {
         val history = ArrayDeque<Sample>()
         val path = ArrayDeque<GeoSample>()
         var remoteId: RemoteId.Info? = null
+        var remoteIdPosAt = 0L
         var following = false
         var known: KnownDeviceEntity? = null
         var bestPosition: GeoSample? = null
@@ -201,7 +202,10 @@ object DeviceRegistry {
             // Keep the richest identity: a later advert may lack the fields an earlier one had.
             if (identity.facts.size >= t.identity.facts.size || t.identity.type == "Device") t.identity = identity
             t.hits = mergeHits(t, hits, now)
-            remoteId?.let { t.remoteId = it }
+            remoteId?.let {
+                t.remoteId = it
+                if (it.hasPosition) t.remoteIdPosAt = now
+            }
             broadcast?.let { t.broadcast = it }
             a.wifi?.let { w ->
                 w.upSince?.let { t.upSince = it }
@@ -636,6 +640,37 @@ object DeviceRegistry {
         siblings.map { it.third }.firstOrNull { it.contains(" - ") }
             ?.let { out += "Probable hardware (from sibling)" to it.substringAfter(" - ") }
         return out
+    }
+
+    /**
+     * True when any drone OUI or Remote ID transmitter was heard locally within [activeWindowMs]
+     * without a fresh (<= [freshPosMs]) GPS position lock.
+     */
+    fun hasActiveUnpositionedDrone(
+        nowMs: Long = System.currentTimeMillis(),
+        activeWindowMs: Long = 30_000L,
+        freshPosMs: Long = 15_000L
+    ): Boolean {
+        for (t in tracks.values) {
+            synchronized(t) {
+                val seenAt = if (t.localAt > 0L) t.localAt else t.lastSeen
+                if (seenAt <= 0L || nowMs - seenAt !in 0L..activeWindowMs) return@synchronized
+                val rid = t.remoteId
+                val isDrone = rid != null ||
+                    org.tucsoncommunity.kokoho.usb.UsbWifi.isDronePriorityOui(t.mac) ||
+                    t.hits.any { it.category == Category.DRONE } ||
+                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.isTacticalOrRemoteIdDrone(
+                        mac = t.mac,
+                        ssidOrName = t.name,
+                        vendor = t.vendor,
+                        hasRemoteId = false
+                    )
+                if (!isDrone) return@synchronized
+                val hasFreshPos = rid?.hasPosition == true && t.remoteIdPosAt > 0L && (nowMs - t.remoteIdPosAt) <= freshPosMs
+                if (!hasFreshPos) return true
+            }
+        }
+        return false
     }
 
     /** Great-circle distance in metres (haversine). */

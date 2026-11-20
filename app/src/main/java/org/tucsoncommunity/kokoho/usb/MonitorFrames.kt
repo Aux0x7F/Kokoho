@@ -125,9 +125,22 @@ class MonitorFrames {
                         // Fixed fields: the 8-byte beacon clock (microseconds since its WiFi came up), interval, capability info.
                         val tsf = (0 until 8).fold(0L) { acc, k -> acc or (u8(d + 24 + k).toLong() shl (8 * k)) }
                         if (tsf in 1 until MAX_TSF_US) it.upSince = now - tsf / 1000
-                        if (it.ies == null || now - it.iesAt > IES_REFRESH_MS) {
-                            it.ies = elements(b, d + 36, ProbeIntel.withoutFcs(b, d, end)); it.iesAt = now
+                        val bodyEnd = ProbeIntel.withoutFcs(b, d, end)
+                        val droneBeaconIe = hasDroneVendorIe(b, d + 36, bodyEnd)
+                        if (droneBeaconIe || it.ies == null || now - it.iesAt > IES_REFRESH_MS) {
+                            it.ies = elements(b, d + 36, bodyEnd); it.iesAt = now
                             it.privacy = (u8(d + 34) and 0x10) != 0
+                        }
+                        if (droneBeaconIe) {
+                            var decodedRid: org.tucsoncommunity.kokoho.detect.RemoteId.Info? = null
+                            it.ies?.forEach { (id, payload) ->
+                                if (id == 221 && org.tucsoncommunity.kokoho.detect.RemoteId.isWifiIe(payload)) {
+                                    org.tucsoncommunity.kokoho.detect.RemoteId.decodeWifiIe(payload, decodedRid)?.let { r -> decodedRid = r }
+                                }
+                            }
+                            UsbWifi.noteDroneActivity(it.mac, hasPosition = decodedRid?.hasPosition == true, nowMs = now)
+                        } else if (UsbWifi.isDronePriorityOui(it.mac)) {
+                            UsbWifi.noteDroneActivity(it.mac, hasPosition = false, nowMs = now)
                         }
                         if (check) AntennaCheck.heardAp(it.mac, it.ssid, it.channel, rssi, now)
                     }
@@ -160,6 +173,7 @@ class MonitorFrames {
                         s.probed.remove(name); s.probed.add(name)
                         if (s.probed.size > MAX_PROBED) s.probed.remove(s.probed.first())
                     }
+                    if (UsbWifi.isDronePriorityOui(s.mac)) UsbWifi.noteDroneActivity(s.mac, hasPosition = false, nowMs = now)
                 }
                 0, 2, 10, 11, 12 -> {
                     // A device joining a network names it in its (re)association request: that
@@ -172,9 +186,14 @@ class MonitorFrames {
             2 -> {
                 val size = end - d
                 if (captureClients) when {
-                    toDs == 1 && fromDs == 0 -> touch(a2, ap = false)?.let { it.bssid = mac(b, a1); it.dataBytes += size }
+                    toDs == 1 && fromDs == 0 -> touch(a2, ap = false)?.let {
+                        it.bssid = mac(b, a1); it.dataBytes += size
+                        if (UsbWifi.isDronePriorityOui(it.mac)) UsbWifi.noteDroneActivity(it.mac, hasPosition = false, nowMs = now)
+                    }
                     toDs == 0 && fromDs == 1 -> touch(a1, ap = false, sent = false)?.let { it.bssid = mac(b, a2) }
-                    else -> touch(a2, ap = false)
+                    else -> touch(a2, ap = false)?.let {
+                        if (UsbWifi.isDronePriorityOui(it.mac)) UsbWifi.noteDroneActivity(it.mac, hasPosition = false, nowMs = now)
+                    }
                 }
                 // Sent by the router to one of its devices.
                 if (toDs == 0 && fromDs == 1) sightings[mac(b, a2)]?.let { it.dataBytes += size }
@@ -394,6 +413,27 @@ class MonitorFrames {
         private const val IES_REFRESH_MS = 10_000L
         /** A beacon clock past 5 years is junk (a corrupt frame), not uptime. */
         private const val MAX_TSF_US = 5L * 365 * 86_400 * 1_000_000
+
+        /** Fast zero-allocation check for ASTM (FA:0B:BC), French (6A:5C:35), or DJI (26:37:12) vendor IEs. */
+        private fun hasDroneVendorIe(b: ByteArray, from: Int, end: Int): Boolean {
+            var i = from
+            while (i + 2 <= end) {
+                val tag = b[i].toInt() and 0xff
+                val len = b[i + 1].toInt() and 0xff
+                if (i + 2 + len > end) break
+                if (tag == 221 && len >= 4) {
+                    val b0 = b[i + 2].toInt() and 0xff
+                    val b1 = b[i + 3].toInt() and 0xff
+                    val b2 = b[i + 4].toInt() and 0xff
+                    if ((b0 == 0xFA && b1 == 0x0B && b2 == 0xBC) ||
+                        (b0 == 0x6A && b1 == 0x5C && b2 == 0x35) ||
+                        (b0 == 0x26 && b1 == 0x37 && b2 == 0x12)
+                    ) return true
+                }
+                i += 2 + len
+            }
+            return false
+        }
 
         /** The elements of a frame body as (id, payload), like Android's scan results; an extension element (255) keeps its extension ID as first byte. */
         internal fun elements(b: ByteArray, from: Int, end: Int): List<Pair<Int, ByteArray>> {

@@ -283,6 +283,8 @@ object KokohoPostureEngine {
     @Volatile
     private var latestSnapshot: PostureSnapshot? = null
     @Volatile
+    private var latestRawObservationsSnapshot: List<RawSensorReportCandidate> = emptyList()
+    @Volatile
     private var cachedFallbackLocation: android.location.Location? = null
     @Volatile
     private var cachedFallbackLocationAtMs: Long = 0L
@@ -340,9 +342,19 @@ object KokohoPostureEngine {
         lastPostureColor = PostureColor.GREEN
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+        latestRawObservationsSnapshot = emptyList()
+        PoliceAircraft.clearAirborneTrailsForTest()
         cachedFallbackLocation = null
         cachedFallbackLocationAtMs = 0L
     }
+
+    fun recentPinpointFlightTrack4D(
+        keyOrUuid: String,
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = 90 * 60_000L
+    ): List<PoliceAircraft.FlightFix> = PoliceAircraft.recentFlightFixes4D(keyOrUuid, nowMs, maxAgeMs)
+
+    internal fun latestRawObservationsForTest(): List<RawSensorReportCandidate> = latestRawObservationsSnapshot
 
     /** Non-recursive lookup of an entity's evidence facets and hardwareIdentifier when a report is saved on it. */
     fun peekThreatFacets(context: Context?, keyOrUuid: String): Pair<List<String>, String?> {
@@ -370,6 +382,8 @@ object KokohoPostureEngine {
         org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
+        latestRawObservationsSnapshot = emptyList()
+        PoliceAircraft.clearAirborneTrailsForTest()
         cachedFallbackLocation = null
         cachedFallbackLocationAtMs = 0L
     }
@@ -2178,7 +2192,19 @@ object KokohoPostureEngine {
             val droneLon = rid?.longitude ?: snap.place?.lon ?: userLoc?.longitude
             val hasExactDroneGps = rid?.latitude != null && rid.longitude != null
             val altMeters = rid?.heightM ?: rid?.altitudeGeoM
-            val altFtAgl = altMeters?.let { (it * 3.28084).roundToInt().coerceAtLeast(0) }
+            val altFtAgl = rid?.heightM?.let { (it * 3.28084).roundToInt().coerceAtLeast(0) }
+                ?: rid?.altitudeGeoM?.let { (it * 3.28084).roundToInt().coerceAtLeast(0) }
+            val altFtMsl = rid?.altitudeGeoM?.let { (it * 3.28084).roundToInt() }
+            if (hasExactDroneGps) {
+                PoliceAircraft.recordDroneFlightFix(
+                    droneKey = normMac,
+                    lat = droneLat!!,
+                    lon = droneLon!!,
+                    altM = altMeters,
+                    nowMs = snap.lastSeen,
+                    entityUuid = uuid
+                )
+            }
 
             val distM = if (hasExactDroneGps && userLoc != null) {
                 haversineMeters(userLoc.latitude, userLoc.longitude, droneLat!!, droneLon!!).roundToInt()
@@ -2259,13 +2285,18 @@ object KokohoPostureEngine {
                 )
             }
             if (droneLat != null && droneLon != null) {
+                val droneAltFacets = buildList {
+                    altFtAgl?.let { add("uas:alt_ft_agl:$it") }
+                    altFtMsl?.let { add("air:alt_ft_msl:$it") }
+                    rid?.directionDeg?.let { add("uas:hdg:$it") }
+                }
                 localRawObservations += RawSensorReportCandidate(
                     facetKey = facetKey,
                     rawLat = droneLat,
                     rawLon = droneLon,
                     signalDb = snap.rssi.toDouble(),
                     modality = if (rid != null) "REMOTE_ID" else "TACTICAL_DRONE_OUI",
-                    additionalFacets = badges.drop(1).map { it.facetKey } + listOfNotNull(altFtAgl?.let { "uas:alt_ft_agl:$it" }),
+                    additionalFacets = (badges.drop(1).map { it.facetKey } + droneAltFacets).distinct(),
                     agency = KokohoAgency.DRONE,
                     label = threat.friendlyLabel,
                     propClass = "GROUND_DIRECT",
@@ -2809,7 +2840,14 @@ object KokohoPostureEngine {
                 "ICAO ${p.hex.uppercase()}"
             ).distinct().joinToString(" · ")
             val seenAtMs = max(PoliceAircraft.localAt, PoliceAircraft.latestAt).takeIf { it > 0L } ?: nowMs
-            org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(p.hex, p.lat, p.lon, seenAtMs)
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(
+                hex = p.hex,
+                lat = p.lat,
+                lon = p.lon,
+                nowMs = seenAtMs,
+                altM = p.altitudeFt?.let { it * 0.3048 },
+                entityUuid = uuid
+            )
             val isHeli = KokohoSignatures.isHelicopterAirframe(
                 p.type,
                 p.category,
@@ -3359,9 +3397,11 @@ object KokohoPostureEngine {
                 val prev = lastRawReportByFacet[cand.facetKey]
                 if (prev != null && cand.obsTimestampMs > 0L && cand.obsTimestampMs <= prev.lastObsTsMs) continue
                 val elapsed = if (prev != null) nowMs - prev.atMs else Long.MAX_VALUE
-                val movedEnough = prev != null && haversineMeters(prev.lat, prev.lon, cand.rawLat, cand.rawLon) >= 25.0
+                val movedDistM = if (prev != null) haversineMeters(prev.lat, prev.lon, cand.rawLat, cand.rawLon) else Double.MAX_VALUE
+                val movedEnough = prev != null && movedDistM >= 25.0
+                val pinpointDroneMoved = prev != null && cand.modality == "REMOTE_ID" && cand.isDerived && elapsed >= 4_000L && movedDistM >= 15.0
                 val signalChanged = prev != null && abs(cand.signalDb - prev.signalDb) >= 6.0
-                val shouldSend = prev == null || elapsed >= 30_000L || (elapsed >= 8_000L && (movedEnough || signalChanged))
+                val shouldSend = prev == null || elapsed >= 30_000L || pinpointDroneMoved || (elapsed >= 8_000L && (movedEnough || signalChanged))
                 if (!shouldSend) continue
                 lastRawReportByFacet[cand.facetKey] = LastRawReportState(nowMs, cand.rawLat, cand.rawLon, cand.signalDb, cand.obsTimestampMs)
                 KokohoHubClient.publishSensorReportIfEnabled(
@@ -3386,6 +3426,7 @@ object KokohoPostureEngine {
         val sectorTempo = org.tucsoncommunity.kokoho.sdr.RadioLog.sectorTempoLabel(nowMs)
         val primary = monitorThreats.firstOrNull()
         lastEvaluateNowMs = nowMs
+        latestRawObservationsSnapshot = localRawObservations.toList()
         if (primary == null) {
             lastPostureColor = PostureColor.GREEN
             return PostureSnapshot(

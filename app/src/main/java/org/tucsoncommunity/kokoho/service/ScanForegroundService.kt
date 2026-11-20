@@ -43,6 +43,7 @@ import org.tucsoncommunity.kokoho.detect.EvidenceFusion
 import org.tucsoncommunity.kokoho.detect.Hit
 import org.tucsoncommunity.kokoho.detect.RemoteId
 import org.tucsoncommunity.kokoho.detect.SignatureEngine
+import org.tucsoncommunity.kokoho.esp.isLoRaNode
 import org.tucsoncommunity.kokoho.detect.VendorDb
 import org.tucsoncommunity.kokoho.link.LinkCodec
 import org.tucsoncommunity.kokoho.link.LinkOutbox
@@ -982,8 +983,18 @@ class ScanForegroundService : Service() {
         if (a.isBle) {
             a.serviceData[Advert.uuid16(0xFFFA)]?.let { remoteId = RemoteId.decodeBle(it, DeviceRegistry.remoteIdOf(mac)) }
         } else {
-            a.wifi?.infoElements?.firstOrNull { it.first == 221 && RemoteId.isWifiIe(it.second) }
-                ?.let { remoteId = RemoteId.decodeWifiIe(it.second, DeviceRegistry.remoteIdOf(mac)) }
+            a.wifi?.infoElements?.forEach { (id, payload) ->
+                if (id == 221 && RemoteId.isWifiIe(payload)) {
+                    RemoteId.decodeWifiIe(payload, remoteId ?: DeviceRegistry.remoteIdOf(mac))?.let { remoteId = it }
+                }
+            }
+        }
+        if (via == null && (remoteId != null || org.tucsoncommunity.kokoho.usb.UsbWifi.isDronePriorityOui(mac))) {
+            org.tucsoncommunity.kokoho.usb.UsbWifi.noteDroneActivity(
+                mac = mac,
+                hasPosition = remoteId?.hasPosition == true,
+                nowMs = now
+            )
         }
 
         // Layer 1 Unfiltered Evidence Ring vs Layer 2 Alert Candidate Gate:
@@ -1026,7 +1037,7 @@ class ScanForegroundService : Service() {
 
         // Place devices only with a fresh, precise fix: a stale or WiFi/cell-based one
         // (often 100 m+ off) would put the dot far from where the device really was.
-        val lora = org.tucsoncommunity.kokoho.esp.isLoRaNode(mac, a.name)
+        val lora = isLoRaNode(mac, a.name)
         // A LoRa node can be kilometres away: never placed where this phone (or the Sentinel that heard it) was.
         val bestLoc = lastLocation ?: lastFix
         val loc = if (lora) null else if (via != null) peerAt else bestLoc?.takeIf { usableForPlacing(it) }
