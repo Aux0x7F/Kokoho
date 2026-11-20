@@ -835,8 +835,10 @@ class DeviceTrustAndSchemaTest {
     }
 
     @Test
-    fun vpnGeoGateBlocksSeatedTucsonEgressRecommendsProtonVpnAndAllowsUnseatedOrVpnExit() {
+    fun vpnGeoGateBlocksSeatedTucsonEgressRequiresGenericVpnAndAllowsUnseatedOrVpnExit() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
+        assertFalse(VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE.contains("Proton", ignoreCase = true))
+        assertFalse(DeviceTrustManager.formatGrantErrorMessage(0, "").contains("Proton", ignoreCase = true))
 
         // 1. Geographic classification checks
         assertTrue(VpnGeoGate.isTucsonGeo(VpnGeoGate.GeoSample("US", "AZ", "Tucson", 32.2226, -110.9747)))
@@ -875,12 +877,13 @@ class DeviceTrustAndSchemaTest {
         )
         assertNotNull(statusDto)
         assertEquals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, statusDto!!.status)
-        assertTrue(statusDto.message.orEmpty().contains("ProtonVPN"))
+        assertTrue(statusDto.message.orEmpty().contains("VPN", ignoreCase = true))
+        assertFalse(statusDto.message.orEmpty().contains("Proton", ignoreCase = true))
         assertTrue("Already-enrolled seat must NOT be wiped by local VPN gate", DeviceTrustManager.isEnrolled(ctx))
         assertNull(DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=0", "{}"))
         assertEquals("Zero Hub HTTP calls may fire while Tucson VPN gate is active", 0, hitCount.get())
 
-        // Web grant also surfaces ProtonVPN advisory without hitting Hub
+        // Web grant also surfaces generic VPN advisory without hitting Hub
         val grantLatch = java.util.concurrent.CountDownLatch(1)
         var grantOk = true
         var grantMsg = ""
@@ -895,7 +898,8 @@ class DeviceTrustAndSchemaTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
         }
         assertFalse(grantOk)
-        assertTrue(grantMsg.contains("ProtonVPN"))
+        assertTrue(grantMsg.contains("VPN", ignoreCase = true))
+        assertFalse(grantMsg.contains("Proton", ignoreCase = true))
         assertEquals(0, hitCount.get())
 
         // 4. Switching VPN ON (Verdict.ALLOWED) immediately unblocks Hub communication

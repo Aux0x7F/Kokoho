@@ -70,6 +70,12 @@ internal interface MapEngine {
     fun addLayer(json: JSONObject)
     /** Changes one paint property (a colour...) of a layer already on the map. */
     fun setPaint(layer: String, name: String, value: String)
+    /** Shows or hides an existing style layer without rebuilding GeoJSON sources. */
+    fun setLayerVisible(layer: String, visible: Boolean) {}
+    /** Toggles height-graded 3D building extrusions in both light and dark styles. */
+    fun setBuildings3d(enabled: Boolean) {}
+    /** Toggles self-hosted DEM terrain + hillshade with camera orbit elevation compensation. */
+    fun setTerrain(enabled: Boolean, animateCamera: Boolean = false) {}
 
     // ---- camera ----
     val camera: Camera
@@ -82,6 +88,8 @@ internal interface MapEngine {
     fun fit(points: List<Pair<Double, Double>>, paddingPx: Int, bottomPx: Int = paddingPx)
     fun visibleBox(): Box?
     fun toLatLon(x: Float, y: Float): Pair<Double, Double>?
+    fun projectScreen(lat: Double, lon: Double): android.graphics.PointF? = null
+    fun metersPerPixelAtLat(lat: Double): Double = Double.NaN
     fun setMinZoom(zoom: Double)
 
     var onCameraMove: (() -> Unit)?
@@ -108,6 +116,8 @@ internal interface MapEngine {
     fun pushFix(fix: Location)
     /** Keeps you in view: [topPaddingPx] lowers your arrow, [tilt] and [zoom] (null: leave it) set the view. */
     fun follow(mode: Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long)
+    fun follow(mode: Follow, topPaddingPx: Double?, tilt: Double?, zoom: Double?, ms: Long) =
+        follow(mode, topPaddingPx, tilt ?: 0.0, zoom, ms)
     /** You panned away: the map stopped following. */
     var onFollowDismissed: (() -> Unit)?
     /** Where the provider's logo and info button go: their top edge, at the start or (with [atEnd]) the end. */

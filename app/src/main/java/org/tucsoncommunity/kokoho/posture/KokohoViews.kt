@@ -331,7 +331,7 @@ class KokohoViews(
         }
 
         vpnNoticePill = MaterialButton(activity).apply {
-            text = "VPN Required (Tucson IP) · Connect ProtonVPN & Re-Check"
+            text = "VPN Required (Tucson IP) · Turn On VPN & Re-Check"
             isAllCaps = false
             textSize = 12.5f
             typeface = Typeface.DEFAULT_BOLD
@@ -1100,7 +1100,7 @@ class KokohoViews(
 
         addCard(
             "Antenna & NOAA Weather Check",
-            "Verify RTL-SDR receive sensitivity against 162.400–162.550 MHz NOAA weather stations"
+            "Verify RTL-SDR receive sensitivity against 162.400-162.550 MHz NOAA weather stations"
         ) { activity.startActivity(Intent(activity, AntennaCheckActivity::class.java)) }
 
         addCard(
@@ -1234,7 +1234,7 @@ class KokohoViews(
                 val msgTv = TextView(activity).apply {
                     text = "Client network resolution detected a direct connection from the Tucson area without an active VPN.\n\n" +
                         "Local scanning continues normally on your phone, while Hub sync, enrollment, and live sharing pause automatically until your traffic routes outside Southern Arizona.\n\n" +
-                        "1. Connect a trusted no-log VPN (ProtonVPN recommended) to an exit outside Southern Arizona.\n" +
+                        "1. Connect your VPN to an exit outside Southern Arizona.\n" +
                         "2. Enable Always-On VPN and Kill-Switch protection in your VPN settings.\n" +
                         "3. Tap Re-Check VPN below once connected."
                     textSize = 14f
@@ -1277,7 +1277,7 @@ class KokohoViews(
                         } else {
                             recheckBtn.isEnabled = true
                             recheckBtn.text = "Re-Check VPN"
-                            statusTv.text = "Tucson IP still detected. Verify ProtonVPN (or your trusted VPN) is connected outside Southern Arizona."
+                            statusTv.text = "Tucson IP still detected. Verify your VPN is connected to an exit outside Southern Arizona."
                             statusTv.visibility = View.VISIBLE
                         }
                     }

@@ -301,22 +301,25 @@
         android:layout_gravity="bottom"
         android:orientation="vertical">
 
-    <!-- The round buttons: a column at the right, a row when the screen is wider than tall (code, arrangeForShape). -->
+    <!-- Cohesive 4-button map control stack: column at right in portrait, row in wide landscape (arrangeForShape). -->
     <LinearLayout
         android:id="@+id/sideButtons"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="end"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="10dp"
+        android:gravity="center"
         android:orientation="vertical">
 
-    <!-- Where to? Search a destination (Home, Work, starred, recent). -->
+    <!-- Legacy buttons kept hidden for layout binding compatibility -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/searchButton"
         style="@style/MapActionButton"
         android:contentDescription="Search a destination"
-        android:src="@drawable/ic_search" />
+        android:src="@drawable/ic_search"
+        android:visibility="gone" />
 
-    <!-- On the main screen: open the map full screen. -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/fullscreenButton"
         style="@style/MapActionButton"
@@ -324,31 +327,62 @@
         android:src="@drawable/ic_fullscreen"
         android:visibility="gone" />
 
-    <!-- Map settings (provider, layers...): Settings > Map. -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/mapSettingsButton"
         style="@style/MapActionButton"
         android:contentDescription="Map settings"
-        android:src="@drawable/ic_settings" />
+        android:src="@drawable/ic_settings"
+        android:visibility="gone" />
 
-    <!-- Light / dark map. -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/themeButton"
         style="@style/MapActionButton"
         android:contentDescription="Light / dark map"
-        android:src="@drawable/ic_dark_mode" />
+        android:src="@drawable/ic_dark_mode"
+        android:visibility="gone" />
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
+    <ImageButton
         android:id="@+id/orientationButton"
-        style="@style/MapActionButton"
-        android:contentDescription="Map: north up"
-        android:src="@drawable/ic_north_up" />
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Compass: tap to reset flat north-up"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_map_compass" />
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
+    <ImageButton
         android:id="@+id/centerButton"
-        style="@style/MapActionButton"
-        android:contentDescription="Follow my position"
-        android:src="@drawable/ic_my_location" />
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginTop="3dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Center on my location"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_map_reticle" />
+
+    <ImageButton
+        android:id="@+id/buildings3dButton"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginTop="3dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Toggle 3D buildings"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_map_buildings_3d" />
+
+    <ImageButton
+        android:id="@+id/terrainButton"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginTop="3dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Toggle 3D terrain elevation"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_map_terrain" />
     </LinearLayout>
 
     <!-- A place or the routes to it: pick one and start. -->

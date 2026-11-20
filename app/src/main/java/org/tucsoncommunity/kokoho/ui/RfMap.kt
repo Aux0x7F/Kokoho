@@ -44,6 +44,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         private const val CAMERA_CONE_DEG = 40.0
 
         private const val PRECISION = "rf-precision"; private const val CONES = "rf-cctv-cones"
+        private const val DRONE_DOME_2D = "rf-drone-dome-2d"
         private const val CAM_CONES = "rf-camera-cones"
         private const val HEAT = "rf-kokoho-heat"
         private const val FLIGHT_TRACKS = "rf-flight-tracks"
@@ -123,7 +124,18 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     private var drones: Map<String, DeviceRegistry.Snapshot> = emptyMap()
     private var airThreatsByUuid: Map<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyMap()
     private var droneThreatsByUuid: Map<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyMap()
-    private var selectedFlightTrackPoints: List<Pair<Double, Double>> = emptyList()
+    private var unpinpointedDroneUuids: Set<String> = emptySet()
+    private var flightTracksByEntityUuid: Map<String, org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack> = emptyMap()
+    private var localDroneTrailsByUuid: Map<String, PoliceAircraft.LocalDroneTrail> = emptyMap()
+    private var selectedFlightTrackEntityUuid: String? = null
+    private var selectedFlightTrackRecord: org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack? = null
+    private var selectedFlightTrackColorHex: String = "#EC4899"
+    private var airborneOverlay: Airborne3dOverlayView? = null
+    private var cameraTopPaddingPx: Double = 0.0
+    private var lastAirborne2dHidden: Boolean? = null
+    private var lastDroneDome2dHidden: Boolean? = null
+    private val badgeBitmapsById = HashMap<String, android.graphics.Bitmap>()
+    private var selectionRingBmp: android.graphics.Bitmap? = null
     private var cameras: Map<String, KnownCamera> = emptyMap()
     private var cctvs: Map<String, org.tucsoncommunity.kokoho.alpr.CctvCamera> = emptyMap()
     private var towers: Map<String, CellTowerStore.Tower> = emptyMap()
@@ -167,7 +179,66 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             askedDrawn = null
             locationsDrawnKey = null
             staticCleared = false
+            lastAirborne2dHidden = null
+            lastDroneDome2dHidden = null
+            airborneOverlay?.bind(map, selectionRingBmp)
             safe("loaded") { onLoaded() }
+        }
+    }
+
+    fun attachAirborneOverlay(overlay: Airborne3dOverlayView?) {
+        airborneOverlay = overlay
+        if (overlay != null) {
+            if (selectionRingBmp == null) {
+                selectionRingBmp = MapIcons.selectionRingIcon(activity.resources.displayMetrics.density)
+            }
+            overlay.bind(map, selectionRingBmp)
+        }
+        lastAirborne2dHidden = null
+        lastDroneDome2dHidden = null
+        syncAirbornePitchState(cameraTopPaddingPx)
+    }
+
+    fun syncAirbornePitchState(topPadPx: Double = cameraTopPaddingPx) {
+        cameraTopPaddingPx = topPadPx
+        val overlay = airborneOverlay
+        val (point3d, dome3d) = if (!tripMode && overlay != null) {
+            overlay.onCameraMoved(topPadPx)
+        } else {
+            false to false
+        }
+        var changed = false
+        if (ready() && lastAirborne2dHidden != point3d) {
+            if (lastAirborne2dHidden != null) changed = true
+            lastAirborne2dHidden = point3d
+            val show2d = !point3d
+            map.setLayerVisible(AIRCRAFT, show2d)
+            map.setLayerVisible(DRONES, show2d)
+            map.setLayerVisible(DRONE_OPS, show2d)
+            map.setLayerVisible(DRONE_LINES, show2d)
+        }
+        if (ready() && lastDroneDome2dHidden != dome3d) {
+            if (lastDroneDome2dHidden != null) changed = true
+            lastDroneDome2dHidden = dome3d
+            val showDome2d = !dome3d
+            map.setLayerVisible("$DRONE_DOME_2D-fill", showDome2d)
+            map.setLayerVisible("$DRONE_DOME_2D-line", showDome2d)
+            map.setLayerVisible("$DRONE_DOME_2D-dots", showDome2d)
+            map.setLayerVisible("$DRONE_DOME_2D-labels", showDome2d)
+        }
+        if (changed && activeSelection is MapSelection.Detection) {
+            drawSelection(activeSelection)
+        }
+    }
+
+    fun onTimeWindowChanged(newWindow: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow) {
+        if (newWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
+            selectedFlightTrackEntityUuid = null
+            selectedFlightTrackRecord = null
+            if (ready()) {
+                set(FLIGHT_TRACKS, emptyList())
+                drawTrace(emptyList(), TRACE_COLOR)
+            }
         }
     }
 
@@ -184,6 +255,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     /** The same icons as before, plus agency classification badge bitmaps. */
     private fun addImages() {
         registeredBadgeIcons.clear()
+        badgeBitmapsById.clear()
         val dp = activity.resources.displayMetrics.density
         KnownCamera.Kind.entries.forEach { map.addImage("rf-cam-${it.name}", MapIcons.cameraIcon(dp, it)) }
         map.addImage("rf-cctv-public", MapIcons.cctvIcon(dp, false))
@@ -194,7 +266,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         map.addImage("rf-tower", MapIcons.towerIcon(dp))
         map.addImage("rf-drone", droneArrow(dp))
         map.addImage("rf-dropped-pin", MapIcons.droppedPinIcon(dp))
-        map.addImage("rf-selection-ring", MapIcons.selectionRingIcon(dp))
+        val ringBmp = MapIcons.selectionRingIcon(dp)
+        selectionRingBmp = ringBmp
+        map.addImage("rf-selection-ring", ringBmp)
         map.addImage("rf-facility-fire", MapIcons.facilityBadgeIcon(dp, 0xFFDC2626.toInt(), isFire = true))
         for (agency in org.tucsoncommunity.kokoho.posture.KokohoAgency.entries) {
             val facId = "rf-facility-${agency.id}"
@@ -204,10 +278,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         for (kind in MapIcons.BadgeIconKind.entries) {
             for (agency in org.tucsoncommunity.kokoho.posture.KokohoAgency.entries) {
                 val id = "rf-badge-${kind.id}-${agency.id}"
-                map.addImage(
-                    id,
-                    MapIcons.classificationBadgeIcon(dp, kind, agency.mapColorArgb)
-                )
+                val bmp = MapIcons.classificationBadgeIcon(dp, kind, agency.mapColorArgb)
+                map.addImage(id, bmp)
+                badgeBitmapsById[id] = bmp
                 registeredBadgeIcons += id
             }
         }
@@ -223,7 +296,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         }
         if (registeredBadgeIcons.add(iconId)) {
             val dp = activity.resources.displayMetrics.density
-            map.addImage(iconId, MapIcons.classificationBadgeIcon(dp, kind, colorArgb))
+            val bmp = MapIcons.classificationBadgeIcon(dp, kind, colorArgb)
+            map.addImage(iconId, bmp)
+            badgeBitmapsById[iconId] = bmp
         }
         return iconId
     }
@@ -297,17 +372,24 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("line-color" to NAV_ROUTE_COLOR, "line-width" to 7.0))
         ) + agencyHeatLayers + listOf(
             // Flagged signal radius / centroid bubbles (50% transparent fill so the basemap reads cleanly through).
-            layer("$PRECISION-fill", "fill", PRECISION, paint = o("fill-color" to color, "fill-opacity" to a("*", 0.50, get("opacity")))),
-            layer("$PRECISION-line", "line", PRECISION, paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("*", 0.92, get("opacity")))),
+            layer("$PRECISION-fill", "fill", PRECISION, filter = a("!=", get("droneDome"), true),
+                paint = o("fill-color" to color, "fill-opacity" to a("*", 0.50, get("opacity")))),
+            layer("$PRECISION-line", "line", PRECISION, filter = a("!=", get("droneDome"), true),
+                paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("*", 0.92, get("opacity")))),
+            // Unpinpointed drone 2D uncertainty circles (visible when pitch <= 4 deg; lifts into 3D dome when pitch > 4 deg).
+            layer("$DRONE_DOME_2D-fill", "fill", PRECISION, filter = a("==", get("droneDome"), true),
+                paint = o("fill-color" to color, "fill-opacity" to a("*", 0.36, get("opacity")))),
+            layer("$DRONE_DOME_2D-line", "line", PRECISION, filter = a("==", get("droneDome"), true),
+                paint = o("line-color" to color, "line-width" to 2.3, "line-opacity" to a("*", 0.92, get("opacity")))),
             // What each CCTV camera watches (zoomed in).
             layer("$CONES-fill", "fill", CONES, minzoom = CCTV_CONE_ZOOM, paint = o("fill-color" to color, "fill-opacity" to get("opacity"))),
             // Which way each plate, speed and red-light camera faces (when mapped), in its icon's colour.
             layer("$CAM_CONES-fill", "fill", CAM_CONES, minzoom = CAMERA_CONE_ZOOM, paint = o("fill-color" to color, "fill-opacity" to get("opacity"))),
             layer("$CAM_CONES-line", "line", CAM_CONES, minzoom = CAMERA_CONE_ZOOM,
                 paint = o("line-color" to color, "line-width" to 1.2, "line-opacity" to a("*", get("opacity"), 2.5))),
-            // Thin Chaikin-smoothed flight tracks (current in-flight for <=3h, all 24h tracks for 24h).
+            // Thin Chaikin-smoothed flight tracks, filtered and vertex-clipped to the active map time window.
             layer(FLIGHT_TRACKS, "line", layout = o("line-cap" to "round", "line-join" to "round"),
-                paint = o("line-color" to color, "line-width" to 2.0, "line-opacity" to a("coalesce", get("opacity"), 0.82))),
+                paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("coalesce", get("opacity"), 0.84))),
             layer(TRACE, "line", layout = o("line-cap" to "round", "line-join" to "round"),
                 paint = o("line-color" to color, "line-width" to 5.0)),
             layer(DRONE_LINES, "line", paint = o("line-color" to DRONE_COLOR, "line-width" to 2.5, "line-dasharray" to a(4.0, 2.5))),
@@ -332,11 +414,18 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // A saved trace's every sighting of each device (Settings › Log every sighting in traces): small, under the devices.
             layer(PINGS, "circle", paint = o("circle-color" to color, "circle-radius" to 3.0, "circle-opacity" to 0.8)),
             // Devices: circular agency-colored icon badge when narrow enough to show a point (showDot == true).
-            layer(DOTS, "symbol", DEVICES, filter = a("==", get("showDot"), true),
+            layer(DOTS, "symbol", DEVICES, filter = a("all", a("==", get("showDot"), true), a("!=", get("droneDome"), true)),
                 layout = o("icon-image" to get("icon"), "icon-size" to 0.92, *overlap,
                     "symbol-sort-key" to a("case", flagged, 1.0, 0.0)),
                 paint = o("icon-opacity" to get("opacity"))),
-            layer(LABELS, "symbol", DEVICES, filter = flagged,
+            layer(LABELS, "symbol", DEVICES, filter = a("all", flagged, a("!=", get("droneDome"), true)),
+                layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 13.0, "text-anchor" to "top",
+                    "text-max-width" to 16.0, "text-offset" to a(0.0, 1.15), "text-optional" to true),
+                paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0, "text-opacity" to get("opacity"))),
+            layer("$DRONE_DOME_2D-dots", "symbol", DEVICES, filter = a("all", a("==", get("showDot"), true), a("==", get("droneDome"), true)),
+                layout = o("icon-image" to get("icon"), "icon-size" to 0.92, *overlap, "symbol-sort-key" to 1.0),
+                paint = o("icon-opacity" to get("opacity"))),
+            layer("$DRONE_DOME_2D-labels", "symbol", DEVICES, filter = a("all", flagged, a("==", get("droneDome"), true)),
                 layout = o("text-field" to get("label"), "text-font" to font, "text-size" to 13.0, "text-anchor" to "top",
                     "text-max-width" to 16.0, "text-offset" to a(0.0, 1.15), "text-optional" to true),
                 paint = o("text-color" to ink, "text-halo-color" to halo, "text-halo-width" to 2.0, "text-opacity" to get("opacity"))),
@@ -416,7 +505,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 "icon" to iconId,
                 "flagged" to p.flagged,
                 "showDot" to p.showDot,
-                "opacity" to p.opacity
+                "opacity" to p.opacity,
+                "droneDome" to p.isDroneDome
             )
         })
         set(PRECISION, shown.filter { it.radiusM != null }.map { p ->
@@ -424,7 +514,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 GeoJson.polygon(MapGeo.circle(p.lat, p.lon, p.radiusM!!, n = 32)),
                 "color" to hex(p.color),
                 "mac" to p.mac,
-                "opacity" to p.opacity
+                "opacity" to p.opacity,
+                "droneDome" to p.isDroneDome
             )
         })
     }
@@ -470,6 +561,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     /** Draws or clears the active selection ring and optional dropped-point pin. */
     fun drawSelection(selection: MapSelection?) {
         activeSelection = selection
+        val selectedUuid = (selection as? MapSelection.Detection)?.entityUuid
+        airborneOverlay?.updateSelection(selectedUuid)
         if (!ready()) return
         when (selection) {
             null -> {
@@ -482,7 +575,17 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
             is MapSelection.Detection -> {
                 set(DROPPED_POINT, emptyList())
-                set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
+                val is3dPointTarget = airborneOverlay?.is3dActive() == true &&
+                    (selection.entityUuid in airThreatsByUuid ||
+                        (selection.entityUuid in droneThreatsByUuid && selection.entityUuid !in unpinpointedDroneUuids))
+                val is3dDomeTarget = airborneOverlay?.isDome3dActive() == true &&
+                    selection.entityUuid in unpinpointedDroneUuids
+                if (is3dPointTarget || is3dDomeTarget) {
+                    // Selection halo is drawn around the elevated 3D puck or 3D airspace dome in Airborne3dOverlayView
+                    set(SELECTED_PIN, emptyList())
+                } else {
+                    set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
+                }
             }
             is MapSelection.Facility -> {
                 set(DROPPED_POINT, emptyList())
@@ -525,17 +628,38 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         })
     }
 
-    /** A route: the trace being recorded (orange) or a saved one (blue). */
-    fun drawTrace(points: List<Pair<Double, Double>>, color: String) {
+    /** A route: the trace being recorded (orange), a highlighted flight track, or a saved one (blue). */
+    fun drawTrace(points: List<Pair<Double, Double>>, color: String, entityUuid: String? = null) {
         if (!ready()) return
-        set(TRACE, if (points.size < 2) emptyList() else listOf(GeoJson.feature(GeoJson.line(points), "color" to color)))
+        set(
+            TRACE,
+            if (points.size < 2) {
+                emptyList()
+            } else {
+                listOf(GeoJson.feature(GeoJson.line(points), "color" to color, "hex" to entityUuid))
+            }
+        )
     }
+
+    private fun isDroneDetection(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        t.isDrone ||
+            t.agency == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE ||
+            t.evidenceSources.any {
+                it.facetKey.startsWith("uas:", ignoreCase = true) ||
+                    it.facetKey.startsWith("DRONE:", ignoreCase = true)
+            }
+
+    private fun isPinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        !t.isAircraft && isDroneDetection(t) && t.isPinpointed && t.uncertaintyRadiusM <= 22
+
+    private fun isUnpinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        !t.isAircraft && isDroneDetection(t) && !isPinpointedDrone(t)
 
     /**
      * Fast-changing live layers: draws ONLY Kokoho's active flagged agency detections
      * (with overlapping radii collapsed into single circles labeled with comma-separated agencies,
-     * rolling window radius/staleness fade, pinpointed Pro/Enterprise/RemoteID drones with altitude,
-     * and ADS-B aircraft with tap-to-view flight tracks).
+     * rolling window radius/staleness fade, unpinpointed drone 3D airspace domes, pinpointed
+     * Pro/Enterprise/RemoteID drones with altitude, and ADS-B aircraft with tap-to-view flight tracks).
      */
     fun drawLive(
         @Suppress("UNUSED_PARAMETER") devices: List<DeviceRegistry.Snapshot>,
@@ -565,20 +689,29 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             set(WIGLE, emptyList())
             set(ASKED, emptyList())
             droneThreatsByUuid = emptyMap()
+            unpinpointedDroneUuids = emptySet()
             drones = emptyMap()
             set(DRONES, emptyList())
             set(DRONE_OPS, emptyList())
             set(DRONE_LINES, emptyList())
             airThreatsByUuid = emptyMap()
+            flightTracksByEntityUuid = emptyMap()
+            localDroneTrailsByUuid = emptyMap()
             set(AIRCRAFT, emptyList())
             set(FLIGHT_TRACKS, emptyList())
+            drawTrace(emptyList(), TRACE_COLOR)
+            airborneOverlay?.updateScene(emptyList(), emptyList(), null, cameraTopPaddingPx)
             drawLocations()
             return emptyList()
         }
 
         val groundThreats = snap.mapThreats.filter {
             !it.isAircraft &&
-                !(it.isDrone && it.isPinpointed) &&
+                !isDroneDetection(it) &&
+                !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
+        }
+        val unpinpointedDrones = snap.mapThreats.filter {
+            isUnpinpointedDrone(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
         val zoom = map.camera.zoom
@@ -864,7 +997,49 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 groupMembers = sorted
             )
         }
-        drawPins(shown)
+        val dp = activity.resources.displayMetrics.density
+        val droneDomePins = unpinpointedDrones.map { t ->
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val ageMs = (nowMs - t.lastSeenMs).coerceAtLeast(0L)
+            val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+            val baseR = t.mapCircleRadiusM.coerceAtLeast(30)
+            val expandedR = org.tucsoncommunity.kokoho.posture.KokohoSignatures.projectRollingRadiusM(
+                timeWindow,
+                ageMs,
+                baseR,
+                isPinpointed = false
+            )
+            val opacity = org.tucsoncommunity.kokoho.posture.KokohoSignatures.mapCorroborationOpacity(
+                activity,
+                ageMs,
+                t.sightingCount.coerceAtLeast(1),
+                t.evidenceCount.coerceAtLeast(1),
+                baseR
+            ).toDouble()
+            val accText = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, expandedR)}"
+            val fullDist = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatUserDistance(activity, t.nearestEdgeDistanceM, t.uncertaintyRadiusM)
+            val titleInline = t.title.ifBlank { t.friendlyLabel }
+            MapPin(
+                mac = "kokoho:${t.uuid}",
+                lat = lat,
+                lon = lon,
+                label = "$titleInline · $accText · $staleness",
+                flagged = true,
+                color = t.agency.mapColorArgb,
+                details = "${t.agency.friendlyLabel} · ${t.posture.badgeLabel}\n$fullDist · Last seen $staleness",
+                radiusM = expandedR.toDouble(),
+                whereNote = "Unpinpointed sUAS airspace volume ($accText, <=400 ft AGL) · Last detected $staleness.",
+                showDot = zoomMergeM <= 0.0 || t.isApproximatedPosition,
+                opacity = opacity,
+                iconKind = MapIcons.BadgeIconKind.DRONE,
+                agencyId = t.agency.id,
+                groupMembers = listOf(t),
+                isDroneDome = true
+            )
+        }
+        val allShownPins = shown + droneDomePins
+        drawPins(allShownPins)
 
         wazeShown = emptyMap()
         set(WAZE, emptyList())
@@ -872,8 +1047,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         set(ASKED, emptyList())
 
         // Pinpointed Pro/Enterprise/RemoteID Drones with Altitude and Operator Tether
-        val droneThreats = snap.mapThreats.filter { it.isDrone && it.isPinpointed }
-        droneThreatsByUuid = droneThreats.associateBy { it.uuid }
+        val droneThreats = snap.mapThreats.filter { isPinpointedDrone(it) }
+        unpinpointedDroneUuids = unpinpointedDrones.map { it.uuid }.toSet()
+        droneThreatsByUuid = (droneThreats + unpinpointedDrones).associateBy { it.uuid }
         drones = emptyMap()
         set(DRONES, droneThreats.map { t ->
             val lat = t.lat ?: fallbackLat
@@ -924,76 +1100,196 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             )
         })
 
-        // Thin Chaikin-smoothed flight tracks:
-        //  - 30m / 3h windows: ONLY currently in-flight aircraft
-        //  - 24h / 1wk / 1mo windows: all flights within the active window
+        // Build 3D airborne overlay targets (ADS-B aircraft + pinpointed Remote ID drones + unpinpointed 3D drone domes)
+        val airborneTargets = ArrayList<Airborne3dOverlayView.AirborneTarget>(airThreats.size + droneThreats.size)
+        for (t in airThreats) {
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val altOrDist = t.altitudeFtAgl?.let { "${it} ft" }
+                ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.nearestEdgeDistanceM)
+            val cirTag = if (t.isCircling) " · CIRCLING" else ""
+            val kind = if (t.isHelicopter) MapIcons.BadgeIconKind.HELICOPTER else MapIcons.BadgeIconKind.SMALL_PLANE
+            val iconId = ensureBadgeIcon(kind, t.agency.mapColorArgb, t.agency.id)
+            val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, kind, t.agency.mapColorArgb).also {
+                badgeBitmapsById[iconId] = it
+            }
+            airborneTargets += Airborne3dOverlayView.AirborneTarget(
+                entityUuid = t.uuid,
+                lat = lat,
+                lon = lon,
+                isAircraft = true,
+                isDrone = false,
+                rotateWithMap = !t.isHelicopter,
+                trackDeg = if (t.isHelicopter) 0.0 else (t.aircraftTrackDeg ?: 0.0),
+                altitudeFtRaw = t.altitudeFtAgl,
+                colorArgb = t.agency.mapColorArgb,
+                badgeBitmap = bmp,
+                label = "${t.label}$cirTag · $altOrDist"
+            )
+        }
+        for (t in droneThreats) {
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val altPart = t.altitudeFtAgl?.let { "${it} ft AGL" }
+                ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.nearestEdgeDistanceM)
+            val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+            val iconId = ensureBadgeIcon(MapIcons.BadgeIconKind.DRONE, t.agency.mapColorArgb, t.agency.id)
+            val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, MapIcons.BadgeIconKind.DRONE, t.agency.mapColorArgb).also {
+                badgeBitmapsById[iconId] = it
+            }
+            airborneTargets += Airborne3dOverlayView.AirborneTarget(
+                entityUuid = t.uuid,
+                lat = lat,
+                lon = lon,
+                isAircraft = false,
+                isDrone = true,
+                rotateWithMap = false,
+                trackDeg = t.aircraftTrackDeg ?: 0.0,
+                altitudeFtRaw = t.altitudeFtAgl,
+                colorArgb = t.agency.mapColorArgb,
+                badgeBitmap = bmp,
+                label = "${t.label} · $altPart · $staleness",
+                operatorLat = t.operatorLat,
+                operatorLon = t.operatorLon
+            )
+        }
+        val droneDomes = droneDomePins.map { dpPin ->
+            val rawUuid = dpPin.mac.removePrefix("kokoho:")
+            val iconId = ensureBadgeIcon(MapIcons.BadgeIconKind.DRONE, dpPin.color, dpPin.agencyId)
+            val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, MapIcons.BadgeIconKind.DRONE, dpPin.color).also {
+                badgeBitmapsById[iconId] = it
+            }
+            Airborne3dOverlayView.DroneAirspaceDome(
+                entityUuid = rawUuid,
+                lat = dpPin.lat,
+                lon = dpPin.lon,
+                radiusM = (dpPin.radiusM ?: 60.0).coerceAtLeast(25.0),
+                colorArgb = dpPin.color,
+                opacity = dpPin.opacity.toFloat(),
+                badgeBitmap = bmp,
+                label = dpPin.label
+            )
+        }
+        val selectedEntityId = (activeSelection as? MapSelection.Detection)?.entityUuid
+        airborneOverlay?.updateScene(airborneTargets, droneDomes, selectedEntityId, cameraTopPaddingPx)
+        syncAirbornePitchState(cameraTopPaddingPx)
+
+        // Chaikin-smoothed aircraft & pinpoint drone flight tracks strictly filtered and vertex-clipped
+        // to `[nowMs - windowMs, nowMs]` across all rolling map time windows (`30m`, `3h`, `24h`, `1wk`, `1mo`).
         val trackFeatures = mutableListOf<JSONObject>()
+        val trackWindowMs = timeWindow.windowMs
         val cachedTracks = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedFlightTracks()
-        if (timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HOURS_24 ||
-            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.WEEK_1 ||
-            timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.MONTH_1
-        ) {
-            val enabledAirAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAircraftAgencies(activity)
-            val liveEntities = airThreats.map { it.uuid }.toSet()
-            val coveredHexes = HashSet<String>()
-            val trackWindowMs = timeWindow.windowMs
-            for (tr in cachedTracks) {
-                if (nowMs - tr.endedAtMs > trackWindowMs) continue
-                val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(tr.category) ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO
-                val allowed = if (ag.isDhs) enabledAirAgencies.any { it.isDhs } else ag in enabledAirAgencies
-                if (!allowed) continue
-                val pts = tr.points
-                if (pts.size < 2) continue
-                val smoothed = PoliceAircraft.chaikinSmooth(pts, 2)
-                val isInFlight = tr.entityUuid in liveEntities
-                coveredHexes += tr.entityUuid
+        val enabledAirAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAircraftAgencies(activity)
+        val enabledGroundAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(activity)
+        val liveAirAndDroneEntities = (airThreats.map { it.uuid } + droneThreats.map { it.uuid }).toSet()
+        val coveredEntities = HashSet<String>()
+        val activeTracksByEntity = LinkedHashMap<String, org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack>()
+
+        for (tr in cachedTracks) {
+            val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(tr.category)
+                ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO
+            val allowed = when {
+                ag == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE -> ag in enabledGroundAgencies
+                ag.isDhs -> enabledAirAgencies.any { it.isDhs }
+                else -> ag in enabledAirAgencies
+            }
+            if (!allowed) continue
+            val clippedPts = tr.clippedPointsForWindow(nowMs, trackWindowMs)
+            if (clippedPts.size < 2) continue
+            val smoothed = PoliceAircraft.chaikinSmooth(clippedPts, 2)
+            val isLive = tr.entityUuid in liveAirAndDroneEntities
+            if (tr.entityUuid.isNotBlank()) {
+                coveredEntities += tr.entityUuid
+                val prev = activeTracksByEntity[tr.entityUuid]
+                if (prev == null || tr.endedAtMs >= prev.endedAtMs) {
+                    activeTracksByEntity[tr.entityUuid] = tr
+                }
+            }
+            trackFeatures += GeoJson.feature(
+                GeoJson.line(smoothed),
+                "hex" to tr.entityUuid,
+                "color" to ag.mapColorHex,
+                "opacity" to if (isLive) 0.88 else 0.58
+            )
+        }
+        flightTracksByEntityUuid = activeTracksByEntity
+
+        // Local ADS-B trails within `[nowMs - trackWindowMs, nowMs]` for aircraft not already covered by Hub tracks
+        for (t in airThreats) {
+            if (t.uuid in coveredEntities) continue
+            val hexKey = t.aircraftHex ?: continue
+            val localPts = PoliceAircraft.recentAirborneTrail(
+                hex = hexKey,
+                nowMs = nowMs,
+                maxAgeMs = trackWindowMs,
+                includeLandedWithinWindow = true
+            )
+            if (localPts.size >= 2) {
+                val smoothed = PoliceAircraft.chaikinSmooth(localPts, 2)
+                coveredEntities += t.uuid
                 trackFeatures += GeoJson.feature(
                     GeoJson.line(smoothed),
-                    "color" to ag.mapColorHex,
-                    "opacity" to if (isInFlight) 0.88 else 0.58
+                    "hex" to t.uuid,
+                    "color" to t.agency.mapColorHex,
+                    "opacity" to 0.86
                 )
             }
-            for (t in airThreats) {
-                if (t.uuid in coveredHexes) continue
-                val hexKey = t.aircraftHex ?: continue
-                val localPts = PoliceAircraft.recentAirborneTrail(hexKey, nowMs, 3 * 3600_000L)
-                if (localPts.size >= 2) {
-                    val smoothed = PoliceAircraft.chaikinSmooth(localPts, 2)
-                    trackFeatures += GeoJson.feature(
-                        GeoJson.line(smoothed),
-                        "color" to t.agency.mapColorHex,
-                        "opacity" to 0.88
-                    )
-                }
-            }
-        } else {
-            val tracksByEntity = cachedTracks.associateBy { it.entityUuid }
-            for (t in airThreats) {
-                val serverPts = tracksByEntity[t.uuid]?.points.orEmpty()
-                val pts = if (serverPts.size >= 2) {
-                    serverPts
-                } else {
-                    PoliceAircraft.recentAirborneTrail(t.aircraftHex ?: "", nowMs, 3 * 3600_000L)
-                }
-                if (pts.size >= 2) {
-                    val smoothed = PoliceAircraft.chaikinSmooth(pts, 2)
-                    trackFeatures += GeoJson.feature(
-                        GeoJson.line(smoothed),
-                        "color" to t.agency.mapColorHex,
-                        "opacity" to 0.85
-                    )
-                }
+        }
+
+        // Local pinpoint drone trails within `[nowMs - trackWindowMs, nowMs]`
+        val localDroneMap = LinkedHashMap<String, PoliceAircraft.LocalDroneTrail>()
+        if (org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE in enabledGroundAgencies) {
+            for (dt in PoliceAircraft.recentDroneTrailsForWindow(nowMs, trackWindowMs)) {
+                localDroneMap[dt.entityUuid] = dt
+                if (dt.entityUuid in coveredEntities) continue
+                val smoothed = PoliceAircraft.chaikinSmooth(dt.points, 2)
+                val isLive = dt.entityUuid in liveAirAndDroneEntities
+                trackFeatures += GeoJson.feature(
+                    GeoJson.line(smoothed),
+                    "hex" to dt.entityUuid,
+                    "color" to org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE.mapColorHex,
+                    "opacity" to if (isLive) 0.86 else 0.56
+                )
             }
         }
+        localDroneTrailsByUuid = localDroneMap
         set(FLIGHT_TRACKS, trackFeatures)
 
         if (TripRecorder.isRecording) {
-            val trace = TripRecorder.livePoints()
-            drawTrace(trace.map { it.lat to it.lon }, TRACE_COLOR)
-        } else if (selectedFlightTrackPoints.size >= 2) {
-            drawTrace(selectedFlightTrackPoints, airThreatsByUuid.values.firstOrNull()?.agency?.mapColorHex ?: "#EC4899")
+            val rawLive = TripRecorder.livePoints()
+            val clippedTrace = PoliceAircraft.clipFixesToWindow(
+                rawLive.map { PoliceAircraft.FlightFix(it.time, it.lat, it.lon) },
+                nowMs,
+                trackWindowMs
+            )
+            drawTrace(clippedTrace, TRACE_COLOR)
         } else {
-            drawTrace(emptyList(), TRACE_COLOR)
+            val selUuid = selectedFlightTrackEntityUuid
+            val selRecord = selectedFlightTrackRecord
+            val selClipped = when {
+                selRecord != null -> selRecord.clippedPointsForWindow(nowMs, trackWindowMs)
+                selUuid != null -> {
+                    val liveAir = airThreatsByUuid[selUuid]
+                    val hubTr = flightTracksByEntityUuid[selUuid]
+                    when {
+                        hubTr != null -> hubTr.clippedPointsForWindow(nowMs, trackWindowMs)
+                        liveAir?.aircraftHex != null -> PoliceAircraft.recentAirborneTrail(
+                            hex = liveAir.aircraftHex,
+                            nowMs = nowMs,
+                            maxAgeMs = trackWindowMs,
+                            includeLandedWithinWindow = true
+                        )
+                        localDroneMap[selUuid] != null -> localDroneMap[selUuid]!!.points
+                        else -> emptyList()
+                    }
+                }
+                else -> emptyList()
+            }
+            if (selClipped.size >= 2) {
+                drawTrace(PoliceAircraft.chaikinSmooth(selClipped, 2), selectedFlightTrackColorHex, selUuid)
+            } else {
+                drawTrace(emptyList(), TRACE_COLOR)
+            }
         }
         // Keep selection ring synced with moved entity coordinates if an entity is currently selected
         val curSel = activeSelection
@@ -1009,7 +1305,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
         }
         drawSelection(activeSelection)
-        return shown
+        return allShownPins
     }
 
     /** Networks pinned from WiGLE searches (the All and WiFi views), when they changed. */
@@ -1121,6 +1417,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     /** What's under the finger: the topmost kind of thing wins; several devices at one spot give a list. */
     fun onTap(x: Float, y: Float, me: Pair<Double, Double>?) {
         val r = 22f * activity.resources.displayMetrics.density
+        // When 3D airborne projection is active (`pitch > 6 deg`), hit-test elevated 3D aircraft & drone pucks first!
+        val hit3d = airborneOverlay?.hitTest(x, y, r)
+        if (hit3d != null) {
+            safe("tap3d") { selectOrOpenAirborneUuid(hit3d.entityUuid, hit3d.lat, hit3d.lon, me) }
+            return
+        }
+        val tapCoord = map.toLatLon(x, y)
         val box = RectF(x - r, y - r, x + r, y + r)
         val asked = listOf(
             AIRCRAFT to "hex",
@@ -1128,19 +1431,169 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             DRONES to "mac",
             DRONE_OPS to "mac",
             DOTS to "mac",
+            "$DRONE_DOME_2D-dots" to "mac",
             "$LOCATIONS-fed" to "id",
             "$LOCATIONS-local" to "id",
+            FLIGHT_TRACKS to "hex",
+            TRACE to "hex",
             CAMERAS to "id",
             CCTV to "id",
             TOWERS to "id",
             WIGLE to "id",
             ASKED to "id",
+            "$DRONE_DOME_2D-fill" to "mac",
             "$PRECISION-fill" to "mac"
         )
         map.query(box, asked) { found ->
             if (activity.isFinishing || activity.isDestroyed) return@query
-            safe("tap") { showTapped(found, me) }
+            safe("tap") { showTapped(found, me, tapCoord) }
         }
+    }
+
+    private fun nearestPointOnTrack(
+        pts: List<Pair<Double, Double>>,
+        tapLat: Double?,
+        tapLon: Double?
+    ): Pair<Double, Double> {
+        if (pts.isEmpty()) return map.camera.lat to map.camera.lon
+        if (tapLat == null || tapLon == null) return pts.last()
+        return pts.minByOrNull { DeviceRegistry.metersBetween(tapLat, tapLon, it.first, it.second) } ?: pts.last()
+    }
+
+    private fun highlightTrackForEntity(entityUuid: String, targetQuery: String, colorHex: String) {
+        selectedFlightTrackEntityUuid = entityUuid
+        selectedFlightTrackColorHex = colorHex
+        val activeWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
+        if (activeWin == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) return
+        val winMs = activeWin.windowMs
+        val nowMs = System.currentTimeMillis()
+        flightTracksByEntityUuid[entityUuid]?.let { cached ->
+            selectedFlightTrackRecord = cached
+            val clipped = cached.clippedPointsForWindow(nowMs, winMs)
+            if (clipped.size >= 2 && !TripRecorder.isRecording) {
+                drawTrace(PoliceAircraft.chaikinSmooth(clipped, 2), colorHex, entityUuid)
+            }
+        }
+        org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(
+            context = activity,
+            target = targetQuery,
+            windowMs = winMs
+        ) { tracks ->
+            if (activity.isFinishing || activity.isDestroyed) return@fetchFlightTracks
+            if (selectedFlightTrackEntityUuid != entityUuid) return@fetchFlightTracks
+            val curWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
+            if (curWin == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
+                drawTrace(emptyList(), TRACE_COLOR)
+                return@fetchFlightTracks
+            }
+            val best = tracks.maxByOrNull { it.endedAtMs } ?: return@fetchFlightTracks
+            selectedFlightTrackRecord = best
+            val clipped = best.clippedPointsForWindow(System.currentTimeMillis(), curWin.windowMs)
+            if (!TripRecorder.isRecording) {
+                if (clipped.size >= 2) {
+                    drawTrace(PoliceAircraft.chaikinSmooth(clipped, 2), colorHex, entityUuid)
+                } else {
+                    drawTrace(emptyList(), TRACE_COLOR)
+                }
+            }
+        }
+    }
+
+    private fun selectOrOpenAirborneUuid(
+        entityUuid: String,
+        tapLat: Double?,
+        tapLon: Double?,
+        me: Pair<Double, Double>?
+    ): Boolean {
+        val selectCb = onSelectTarget
+        airThreatsByUuid[entityUuid]?.let { t ->
+            val targetHex = t.aircraftHex ?: t.uuid
+            highlightTrackForEntity(t.uuid, targetHex, t.agency.mapColorHex)
+            if (selectCb != null) {
+                selectCb(toDetectionSelection(t, tapLat ?: map.camera.lat, tapLon ?: map.camera.lon))
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            }
+            return true
+        }
+        droneThreatsByUuid[entityUuid]?.let { t ->
+            highlightTrackForEntity(t.uuid, t.uuid, t.agency.mapColorHex)
+            if (selectCb != null) {
+                selectCb(toDetectionSelection(t, tapLat ?: map.camera.lat, tapLon ?: map.camera.lon))
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            }
+            return true
+        }
+        planes[entityUuid]?.let { s ->
+            MapDialogs.showAircraft(activity, s.plane, s.hit, me)
+            return true
+        }
+        flightTracksByEntityUuid[entityUuid]?.let { tr ->
+            val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(tr.category)
+                ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO
+            highlightTrackForEntity(tr.entityUuid, tr.entityUuid, ag.mapColorHex)
+            val ledgerHit = org.tucsoncommunity.kokoho.posture.KokohoEntityLedger.findByUuid(activity, tr.entityUuid)
+            if (ledgerHit != null) {
+                if (selectCb != null) {
+                    val anchor = nearestPointOnTrack(tr.points, tapLat, tapLon)
+                    selectCb(toDetectionSelection(ledgerHit, anchor.first, anchor.second))
+                } else {
+                    DeviceActions.openDetails(activity, "kokoho:${tr.entityUuid}")
+                }
+                return true
+            }
+            val nowMs = System.currentTimeMillis()
+            val endRef = tr.endedAtMs.takeIf { it > 0L } ?: nowMs
+            val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, endRef)
+            val anchor = nearestPointOnTrack(tr.points, tapLat, tapLon)
+            val displayTitle = tr.label.ifBlank { "${ag.friendlyLabel} Aircraft" }
+            if (selectCb != null) {
+                selectCb(
+                    MapSelection.Detection(
+                        entityUuid = tr.entityUuid,
+                        title = displayTitle,
+                        subtitle = "${ag.friendlyLabel} · Flight path · $ageStr",
+                        agencyCode = ag.id,
+                        lat = anchor.first,
+                        lon = anchor.second,
+                        radiusM = 25
+                    )
+                )
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${tr.entityUuid}")
+            }
+            return true
+        }
+        localDroneTrailsByUuid[entityUuid]?.let { dt ->
+            val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(dt.agencyId)
+                ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE
+            selectedFlightTrackEntityUuid = dt.entityUuid
+            selectedFlightTrackRecord = null
+            selectedFlightTrackColorHex = ag.mapColorHex
+            if (!TripRecorder.isRecording && dt.points.size >= 2) {
+                drawTrace(PoliceAircraft.chaikinSmooth(dt.points, 2), ag.mapColorHex, dt.entityUuid)
+            }
+            val anchor = nearestPointOnTrack(dt.points, tapLat, tapLon)
+            val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(System.currentTimeMillis(), dt.endedAtMs)
+            if (selectCb != null) {
+                selectCb(
+                    MapSelection.Detection(
+                        entityUuid = dt.entityUuid,
+                        title = dt.label.ifBlank { ag.friendlyLabel },
+                        subtitle = "${ag.friendlyLabel} · Flight path · $ageStr",
+                        agencyCode = ag.id,
+                        lat = anchor.first,
+                        lon = anchor.second,
+                        radiusM = 20
+                    )
+                )
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${dt.entityUuid}")
+            }
+            return true
+        }
+        return false
     }
 
     private fun toDetectionSelection(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat, fallbackLat: Double, fallbackLon: Double): MapSelection.Detection {
@@ -1148,7 +1601,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
         val extra = when {
             t.isAircraft -> t.altitudeFtAgl?.let { "${it} ft" } ?: "ADS-B"
-            t.isDrone -> t.altitudeFtAgl?.let { "${it} ft AGL" } ?: "Remote ID"
+            isPinpointedDrone(t) -> t.altitudeFtAgl?.let { "${it} ft AGL" } ?: "Remote ID"
             else -> "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.uncertaintyRadiusM)}"
         }
         return MapSelection.Detection(
@@ -1162,38 +1615,28 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         )
     }
 
-    private fun showTapped(found: List<List<String>>, me: Pair<Double, Double>?) {
+    private fun showTapped(found: List<List<String>>, me: Pair<Double, Double>?, tapCoord: Pair<Double, Double>? = null) {
         val air = found[0]
         val waze = found[1]
         val drone = found[2]
         val op = found[3]
-        val dots = found[4]
-        val locHits = (found[5] + found[6]).distinct()
-        val cams = found[7]
-        val cctv = found[8]
-        val tower = found[9]
-        val wigleHits = found[10]
-        val askedHits = found[11]
-        val precisionHits = found[12]
+        val dots = (found[4] + found[5]).distinct()
+        val locHits = (found[6] + found[7]).distinct()
+        val trackHits = (found[8] + found[9]).filter { it.isNotBlank() }.distinct()
+        val cams = found[10]
+        val cctv = found[11]
+        val tower = found[12]
+        val wigleHits = found[13]
+        val askedHits = found[14]
+        val precisionHits = (found[15] + found[16]).distinct()
 
         val selectCb = onSelectTarget
+        val tapLat = tapCoord?.first
+        val tapLon = tapCoord?.second
 
-        air.firstNotNullOfOrNull { airThreatsByUuid[it] }?.let { t ->
-            val targetHex = t.aircraftHex ?: t.uuid
-            org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(activity, targetHex) { tracks ->
-                val rawPts = tracks.firstOrNull()?.points.orEmpty()
-                val smoothed = PoliceAircraft.chaikinSmooth(rawPts, 2)
-                selectedFlightTrackPoints = smoothed
-                drawTrace(smoothed, t.agency.mapColorHex)
-            }
-            if (selectCb != null) {
-                selectCb(toDetectionSelection(t, map.camera.lat, map.camera.lon))
-            } else {
-                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
-            }
-            return
+        for (id in air) {
+            if (selectOrOpenAirborneUuid(id, tapLat, tapLon, me)) return
         }
-        air.firstNotNullOfOrNull { planes[it] }?.let { s -> MapDialogs.showAircraft(activity, s.plane, s.hit, me); return }
         waze.firstNotNullOfOrNull { wazeShown[it] }?.let { MapDialogs.showWaze(activity, it); return }
         wigleHits.firstNotNullOfOrNull { wigle[it] }?.let { p ->
             MapDialogs.showWigle(activity, p, me) { WiglePins.remove(activity, p.net.bssid); drawWigle() }
@@ -1204,19 +1647,14 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             MapDialogs.showAsked(activity, ssid, s, me) { ProbeLog.showOnMap(null); drawAsked() }
             return
         }
-        (drone + op).firstNotNullOfOrNull { droneThreatsByUuid[it] }?.let { t ->
-            if (selectCb != null) {
-                selectCb(toDetectionSelection(t, map.camera.lat, map.camera.lon))
-            } else {
-                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
-            }
-            return
+        for (id in (drone + op)) {
+            if (selectOrOpenAirborneUuid(id, tapLat, tapLon, me)) return
         }
         (drone + op).firstNotNullOfOrNull { drones[it] }?.let { s ->
             DeviceActions.openDetails(activity, s.mac)
             return
         }
-        // Check direct puck dots BEFORE facility locations, and facility locations BEFORE wide precision bubbles!
+        // Check direct puck dots BEFORE facility locations, facility locations BEFORE flight tracks, and flight tracks BEFORE wide precision bubbles!
         val dotPins = dots.distinct().mapNotNull { pins[it] }
         if (dotPins.isNotEmpty()) {
             val allFacilities = dotPins.flatMap { it.groupFacilities }.distinctBy { it.id }
@@ -1251,6 +1689,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 DeviceDetailActivity.openLocation(activity, loc.id)
             }
             return
+        }
+        for (trackEntityUuid in trackHits) {
+            if (selectOrOpenAirborneUuid(trackEntityUuid, tapLat, tapLon, me)) return
         }
         val bubblePins = precisionHits.distinct().mapNotNull { pins[it] }
         if (bubblePins.isNotEmpty()) {

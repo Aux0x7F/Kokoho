@@ -945,6 +945,14 @@ object Prefs {
     fun map3d(context: Context): Boolean = bool(context, "map_3d", false)
     fun setMap3d(context: Context, value: Boolean) = setBool(context, "map_3d", value)
 
+    /** 3D extruded building footprints on the vector map (persisted across sessions). */
+    fun mapBuildings3d(context: Context): Boolean = bool(context, "map_buildings_3d", false)
+    fun setMapBuildings3d(context: Context, value: Boolean) = setBool(context, "map_buildings_3d", value)
+
+    /** Self-hosted DEM terrain elevation + hillshade relief on the vector map (persisted across sessions). */
+    fun mapTerrain(context: Context): Boolean = bool(context, "map_terrain", false)
+    fun setMapTerrain(context: Context, value: Boolean) = setBool(context, "map_terrain", value)
+
     /** Light or dark map tiles (the map's sun / moon button); null = follow the phone's dark mode. */
     fun mapDark(context: Context): Boolean? =
         if (sp(context).contains("map_dark")) sp(context).getBoolean("map_dark", false) else null

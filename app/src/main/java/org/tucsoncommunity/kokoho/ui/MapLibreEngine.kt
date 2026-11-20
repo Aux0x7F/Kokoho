@@ -28,17 +28,24 @@ import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.CircleLayer
+import org.maplibre.android.style.layers.ColorReliefLayer
 import org.maplibre.android.style.layers.FillExtrusionLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.HeatmapLayer
+import org.maplibre.android.style.layers.HillshadeLayer
 import org.maplibre.android.style.layers.Layer
 import org.maplibre.android.style.layers.LayoutPropertyValue
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.PaintPropertyValue
+import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.PropertyValue
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.android.style.sources.RasterDemSource
+import org.maplibre.android.style.sources.TileSet
+import org.tucsoncommunity.kokoho.posture.VpnGeoGate
+import org.tucsoncommunity.kokoho.util.Prefs
 
 /** [MapEngine] on MapLibre with OpenFreeMap's vector maps (free, no account, no key). */
 internal class MapLibreEngine(private val context: Context) : MapEngine {
@@ -52,6 +59,9 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
         const val DARK_STYLE = "https://tiles.openfreemap.org/styles/fiord"
         const val CREDIT = "© OpenFreeMap © OpenMapTiles © OpenStreetMap contributors"
         private const val BUILDINGS = "rf-buildings-3d"
+        private const val TERRAIN_SOURCE = "rf-terrain-dem"
+        private const val TERRAIN_RELIEF = "rf-terrain-relief"
+        private const val TERRAIN_HILLSHADE = "rf-terrain-hillshade"
         /** A clear picture, for the puck layers that must show nothing. */
         private const val BLANK = "rf-puck-blank"
         private const val GRASS = "rf-night-grass"
@@ -82,6 +92,19 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
 
     override val view = MapView(context, MapLibreMapOptions.createFromAttributes(context))
     private var map: MapLibreMap? = null
+    private var isDarkStyle: Boolean = true
+    private var buildings3dEnabled: Boolean = Prefs.mapBuildings3d(context)
+    private var terrainEnabled: Boolean = Prefs.mapTerrain(context)
+    private var nativeTerrainMeshActive: Boolean = false
+    private var lastOrbitElevM: Double = 0.0
+    private var gestureInProgress: Boolean = false
+    private val removeVpnListener: () -> Unit = VpnGeoGate.addListener { blocked ->
+        if (!blocked && terrainEnabled) {
+            style()?.let { s -> runCatching { syncTerrain(s, isDarkStyle, true) } }
+        } else if (blocked) {
+            style()?.let { s -> runCatching { syncTerrain(s, isDarkStyle, false) } }
+        }
+    }
 
     override var onCameraMove: (() -> Unit)? = null
     override var onIdle: (() -> Unit)? = null
@@ -97,7 +120,11 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
     override fun onStop() = view.onStop()
     override fun onLowMemory() = view.onLowMemory()
     override fun onSaveInstanceState(out: Bundle) = view.onSaveInstanceState(out)
-    override fun onDestroy() { map = null; view.onDestroy() }
+    override fun onDestroy() {
+        runCatching { removeVpnListener() }
+        map = null
+        view.onDestroy()
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun whenReady(ready: () -> Unit) {
@@ -106,13 +133,19 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
             m.uiSettings.isCompassEnabled = false
             m.uiSettings.isLogoEnabled = false
             m.uiSettings.isAttributionEnabled = false // the credit line on the map instead
-            m.uiSettings.isRotateGesturesEnabled = false // disable two-finger rotate
+            m.uiSettings.isRotateGesturesEnabled = true // two-finger pinch rotation
             m.uiSettings.isTiltGesturesEnabled = true
             m.addOnCameraMoveStartedListener { reason ->
-                if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) onUserGesture?.invoke()
+                gestureInProgress = reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE
+                if (gestureInProgress) onUserGesture?.invoke()
             }
             m.addOnCameraMoveListener { onCameraMove?.invoke() }
-            m.addOnCameraIdleListener { onIdle?.invoke() }
+            m.addOnCameraIdleListener {
+                val wasGesture = gestureInProgress
+                gestureInProgress = false
+                if (terrainEnabled) trackOrbitElevationOnIdle(wasGesture)
+                onIdle?.invoke()
+            }
             m.addOnMapClickListener { at ->
                 val p = m.projection.toScreenLocation(at)
                 onClick?.invoke(p.x, p.y)
@@ -163,8 +196,21 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
 
     override fun setStyle(dark: Boolean, loaded: (Boolean) -> Unit) {
         val m = map ?: return
+        isDarkStyle = dark
+        buildings3dEnabled = Prefs.mapBuildings3d(context)
+        terrainEnabled = Prefs.mapTerrain(context)
         m.setStyle(Style.Builder().fromUri(if (dark) DARK_STYLE else LIGHT_STYLE)) { style ->
             if (dark) runCatching { nightTweaks(style) }
+            runCatching { syncTerrain(style, dark, terrainEnabled) }
+            runCatching { syncBuildings3d(style, dark, buildings3dEnabled) }
+            if (terrainEnabled) {
+                val t = m.cameraPosition.target
+                if (t != null) {
+                    lastOrbitElevM = TerrainElevationSampler.sampleElevationM(context, t.latitude, t.longitude)
+                }
+            } else {
+                lastOrbitElevM = 0.0
+            }
             addMarkerImage(style)
             loaded(true)
         }
@@ -215,15 +261,248 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
         style.getLayer("highway_motorway_casing")?.setProperties(PropertyFactory.lineColor("#0F172A"))
         style.getLayer("highway_motorway_inner")?.setProperties(PropertyFactory.lineColor("#8BA0C2"))
         style.getLayer("highway_motorway_subtle")?.setProperties(PropertyFactory.lineColor("#7589AB"))
-        if (style.getLayer(BUILDINGS) == null) {
-            val buildings = FillExtrusionLayer(BUILDINGS, "openmaptiles").withSourceLayer("building").withProperties(
-                PropertyFactory.fillExtrusionColor("#1E293B"),
-                PropertyFactory.fillExtrusionHeight(Expression.get("render_height")),
-                PropertyFactory.fillExtrusionBase(Expression.get("render_min_height")),
-                PropertyFactory.fillExtrusionOpacity(0.72f)
-            ).apply { minZoom = 14f }
-            val firstLabel = style.layers.firstOrNull { it is SymbolLayer }?.id
-            if (firstLabel != null) style.addLayerBelow(buildings, firstLabel) else style.addLayer(buildings)
+    }
+
+    private fun syncBuildings3d(style: Style, dark: Boolean, enabled: Boolean) {
+        // Hide any built-in base-style 3D extrusion layers (such as OpenFreeMap Liberty's "building-3d")
+        // so the 3D Buildings button controls extrusions uniformly in both light and dark styles.
+        for (layer in style.layers) {
+            if (layer is FillExtrusionLayer && layer.id != BUILDINGS) {
+                layer.setProperties(PropertyFactory.visibility(Property.NONE))
+            }
+        }
+        val heightExpr = Expression.Converter.convert("""["coalesce", ["get", "render_height"], 0]""")
+        val baseExpr = Expression.Converter.convert("""["coalesce", ["get", "render_min_height"], 0]""")
+        val colorExpr = if (dark) {
+            Expression.Converter.convert(
+                """["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 8], 0, "#1E293B", 18, "#293850", 60, "#3E5475"]"""
+            )
+        } else {
+            Expression.Converter.convert(
+                """["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 8], 0, "#CBD5E1", 18, "#B3C2D4", 60, "#94A3B8"]"""
+            )
+        }
+        val vis = if (enabled) Property.VISIBLE else Property.NONE
+        val opacity = if (dark) 0.78f else 0.74f
+        val existing = style.getLayer(BUILDINGS)
+        if (existing != null) {
+            existing.setProperties(
+                PropertyFactory.fillExtrusionColor(colorExpr),
+                PropertyFactory.fillExtrusionHeight(heightExpr),
+                PropertyFactory.fillExtrusionBase(baseExpr),
+                PropertyFactory.fillExtrusionOpacity(opacity),
+                PropertyFactory.visibility(vis)
+            )
+            return
+        }
+        if (style.getSource("openmaptiles") == null) return
+        val buildings = FillExtrusionLayer(BUILDINGS, "openmaptiles").withSourceLayer("building").withProperties(
+            PropertyFactory.fillExtrusionColor(colorExpr),
+            PropertyFactory.fillExtrusionHeight(heightExpr),
+            PropertyFactory.fillExtrusionBase(baseExpr),
+            PropertyFactory.fillExtrusionOpacity(opacity),
+            PropertyFactory.visibility(vis)
+        ).apply { minZoom = 13.5f }
+        val anchorId = style.layers.firstOrNull { l ->
+            (l.id.startsWith("rf-") && l.id != TERRAIN_RELIEF && l.id != TERRAIN_HILLSHADE && l.id != GRASS) ||
+                l is SymbolLayer
+        }?.id
+        if (anchorId != null) style.addLayerBelow(buildings, anchorId) else style.addLayer(buildings)
+    }
+
+    private fun syncTerrain(style: Style, dark: Boolean, enabled: Boolean) {
+        val allowDem = enabled && !VpnGeoGate.isBlockedTucson()
+        if (!allowDem) {
+            style.getLayer(TERRAIN_RELIEF)?.setProperties(PropertyFactory.visibility(Property.NONE))
+            style.getLayer(TERRAIN_HILLSHADE)?.setProperties(PropertyFactory.visibility(Property.NONE))
+            if (nativeTerrainMeshActive) {
+                tryApplyNativeStyleTerrain(style, enabled = false)
+                nativeTerrainMeshActive = false
+            }
+            return
+        }
+        if (style.getSource(TERRAIN_SOURCE) == null) {
+            val tileSet = TileSet("2.2.0", TerrainElevationSampler.tileUrlTemplate(context)).apply {
+                encoding = TerrainElevationSampler.TERRAIN_ENCODING
+                minZoom = 0f
+                maxZoom = TerrainElevationSampler.TERRAIN_MAX_ZOOM.toFloat()
+            }
+            style.addSource(RasterDemSource(TERRAIN_SOURCE, tileSet, TerrainElevationSampler.TERRAIN_TILE_SIZE))
+        }
+        val reliefExpr = if (dark) {
+            Expression.Converter.convert(
+                """["interpolate", ["linear"], ["elevation"], 600, "rgba(18,24,36,0.0)", 950, "rgba(32,48,64,0.20)", 1700, "rgba(56,78,94,0.34)", 2800, "rgba(96,118,134,0.46)"]"""
+            )
+        } else {
+            Expression.Converter.convert(
+                """["interpolate", ["linear"], ["elevation"], 600, "rgba(255,255,255,0.0)", 950, "rgba(214,205,186,0.18)", 1700, "rgba(186,172,150,0.28)", 2800, "rgba(158,142,122,0.38)"]"""
+            )
+        }
+        val existingRelief = style.getLayer(TERRAIN_RELIEF)
+        if (existingRelief != null) {
+            existingRelief.setProperties(
+                PropertyFactory.colorReliefColor(reliefExpr),
+                PropertyFactory.colorReliefOpacity(1.0f),
+                PropertyFactory.visibility(Property.VISIBLE)
+            )
+        } else {
+            val relief = ColorReliefLayer(TERRAIN_RELIEF, TERRAIN_SOURCE).withProperties(
+                PropertyFactory.colorReliefColor(reliefExpr),
+                PropertyFactory.colorReliefOpacity(1.0f),
+                PropertyFactory.visibility(Property.VISIBLE)
+            )
+            when {
+                style.getLayer("background") != null -> style.addLayerAbove(relief, "background")
+                style.getLayer("water") != null -> style.addLayerBelow(relief, "water")
+                else -> style.addLayerAt(relief, 0)
+            }
+        }
+
+        val shadowCol = if (dark) "rgba(4, 8, 15, 0.72)" else "rgba(15, 23, 42, 0.38)"
+        val highlightCol = if (dark) "rgba(148, 163, 184, 0.42)" else "rgba(255, 255, 255, 0.56)"
+        val accentCol = if (dark) "#334155" else "#64748B"
+        val existingHill = style.getLayer(TERRAIN_HILLSHADE)
+        if (existingHill != null) {
+            existingHill.setProperties(
+                PropertyFactory.hillshadeExaggeration(TerrainElevationSampler.TERRAIN_EXAGGERATION),
+                PropertyFactory.hillshadeIlluminationDirection(arrayOf(315f)),
+                PropertyFactory.hillshadeIlluminationAnchor("viewport"),
+                PropertyFactory.hillshadeShadowColor(arrayOf(shadowCol)),
+                PropertyFactory.hillshadeHighlightColor(arrayOf(highlightCol)),
+                PropertyFactory.hillshadeAccentColor(accentCol),
+                PropertyFactory.visibility(Property.VISIBLE)
+            )
+        } else {
+            val hillshade = HillshadeLayer(TERRAIN_HILLSHADE, TERRAIN_SOURCE).withProperties(
+                PropertyFactory.hillshadeExaggeration(TerrainElevationSampler.TERRAIN_EXAGGERATION),
+                PropertyFactory.hillshadeIlluminationDirection(arrayOf(315f)),
+                PropertyFactory.hillshadeIlluminationAnchor("viewport"),
+                PropertyFactory.hillshadeShadowColor(arrayOf(shadowCol)),
+                PropertyFactory.hillshadeHighlightColor(arrayOf(highlightCol)),
+                PropertyFactory.hillshadeAccentColor(accentCol),
+                PropertyFactory.visibility(Property.VISIBLE)
+            )
+            val roadAnchor = listOf("building", "highway_path", "highway_minor", "highway_major_casing")
+                .firstOrNull { style.getLayer(it) != null }
+                ?: style.layers.firstOrNull { it is SymbolLayer }?.id
+            if (roadAnchor != null) style.addLayerBelow(hillshade, roadAnchor) else style.addLayer(hillshade)
+        }
+        nativeTerrainMeshActive = tryApplyNativeStyleTerrain(style, enabled = true)
+    }
+
+    /**
+     * Optional reflection hook if a MapLibre Android SDK build exposes `Style.setTerrain(...)`.
+     * Returns true only if native 3D vertex mesh displacement was activated on [style].
+     */
+    private fun tryApplyNativeStyleTerrain(style: Style, enabled: Boolean): Boolean = runCatching {
+        val methods = style.javaClass.methods.filter { it.name == "setTerrain" && it.parameterTypes.size == 1 }
+        if (methods.isEmpty()) return false
+        val m = methods.first()
+        if (!enabled) {
+            m.invoke(style, null)
+            return false
+        }
+        val paramType = m.parameterTypes[0]
+        val ctor = paramType.constructors.firstOrNull { c ->
+            c.parameterTypes.size == 2 && c.parameterTypes[0] == String::class.java
+        } ?: paramType.constructors.firstOrNull { c ->
+            c.parameterTypes.size == 1 && c.parameterTypes[0] == String::class.java
+        } ?: return false
+        val terrainObj = if (ctor.parameterTypes.size == 2) {
+            ctor.newInstance(TERRAIN_SOURCE, TerrainElevationSampler.TERRAIN_EXAGGERATION)
+        } else {
+            ctor.newInstance(TERRAIN_SOURCE)
+        }
+        m.invoke(style, terrainObj)
+        true
+    }.getOrDefault(false)
+
+    private fun compensateCameraForTerrain(wasEnabled: Boolean, nowEnabled: Boolean, animate: Boolean) {
+        val m = map ?: return
+        val pos = m.cameraPosition
+        val target = pos.target ?: return
+        val groundElevM = TerrainElevationSampler.sampleElevationM(
+            context = context,
+            lat = target.latitude,
+            lon = target.longitude,
+            allowAsyncFetch = nowEnabled,
+            onLoaded = {
+                if (terrainEnabled) trackOrbitElevationOnIdle(wasUserGesture = false)
+            }
+        ) * TerrainElevationSampler.TERRAIN_EXAGGERATION
+        val prevElevM = if (wasEnabled) lastOrbitElevM else 0.0
+        val newElevM = if (nowEnabled) groundElevM else 0.0
+        val deltaElevM = newElevM - prevElevM
+        lastOrbitElevM = newElevM
+
+        val builder = CameraPosition.Builder(pos).centerAltitude(newElevM)
+        if (nativeTerrainMeshActive || (wasEnabled && !nowEnabled && kotlin.math.abs(deltaElevM) > 5.0)) {
+            if (nativeTerrainMeshActive || wasEnabled) {
+                val meshDelta = if (nativeTerrainMeshActive) deltaElevM else 0.0
+                if (kotlin.math.abs(meshDelta) > 2.0) {
+                    val fov = pos.fov.takeIf { it > 0.0 } ?: 36.87
+                    val nextZoom = TerrainElevationSampler.computeZoomForElevationDelta(
+                        lat = target.latitude,
+                        currentZoom = pos.zoom,
+                        deltaElevM = meshDelta,
+                        viewportHeightPx = view.height.coerceAtLeast(320),
+                        fovDeg = fov
+                    )
+                    builder.zoom(nextZoom)
+                }
+            }
+        }
+        if (animate && nowEnabled && pos.tilt < 15.0) {
+            builder.tilt(36.0)
+        }
+        val updated = builder.build()
+        if (animate) {
+            m.animateCamera(CameraUpdateFactory.newCameraPosition(updated), 450)
+        } else {
+            m.cameraPosition = updated
+        }
+    }
+
+    /**
+     * Raises or lowers the camera and its orbit point (`centerAltitude` + gentle elevation clearance zoom)
+     * relative to `deltaElevM` as the locked/orbit target moves across Foothills or mountain terrain.
+     */
+    private fun trackOrbitElevationOnIdle(wasUserGesture: Boolean) {
+        val m = map ?: return
+        if (!terrainEnabled) return
+        val pos = m.cameraPosition
+        val target = pos.target ?: return
+        val curElevM = TerrainElevationSampler.sampleElevationM(
+            context = context,
+            lat = target.latitude,
+            lon = target.longitude,
+            allowAsyncFetch = true
+        ) * TerrainElevationSampler.TERRAIN_EXAGGERATION
+        val deltaElevM = curElevM - lastOrbitElevM
+        lastOrbitElevM = curElevM
+        if (kotlin.math.abs(deltaElevM) < 45.0) {
+            if (kotlin.math.abs(pos.centerAltitude - curElevM) > 10.0) {
+                m.cameraPosition = CameraPosition.Builder(pos).centerAltitude(curElevM).build()
+            }
+            return
+        }
+        val fov = pos.fov.takeIf { it > 0.0 } ?: 36.87
+        val effDelta = if (nativeTerrainMeshActive) deltaElevM else deltaElevM * 0.45
+        val nextZoom = TerrainElevationSampler.computeZoomForElevationDelta(
+            lat = target.latitude,
+            currentZoom = pos.zoom,
+            deltaElevM = effDelta,
+            viewportHeightPx = view.height.coerceAtLeast(320),
+            fovDeg = fov
+        )
+        val b = CameraPosition.Builder(pos).centerAltitude(curElevM)
+        if (kotlin.math.abs(nextZoom - pos.zoom) >= 0.03) {
+            b.zoom(nextZoom)
+        }
+        if (wasUserGesture) {
+            m.animateCamera(CameraUpdateFactory.newCameraPosition(b.build()), 260)
+        } else {
+            m.cameraPosition = b.build()
         }
     }
 
@@ -301,6 +580,24 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
         style()?.getLayer(layer)?.setProperties(PaintPropertyValue(name, value))
     }
 
+    override fun setLayerVisible(layer: String, visible: Boolean) {
+        style()?.getLayer(layer)?.setProperties(
+            PropertyFactory.visibility(if (visible) Property.VISIBLE else Property.NONE)
+        )
+    }
+
+    override fun setBuildings3d(enabled: Boolean) {
+        buildings3dEnabled = enabled
+        style()?.let { s -> runCatching { syncBuildings3d(s, isDarkStyle, enabled) } }
+    }
+
+    override fun setTerrain(enabled: Boolean, animateCamera: Boolean) {
+        val wasEnabled = terrainEnabled
+        terrainEnabled = enabled
+        style()?.let { s -> runCatching { syncTerrain(s, isDarkStyle, enabled) } }
+        runCatching { compensateCameraForTerrain(wasEnabled, enabled, animateCamera) }
+    }
+
     // ---- camera ----
 
     override val camera: MapEngine.Camera get() {
@@ -339,6 +636,12 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
 
     override fun toLatLon(x: Float, y: Float): Pair<Double, Double>? =
         map?.projection?.fromScreenLocation(PointF(x, y))?.let { it.latitude to it.longitude }
+
+    override fun projectScreen(lat: Double, lon: Double): PointF? =
+        runCatching { map?.projection?.toScreenLocation(LatLng(lat, lon)) }.getOrNull()
+
+    override fun metersPerPixelAtLat(lat: Double): Double =
+        runCatching { map?.projection?.getMetersPerPixelAtLatitude(lat) ?: Double.NaN }.getOrDefault(Double.NaN)
 
     override fun setMinZoom(zoom: Double) { map?.setMinZoomPreference(zoom) }
 
@@ -422,7 +725,10 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
 
     private var reapply: Runnable? = null
 
-    override fun follow(mode: MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) {
+    override fun follow(mode: MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) =
+        follow(mode, topPaddingPx, tilt as Double?, zoom, ms)
+
+    override fun follow(mode: MapEngine.Follow, topPaddingPx: Double?, tilt: Double?, zoom: Double?, ms: Long) {
         val lc = component() ?: return
         reapply?.let { view.removeCallbacks(it) }; reapply = null
         if (mode == MapEngine.Follow.NONE) { lc.cameraMode = CameraMode.NONE; return }
@@ -430,17 +736,18 @@ internal class MapLibreEngine(private val context: Context) : MapEngine {
         // and once more when the change is over (a mode switch no longer leaves the old angle or zoom).
         fun look(duration: Long) {
             topPaddingPx?.let { lc.paddingWhileTracking(doubleArrayOf(0.0, it, 0.0, 0.0), duration) }
-            lc.tiltWhileTracking(tilt, duration)
+            tilt?.let { lc.tiltWhileTracking(it, duration) }
             zoom?.let { lc.zoomWhileTracking(it, duration) }
         }
         look(ms)
+        val wantMode = if (mode == MapEngine.Follow.HEADING) CameraMode.TRACKING_GPS else CameraMode.TRACKING
         // Never 0 ms: the component only stops "transitioning" when an animated move ends, and a 0 ms move
         // is not one, so it would never follow again (not even after the follow button: same mode, ignored).
-        lc.setCameraMode(if (mode == MapEngine.Follow.HEADING) CameraMode.TRACKING_GPS else CameraMode.TRACKING, ms.coerceAtLeast(1), null, null, null, null)
+        if (lc.cameraMode != wantMode) {
+            lc.setCameraMode(wantMode, ms.coerceAtLeast(1), null, null, null, null)
+        }
         // Also after an instant switch (the map opening already in 3D): the angle set above was dropped.
         Runnable { if (component() != null) look(if (ms > 0) 400 else 0) }.also { reapply = it; view.postDelayed(it, ms + 250) }
-        val m = map
-        if (mode == MapEngine.Follow.NORTH && m != null && m.cameraPosition.bearing != 0.0) m.animateCamera(CameraUpdateFactory.bearingTo(0.0), 600)
     }
 
     override fun placeBranding(topPx: Int, atEnd: Boolean) {}

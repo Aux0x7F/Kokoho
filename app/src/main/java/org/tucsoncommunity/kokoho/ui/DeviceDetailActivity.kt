@@ -121,6 +121,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     private var mapTargetPinpointed: Boolean = false
     private var mapTargetIsFacility: Boolean = false
     private var mapTargetLabel: String = ""
+    private var mapTargetIconKind: MapIcons.BadgeIconKind = MapIcons.BadgeIconKind.CAR
+    private var mapTargetTrackPoints: List<Pair<Double, Double>> = emptyList()
 
     private var pendingPhotoCallback: ((String) -> Unit)? = null
     private val pickPhotoLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -333,19 +335,25 @@ class DeviceDetailActivity : AppCompatActivity() {
         headerHandle.titleView.text = if (breadcrumbStack.size > 1) "Entity Details (${breadcrumbStack.size})" else "Entity Details"
         val nowMs = System.currentTimeMillis()
         val threat = KokohoPostureEngine.findThreatByUuid(this, uuid, nowMs)
+        val cachedTrack = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedFlightTracks()
+            .filter { it.entityUuid.equals(uuid, ignoreCase = true) }
+            .maxByOrNull { it.endedAtMs }
         val witness = KokohoSignatures.getWitnessReport(this, uuid, approvedOnly = false)
         val photos = witness?.allPhotos().orEmpty()
 
         val agency = witness?.takeIf { it.reportKind == "LE" }?.agencyCode?.let { KokohoAgency.fromCode(it) }
             ?: threat?.agency
+            ?: cachedTrack?.category?.let { KokohoAgency.fromCode(it) }
             ?: KokohoAgency.DHS_CBP
-        val highestTitle = if (threat != null) {
-            KokohoSignatures.formatHighestOrderTitle(threat, witness)
-        } else if (witness != null && KokohoSignatures.hasConfirmingReport(witness)) {
-            val sub = witness.agentName.ifBlank { witness.vehicleNumber.ifBlank { witness.accessoryKind.ifBlank { agency.friendlyLabel } } }
-            "Confirmed ${agency.friendlyLabel}: $sub"
-        } else {
-            "Suspected ${agency.friendlyLabel}"
+        val highestTitle = when {
+            threat != null -> KokohoSignatures.formatHighestOrderTitle(threat, witness)
+            witness != null && KokohoSignatures.hasConfirmingReport(witness) -> {
+                val sub = witness.agentName.ifBlank { witness.vehicleNumber.ifBlank { witness.accessoryKind.ifBlank { agency.friendlyLabel } } }
+                "Confirmed ${agency.friendlyLabel}: $sub"
+            }
+            cachedTrack != null && cachedTrack.label.isNotBlank() -> cachedTrack.label
+            cachedTrack != null -> "${agency.friendlyLabel} Aircraft"
+            else -> "Suspected ${agency.friendlyLabel}"
         }
 
         classificationText.text = highestTitle
@@ -359,16 +367,29 @@ class DeviceDetailActivity : AppCompatActivity() {
             }
         }
 
-        val lat = threat?.lat ?: witness?.lat
-        val lon = threat?.lon ?: witness?.lon
+        val trackAnchor = cachedTrack?.points?.lastOrNull()
+        val lat = threat?.lat ?: witness?.lat ?: trackAnchor?.first
+        val lon = threat?.lon ?: witness?.lon ?: trackAnchor?.second
+        val isAirOrTrack = threat?.isAircraft == true || (threat == null && cachedTrack != null && agency != KokohoAgency.DRONE)
+        val isDroneEntity = threat?.isDrone == true || agency == KokohoAgency.DRONE
+        mapTargetIconKind = when {
+            isDroneEntity -> MapIcons.BadgeIconKind.DRONE
+            isAirOrTrack && (threat?.isHelicopter == true || KokohoSignatures.isHelicopterAirframe(null, agency.id, highestTitle, agency)) ->
+                MapIcons.BadgeIconKind.HELICOPTER
+            isAirOrTrack -> MapIcons.BadgeIconKind.SMALL_PLANE
+            else -> MapIcons.BadgeIconKind.CAR
+        }
+        mapTargetTrackPoints = cachedTrack?.points?.takeIf { it.size >= 2 }
+            ?.let { org.tucsoncommunity.kokoho.online.PoliceAircraft.chaikinSmooth(it, 2) }
+            .orEmpty()
         if (lat != null && lon != null) {
             mapContainer.visibility = View.VISIBLE
             mapTargetLat = lat
             mapTargetLon = lon
-            mapTargetRadiusM = threat?.uncertaintyRadiusM ?: 40
+            mapTargetRadiusM = threat?.uncertaintyRadiusM ?: if (cachedTrack != null) 25 else 40
             mapTargetColorArgb = agency.mapColorArgb
             mapTargetAgencyId = agency.id
-            mapTargetPinpointed = threat?.isPinpointed ?: false
+            mapTargetPinpointed = threat?.isPinpointed ?: (cachedTrack != null)
             mapTargetIsFacility = false
             mapTargetLabel = highestTitle
             redrawMiniMap()
@@ -403,11 +424,14 @@ class DeviceDetailActivity : AppCompatActivity() {
         }
         metaCard.addView(coordTv)
 
-        val updatedMs = threat?.updatedAtMs ?: witness?.updatedAtMs ?: nowMs
+        val updatedMs = threat?.updatedAtMs ?: witness?.updatedAtMs ?: cachedTrack?.endedAtMs?.takeIf { it > 0L } ?: nowMs
         val ageText = KokohoPostureEngine.formatStalenessAge(nowMs - updatedMs)
-        val accText = KokohoPostureEngine.formatAccuracyRadius(this, threat?.uncertaintyRadiusM ?: 40)
+        val accText = KokohoPostureEngine.formatAccuracyRadius(this, threat?.uncertaintyRadiusM ?: if (cachedTrack != null) 25 else 40)
         val confPct = threat?.combinedConfidence ?: 90
         addKeyValueRow(metaCard, "Agency", agency.fullName)
+        threat?.altitudeFtAgl?.let { altFt ->
+            addKeyValueRow(metaCard, "Altitude", if (isDroneEntity) "$altFt ft AGL" else "$altFt ft MSL")
+        }
         addKeyValueRow(metaCard, "Accuracy", accText)
         addKeyValueRow(metaCard, "Last Detected", ageText)
         val confirmedEvidence = threat?.let { KokohoSignatures.isExactEvidenceConfirmed(it, witness) } == true
@@ -1283,12 +1307,19 @@ class DeviceDetailActivity : AppCompatActivity() {
     private fun redrawMiniMap() {
         val map = rfMap ?: return
         val engine = mapEngine ?: return
-        engine.jumpTo(mapTargetLat, mapTargetLon, zoomForRadius(mapTargetRadiusM))
+        if (mapTargetTrackPoints.size >= 2) {
+            engine.fit(mapTargetTrackPoints, dp(24))
+        } else {
+            engine.jumpTo(mapTargetLat, mapTargetLon, zoomForRadius(mapTargetRadiusM))
+        }
         map.safe("detailMap") {
             if (mapTargetIsFacility) {
                 map.drawPins(emptyList())
+                map.drawTrace(emptyList(), RfMap.TRACE_COLOR)
                 map.drawLocations()
             } else {
+                val hexCol = String.format("#%06X", mapTargetColorArgb and 0xFFFFFF)
+                map.drawTrace(mapTargetTrackPoints, hexCol)
                 val pin = MapPin(
                     mac = "detail-preview",
                     lat = mapTargetLat,
@@ -1301,7 +1332,7 @@ class DeviceDetailActivity : AppCompatActivity() {
                     whereNote = "",
                     showDot = true,
                     opacity = 1.0,
-                    iconKind = MapIcons.BadgeIconKind.CAR,
+                    iconKind = mapTargetIconKind,
                     agencyId = mapTargetAgencyId
                 )
                 map.drawPins(listOf(pin))

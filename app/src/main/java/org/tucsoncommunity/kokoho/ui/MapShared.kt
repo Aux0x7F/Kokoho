@@ -26,7 +26,8 @@ internal data class MapPin(
     val agencyId: String = "DHS_CBP",
     val customIconId: String? = null,
     val groupFacilities: List<org.tucsoncommunity.kokoho.posture.KokohoDirectory.FacilityLocation> = emptyList(),
-    val groupMembers: List<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyList()
+    val groupMembers: List<org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyList(),
+    val isDroneDome: Boolean = false
 )
 
 internal object MapPins {

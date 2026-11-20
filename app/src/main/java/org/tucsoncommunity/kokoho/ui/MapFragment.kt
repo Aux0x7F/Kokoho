@@ -184,6 +184,7 @@ class MapFragment : Fragment() {
     private var stopAlertCards: (() -> Unit)? = null
     private var stopLiveRead: (() -> Unit)? = null
     private var rf: RfMap? = null
+    private var airborneOverlayView: Airborne3dOverlayView? = null
     private val map: MapEngine? get() = rf?.map
     private var lastFix: Location? = null
     private var smoothKmh = -1f
@@ -307,12 +308,16 @@ class MapFragment : Fragment() {
         }
         // Long-press names an icon-only button; the ones whose meaning changes update it with their description.
         for (v in listOf(binding.searchButton, binding.fullscreenButton, binding.mapSettingsButton,
-            binding.themeButton, binding.orientationButton, binding.centerButton)) v.tooltipText = v.contentDescription
+            binding.themeButton, binding.orientationButton, binding.centerButton,
+            binding.buildings3dButton, binding.terrainButton)) v.tooltipText = v.contentDescription
         binding.centerButton.setOnClickListener { if (tripId == null) setFollow(true) else centerOnMe() }
         binding.tracesButton.setOnClickListener { startActivity(Intent(act, TripsActivity::class.java)) }
+        setupMapControlStack()
         setupThemeButton()
         setupSettingsButton()
         setupOrientationButton()
+        setupBuildings3dButton()
+        setupTerrainButton()
         setupMenu()
         setupMapTimeWindowPills()
         setupSelectionFooter()
@@ -403,6 +408,16 @@ class MapFragment : Fragment() {
             engine = e
             markerKey = "" // the new engine has not been given the marker yet
             binding.map.addView(e.view, 0, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            if (airborneOverlayView == null) {
+                airborneOverlayView = Airborne3dOverlayView(act).also { overlay ->
+                    binding.map.addView(
+                        overlay,
+                        ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    )
+                }
+            } else {
+                airborneOverlayView?.bringToFront()
+            }
             binding.osmCredit.text = e.credit
             e.onCreate(state)
             e.whenReady { if (alive && engine === e) onMapReady(e, restore) }
@@ -447,17 +462,24 @@ class MapFragment : Fragment() {
         val r = RfMap(act, m).also { rf = it }
         r.filter = filter
         r.tripMode = tripId != null
+        r.attachAirborneOverlay(if (tripId == null) airborneOverlayView else null)
         r.onStaticChanged = { if (alive) { renderLive(); refreshServiceLocation() } }
         m.setMinZoom(2.0)
         // Two fingers in 3D: a pinch is your zoom now (until the follow button).
         m.onUserGesture = { touchedAt = android.os.SystemClock.elapsedRealtime(); if (following) userZoom = true }
         m.onFollowDismissed = { touchedAt = android.os.SystemClock.elapsedRealtime(); if (alive && following) { following = false; styleFollowButton() } }
-        m.onCameraMove = { updateScale() }
+        m.onCameraMove = {
+            updateScale()
+            updateCompassButton()
+            r.syncAirbornePitchState(lastFollowPad ?: 0.0)
+        }
         var lastIdleZoom = m.camera.zoom
         m.onIdle = {
             r.safe("static") {
                 r.maybeRedrawStatic()
                 updateScale()
+                updateCompassButton()
+                r.syncAirbornePitchState(lastFollowPad ?: 0.0)
                 val curZoom = m.camera.zoom
                 if (tripId == null && kotlin.math.abs(curZoom - lastIdleZoom) >= 0.3) {
                     lastIdleZoom = curZoom
@@ -508,11 +530,20 @@ class MapFragment : Fragment() {
         binding.osmCredit.setTextColor(if (dark) 0xFFDDDDDD.toInt() else 0xFF333333.toInt())
         r.loadStyle(dark) {
             if (!alive) return@loadStyle
+            updateCompassButton()
+            styleBuildings3dButton()
+            styleTerrainButton()
             r.safe("location") { startLocation() }
             if (tripId != null) {
                 loadTrip()
             } else {
                 renderLive()
+                val activeWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(act)
+                if (activeWin != org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
+                    org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = activeWin.windowMs) {
+                        if (alive) renderLive()
+                    }
+                }
                 org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
                     if (alive) renderLive()
                 }
@@ -675,10 +706,16 @@ class MapFragment : Fragment() {
                 setOnClickListener {
                     org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, win)
                     stylePills(win)
+                    rf?.onTimeWindowChanged(win)
+                    renderLive()
+                    if (win != org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
+                        org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = win.windowMs) {
+                            if (alive) renderLive()
+                        }
+                    }
                     org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
                         if (alive) renderLive()
                     }
-                    renderLive()
                 }
             }
             buttons[win] = pill
@@ -1223,38 +1260,42 @@ class MapFragment : Fragment() {
      */
     private fun fitSideButtons() {
         val b = _binding ?: return
-        if (!embedded || b.root.height == 0) return
+        val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton, b.terrainButton)
+        if (!embedded || b.root.height == 0) {
+            for (v in stackButtons) if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
+            return
+        }
         val d = resources.displayMetrics.density
         val panel = listOf(b.navCard, b.navBar).firstOrNull { it.visibility == View.VISIBLE }
         var hide = emptyList<View>()
-        val fab = 56 * d // a button and its margin
+        val btnH = 44 * d
         if (panel == null && b.statusText.visibility == View.VISIBLE && b.statusBox.height > 0) {
-            // The status line at the top of a short pane: the column of buttons under it gives way, the compass first.
             val top = b.statusBox.top + b.statusBox.translationY + b.statusBox.height + 4 * d
             val rowLift = if (rowCrowdsSideButtons()) b.compactControls.height + 8 * d else 0f
             val room = b.root.height - 8 * d - rowLift - top
             hide = when {
-                2 * fab <= room -> emptyList()
-                fab <= room -> listOf(b.orientationButton)
-                else -> listOf(b.orientationButton, b.centerButton)
+                4 * btnH <= room -> emptyList()
+                3 * btnH <= room -> listOf(b.terrainButton)
+                2 * btnH <= room -> listOf(b.buildings3dButton, b.terrainButton)
+                btnH <= room -> listOf(b.orientationButton, b.buildings3dButton, b.terrainButton)
+                else -> stackButtons
             }
         }
         if (panel != null) {
             panel.measure(View.MeasureSpec.makeMeasureSpec(b.root.width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-            // The turn banner (and the credit under it) take the top of the pane while guiding.
             val top = if (b.navBanner.visibility == View.VISIBLE) b.statusBox.bottom + b.statusBox.translationY + 8 * d else 0f
             val room = b.root.height - 8 * d - top
-            // The round buttons ride above the arrival bar (the card hides them) and, when they are too wide to sit
-            // beside the compass and follow buttons, those rise above them.
             val rowLift = if (rowCrowdsSideButtons()) b.compactControls.height + 8 * d else 0f
             val used = panel.measuredHeight + rowLift
             hide = when {
-                used + 2 * fab <= room -> emptyList()
-                used + fab <= room -> listOf(b.orientationButton)
-                else -> listOf(b.orientationButton, b.centerButton)
+                used + 4 * btnH <= room -> emptyList()
+                used + 3 * btnH <= room -> listOf(b.terrainButton)
+                used + 2 * btnH <= room -> listOf(b.buildings3dButton, b.terrainButton)
+                used + btnH <= room -> listOf(b.orientationButton, b.buildings3dButton, b.terrainButton)
+                else -> stackButtons
             }
         }
-        for (v in listOf(b.orientationButton, b.centerButton)) {
+        for (v in stackButtons) {
             val want = if (v in hide) View.GONE else View.VISIBLE
             if (v.visibility != want) v.visibility = want
         }
@@ -1374,37 +1415,38 @@ class MapFragment : Fragment() {
         if (embedded || b.root.width == 0) return
         val wide = wideScreen()
         val want = if (wide) android.widget.LinearLayout.HORIZONTAL else android.widget.LinearLayout.VERTICAL
-        if (b.sideButtons.orientation != want) b.sideButtons.orientation = want
         val d = resources.displayMetrics.density
-        // The banner gets what the row of buttons leaves (each is about 62 dp with its margin), not less than 40% of the width.
+        if (b.sideButtons.orientation != want) {
+            b.sideButtons.orientation = want
+            val gap = (3 * d).toInt()
+            val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton, b.terrainButton)
+            stackButtons.forEachIndexed { idx, btn ->
+                val mlp = btn.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return@forEachIndexed
+                mlp.topMargin = if (!wide && idx > 0) gap else 0
+                mlp.marginStart = if (wide && idx > 0) gap else 0
+                btn.layoutParams = mlp
+            }
+        }
         val shown = b.sideButtons.children.count { it.visibility != View.GONE }
-        val rowW = (shown * 62 * d + 24 * d).toInt()
+        val rowW = (shown * 46 * d + 28 * d).toInt()
         val width = if (wide) (b.root.width - rowW).coerceIn((b.root.width * 0.4f).toInt(), (520 * d).toInt().coerceAtLeast((b.root.width * 0.4f).toInt()))
             else ViewGroup.LayoutParams.MATCH_PARENT
         val lp = b.statusBox.layoutParams
         if (lp.width != width) { lp.width = width; b.statusBox.layoutParams = lp }
         compactForLandscape(wide)
-        updateScale() // while guiding on its side the scale gives its place to the credit, as in the small pane
+        updateScale()
         placeScaleBar()
     }
 
-    /**
-     * The compass and follow buttons sit at the right edge, the round buttons along the bottom-left. When the
-     * pane is too narrow for both side by side the compass and follow buttons move up above the row instead of
-     * lying under it. Worked out from sizes alone, so it settles in one pass.
-     */
     private fun liftSideButtons() {
         val b = _binding ?: return
         val row = b.compactControls
         val d = resources.displayMetrics.density
-        // While guiding, the row rides just above the arrival bar instead of under it.
         row.translationY = if (row.visibility == View.VISIBLE && b.navBar.visibility == View.VISIBLE) -b.navBar.height.toFloat() else 0f
-        // Crowded: the compass and follow buttons rise by the row's height (their own bottom margin, so the panel's
-        // card or bar below them stays where it is).
         val lift = if (rowCrowdsSideButtons()) (row.height + 8 * d).toInt() else 0
-        val lp = b.centerButton.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
-        val want = (8 * d).toInt() + lift
-        if (lp.bottomMargin != want) { lp.bottomMargin = want; b.centerButton.layoutParams = lp }
+        val lp = b.sideButtons.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return
+        val want = (10 * d).toInt() + lift
+        if (lp.bottomMargin != want) { lp.bottomMargin = want; b.sideButtons.layoutParams = lp }
     }
 
     /** The status line of [lines] lines would reach down to the small pane's row of round buttons. */
@@ -1620,20 +1662,19 @@ class MapFragment : Fragment() {
         listening = false
     }
 
-    // ---- North up / heading up / 3D --------------------------------------------------------------------
+    // ---- Cohesive 4-button map control stack (Compass, Location Reticle, 3D Buildings, Terrain) -------
 
     private fun is3d() = tripId == null && Prefs.map3d(act) && Prefs.mapHeadingUp(act)
 
     /**
-     * Points the camera for the mode: following you north up, turning with your heading, or the 3D
-     * driving view (tilt and zoom from your speed, your arrow low on the screen); not following, it
-     * stays where you left it.
+     * Points the camera for the mode: following you while preserving manual pinch rotation & pitch
+     * (or turning with your heading if enabled in Prefs); not following, it stays where you left it.
      */
     private fun applyMode(animate: Boolean) {
         val m = map?.takeIf { it.puckOn } ?: return
         val ms = if (animate) 1_000L else 0L
         if (!following || tripId != null) {
-            m.follow(MapEngine.Follow.NONE, null, 0.0, null, 0)
+            m.follow(MapEngine.Follow.NONE, null, null, null, 0)
             return
         }
         val h = binding.map.height
@@ -1645,12 +1686,11 @@ class MapFragment : Fragment() {
             lastFollowPad = pad
             m.follow(MapEngine.Follow.HEADING, pad, tiltFor(kmh, Prefs.map3dTilt(act)), if (userZoom) null else zoomFor(kmh, base) + boost, ms)
         } else if (Prefs.mapHeadingUp(act)) {
-            // Turning with you: pulls back at speed like the 3D view; a pinch is yours until the follow button.
             lastFollowPad = followPadding(h, 0.5)
-            m.follow(MapEngine.Follow.HEADING, lastFollowPad ?: 0.0, 0.0, if (userZoom) null else zoomFor(kmh, base) - FLAT_ZOOM_OFFSET + boost, ms)
+            m.follow(MapEngine.Follow.HEADING, lastFollowPad ?: 0.0, null, if (userZoom) null else zoomFor(kmh, base) - FLAT_ZOOM_OFFSET + boost, ms)
         } else {
             lastFollowPad = followPadding(h, 0.5)
-            m.follow(MapEngine.Follow.NORTH, lastFollowPad ?: 0.0, 0.0, if (userZoom) null else base - FLAT_ZOOM_OFFSET + boost, ms)
+            m.follow(MapEngine.Follow.NORTH, lastFollowPad ?: 0.0, null, if (userZoom) null else base - FLAT_ZOOM_OFFSET + boost, ms)
         }
     }
 
@@ -1685,53 +1725,136 @@ class MapFragment : Fragment() {
         if (want != null && (had == null || kotlin.math.abs(want - had) > 8.0)) applyMode(animate = false)
     }
 
-    /** The map button: north up -> heading up -> 3D driving view -> north up. */
-    private fun setupOrientationButton() {
-        val btn = binding.orientationButton
-        if (tripId != null) { btn.visibility = View.GONE; return }
-        btn.setOnClickListener {
-            val prefs = Prefs
-            val heading = prefs.mapHeadingUp(act); val tilt = prefs.map3d(act)
-            when {
-                !heading -> { prefs.setMapHeadingUp(act, true); prefs.setMap3d(act, false) }
-                !tilt -> prefs.setMap3d(act, true)
-                else -> { prefs.setMapHeadingUp(act, false); prefs.setMap3d(act, false) }
-            }
-            if (prefs.mapHeadingUp(act)) {
-                // Turning with you (and 3D) only makes sense around you: follow again.
-                setFollow(true, quiet = true)
-                Toast.makeText(act, if (prefs.map3d(act)) "3D driving view" else "Map turns with your direction of travel", Toast.LENGTH_SHORT).show()
-            } else {
-                // Back to a flat, north-up map, wherever it was looking.
-                map?.easeTo(bearing = 0.0, tilt = 0.0, flat = true, ms = 600)
-                applyMode(animate = true)
-                Toast.makeText(act, "Map fixed with north up", Toast.LENGTH_SHORT).show()
-            }
-            styleOrientationButton()
+    private fun setupMapControlStack() {
+        val b = _binding ?: return
+        val d = resources.displayMetrics.density
+        val pad = (4 * d).toInt()
+        b.sideButtons.setPadding(pad, pad, pad, pad)
+        b.sideButtons.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 999f * d
+            setColor(0xEB0F1622.toInt())
+            setStroke((1f * d).toInt().coerceAtLeast(1), 0x5594A3B8)
         }
-        styleOrientationButton()
+        b.sideButtons.elevation = 6f * d
     }
 
-    private fun styleOrientationButton() {
-        val heading = Prefs.mapHeadingUp(act)
-        val tilt = is3d()
-        binding.orientationButton.setImageResource(when {
-            tilt -> org.tucsoncommunity.kokoho.R.drawable.ic_view_3d
-            heading -> org.tucsoncommunity.kokoho.R.drawable.ic_heading_up
-            else -> org.tucsoncommunity.kokoho.R.drawable.ic_north_up
-        })
-        binding.orientationButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
-            if (heading) KokohoJourneyUi.COLOR_ACCENT_AMBER else KokohoJourneyUi.COLOR_SURFACE_ELEVATED
-        )
-        binding.orientationButton.imageTintList = android.content.res.ColorStateList.valueOf(
-            if (heading) 0xFF0B0F17.toInt() else KokohoJourneyUi.COLOR_TEXT_PRIMARY
-        )
-        binding.orientationButton.contentDescription = when {
-            tilt -> "Map: 3D driving view (tap for north up)"
-            heading -> "Map: heading up (tap for the 3D driving view)"
-            else -> "Map: north up (tap to turn with your direction)"
+    private fun circularControlBg(active: Boolean, subtleActive: Boolean = false): android.graphics.drawable.GradientDrawable {
+        val d = resources.displayMetrics.density
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            if (active) {
+                setColor(if (subtleActive) 0x883B280C.toInt() else 0xFF3B280C.toInt())
+                setStroke((1.4f * d).toInt().coerceAtLeast(1), 0xFFF59E0B.toInt())
+            } else {
+                setColor(0x00000000)
+            }
         }
-        binding.orientationButton.tooltipText = binding.orientationButton.contentDescription
+    }
+
+    /** Live Compass button: rotates live with `-mapBearing` and resets camera smoothly to flat-down-north (`bearing = 0`, `pitch = 0`). */
+    private fun setupOrientationButton() {
+        val btn = binding.orientationButton
+        btn.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_compass)
+        btn.imageTintList = null
+        btn.setOnClickListener {
+            Prefs.setMapHeadingUp(act, false)
+            Prefs.setMap3d(act, false)
+            val m = map
+            if (m != null) {
+                if (following && m.puckOn && tripId == null) {
+                    val pad = followPadding(binding.map.height, 0.5) ?: 0.0
+                    lastFollowPad = pad
+                    m.follow(MapEngine.Follow.NORTH, pad, tilt = 0.0, zoom = null, ms = 450)
+                    m.easeTo(bearing = 0.0, tilt = 0.0, ms = 450)
+                } else {
+                    m.easeTo(bearing = 0.0, tilt = 0.0, flat = true, ms = 450)
+                }
+            }
+            updateCompassButton(forceBearing = 0.0, forceTilt = 0.0)
+            rf?.syncAirbornePitchState(lastFollowPad ?: 0.0)
+        }
+        updateCompassButton()
+    }
+
+    private fun updateCompassButton(forceBearing: Double? = null, forceTilt: Double? = null) {
+        val b = _binding ?: return
+        val cam = map?.camera
+        val bearing = forceBearing ?: cam?.bearing ?: 0.0
+        val tilt = forceTilt ?: cam?.tilt ?: 0.0
+        val normBearing = (((bearing % 360.0) + 540.0) % 360.0) - 180.0
+        val offNorthOrTilted = kotlin.math.abs(normBearing) > 1.5 || tilt > 1.5
+        b.orientationButton.rotation = if (kotlin.math.abs(normBearing) <= 0.5) 0f else (-normBearing).toFloat()
+        b.orientationButton.rotationX = (tilt * 0.42).toFloat().coerceIn(0f, 26f)
+        b.orientationButton.background = circularControlBg(active = offNorthOrTilted, subtleActive = true)
+        b.orientationButton.contentDescription = if (offNorthOrTilted) {
+            "Compass: rotated or tilted (tap to reset flat north-up)"
+        } else {
+            "Compass: flat north-up"
+        }
+        b.orientationButton.tooltipText = b.orientationButton.contentDescription
+    }
+
+    private fun styleOrientationButton() = updateCompassButton()
+
+    private fun setupBuildings3dButton() {
+        binding.buildings3dButton.setOnClickListener {
+            val next = !Prefs.mapBuildings3d(act)
+            Prefs.setMapBuildings3d(act, next)
+            map?.setBuildings3d(next)
+            if (next) {
+                val m = map
+                if (m != null && m.camera.tilt < 15.0) {
+                    if (following && m.puckOn && tripId == null) {
+                        val pad = followPadding(binding.map.height, 0.5) ?: 0.0
+                        m.follow(MapEngine.Follow.NORTH, pad, tilt = 45.0, zoom = null, ms = 450)
+                    }
+                    m.easeTo(tilt = 45.0, ms = 450)
+                }
+            }
+            styleBuildings3dButton()
+            updateCompassButton()
+        }
+        styleBuildings3dButton()
+    }
+
+    private fun styleBuildings3dButton() {
+        val b = _binding ?: return
+        val on = Prefs.mapBuildings3d(act)
+        b.buildings3dButton.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_buildings_3d)
+        b.buildings3dButton.background = circularControlBg(active = on)
+        b.buildings3dButton.imageTintList = android.content.res.ColorStateList.valueOf(
+            if (on) KokohoJourneyUi.HIGHLIGHT_AMBER else KokohoJourneyUi.COLOR_TEXT_PRIMARY
+        )
+        b.buildings3dButton.contentDescription = if (on) "3D buildings enabled (tap to hide)" else "Toggle 3D buildings"
+        b.buildings3dButton.tooltipText = b.buildings3dButton.contentDescription
+    }
+
+    private fun setupTerrainButton() {
+        binding.terrainButton.setOnClickListener {
+            val next = !Prefs.mapTerrain(act)
+            Prefs.setMapTerrain(act, next)
+            if (next && following && map?.puckOn == true && tripId == null && (map?.camera?.tilt ?: 0.0) < 15.0) {
+                val pad = followPadding(binding.map.height, 0.5) ?: 0.0
+                map?.follow(MapEngine.Follow.NORTH, pad, tilt = 36.0, zoom = null, ms = 450)
+            }
+            map?.setTerrain(next, animateCamera = true)
+            styleTerrainButton()
+            updateCompassButton()
+        }
+        styleTerrainButton()
+    }
+
+    private fun styleTerrainButton() {
+        val b = _binding ?: return
+        val on = Prefs.mapTerrain(act)
+        b.terrainButton.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_terrain)
+        b.terrainButton.background = circularControlBg(active = on)
+        b.terrainButton.imageTintList = android.content.res.ColorStateList.valueOf(
+            if (on) KokohoJourneyUi.HIGHLIGHT_AMBER else KokohoJourneyUi.COLOR_TEXT_PRIMARY
+        )
+        b.terrainButton.contentDescription = if (on) "3D terrain elevation enabled (tap to disable)" else "Toggle 3D terrain elevation"
+        b.terrainButton.tooltipText = b.terrainButton.contentDescription
     }
 
     /** Turns following on (re-centres now and keeps you centred) or off (after you pan). */
@@ -1746,17 +1869,17 @@ class MapFragment : Fragment() {
         styleFollowButton()
     }
 
-    /** Filled with high-contrast amber while following, dark slate surface otherwise. */
+    /** Amber circular highlight inside the control stack while actively locked/following, crisp slate otherwise. */
     private fun styleFollowButton() {
-        val on = following
-        binding.centerButton.backgroundTintList = android.content.res.ColorStateList.valueOf(
-            if (on) KokohoJourneyUi.COLOR_ACCENT_AMBER else KokohoJourneyUi.COLOR_SURFACE_ELEVATED
+        val b = _binding ?: return
+        val on = following && tripId == null
+        b.centerButton.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_reticle)
+        b.centerButton.background = circularControlBg(active = on)
+        b.centerButton.imageTintList = android.content.res.ColorStateList.valueOf(
+            if (on) KokohoJourneyUi.HIGHLIGHT_AMBER else KokohoJourneyUi.COLOR_TEXT_PRIMARY
         )
-        binding.centerButton.imageTintList = android.content.res.ColorStateList.valueOf(
-            if (on) 0xFF0B0F17.toInt() else KokohoJourneyUi.COLOR_TEXT_PRIMARY
-        )
-        binding.centerButton.contentDescription = if (on) "Following your position" else "Follow my position"
-        binding.centerButton.tooltipText = binding.centerButton.contentDescription
+        b.centerButton.contentDescription = if (on) "Following your position" else "Center on my location"
+        b.centerButton.tooltipText = b.centerButton.contentDescription
     }
 
     /** A saved trace: glides to where you are (the map doesn't follow you there). */
@@ -1815,8 +1938,12 @@ class MapFragment : Fragment() {
             rf?.safe("static") { rf?.maybeRedrawStatic(force = true) }
         }
         if (rf != null && rf?.isDark != darkTiles()) loadStyle()
+        map?.setBuildings3d(Prefs.mapBuildings3d(act))
+        map?.setTerrain(Prefs.mapTerrain(act), animateCamera = false)
         styleOrientationButton()
         styleFollowButton()
+        styleBuildings3dButton()
+        styleTerrainButton()
         applyMode(animate = false)
         hideLegacyMapChrome()
         if (tripId == null) {
@@ -1858,6 +1985,7 @@ class MapFragment : Fragment() {
         org.tucsoncommunity.kokoho.alpr.CctvStore.onChanged = null
         stopGps()
         rf = null
+        airborneOverlayView = null
         runCatching { engine?.onDestroy() }
         engine = null
         _binding = null

@@ -261,7 +261,10 @@ object WebAuthQrDialog {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.END
             }
-            if (!ok && message.contains("ProtonVPN", ignoreCase = true)) {
+            val isVpnGateMessage = message.contains("VPN", ignoreCase = true) ||
+                message.contains("Tucson IP", ignoreCase = true) ||
+                message.contains("Tucson network", ignoreCase = true)
+            if (!ok && isVpnGateMessage) {
                 val recheckBtn = KokohoJourneyUi.secondaryActionButton(activity, "Re-Check VPN") {
                     org.tucsoncommunity.kokoho.posture.VpnGeoGate.recheckAsync(activity, forceSeatedCheck = true) { verdict ->
                         if (verdict == org.tucsoncommunity.kokoho.posture.VpnGeoGate.Verdict.ALLOWED) {
@@ -274,7 +277,7 @@ object WebAuthQrDialog {
                         } else {
                             android.widget.Toast.makeText(
                                 activity,
-                                "Tucson IP still detected. Connect ProtonVPN outside Southern Arizona first.",
+                                "Tucson IP still detected. Connect your VPN to an exit outside Southern Arizona first.",
                                 android.widget.Toast.LENGTH_LONG
                             ).show()
                         }

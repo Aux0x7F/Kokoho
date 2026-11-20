@@ -51,6 +51,119 @@ object KokohoHubClient {
     ) {
         val points: List<Pair<Double, Double>>
             get() = simplifiedPolyline.mapNotNull { if (it.size >= 2) it[0] to it[1] else null }
+
+        /**
+         * Strictly filters and vertex-clips this flight track to `[nowMs - windowMs, nowMs]`.
+         * Supports both `[lat, lon, timestampMs]` 3-tuples and `[lat, lon]` polylines spanned across
+         * `[startedAtMs, endedAtMs]`, linearly interpolating the boundary vertex at `cutoffMs`.
+         */
+        fun clippedPointsForWindow(nowMs: Long, windowMs: Long): List<Pair<Double, Double>> {
+            if (windowMs <= 0L || simplifiedPolyline.size < 2) return emptyList()
+            val cutoffMs = nowMs - windowMs
+
+            // 1. Per-vertex epoch-ms timestamps when present in 3-tuples `[lat, lon, tsMs]`
+            val hasVertexTimestamps = simplifiedPolyline.all { it.size >= 3 && it[2] > 1_000_000_000_000.0 }
+            if (hasVertexTimestamps) {
+                val out = ArrayList<Pair<Double, Double>>(simplifiedPolyline.size)
+                for (i in simplifiedPolyline.indices) {
+                    val cur = simplifiedPolyline[i]
+                    val tCur = cur[2].toLong()
+                    if (i > 0) {
+                        val prev = simplifiedPolyline[i - 1]
+                        val tPrev = prev[2].toLong()
+                        if (tPrev < cutoffMs && tCur >= cutoffMs && tCur > tPrev) {
+                            val alpha = ((cutoffMs - tPrev).toDouble() / (tCur - tPrev).toDouble()).coerceIn(0.0, 1.0)
+                            val lat = prev[0] + (cur[0] - prev[0]) * alpha
+                            val lon = prev[1] + (cur[1] - prev[1]) * alpha
+                            out += lat to lon
+                        }
+                    }
+                    if (tCur in cutoffMs..nowMs) {
+                        out += cur[0] to cur[1]
+                    } else if (i > 0) {
+                        val prev = simplifiedPolyline[i - 1]
+                        val tPrev = prev[2].toLong()
+                        if (tPrev <= nowMs && tCur > nowMs && tCur > tPrev) {
+                            val alpha = ((nowMs - tPrev).toDouble() / (tCur - tPrev).toDouble()).coerceIn(0.0, 1.0)
+                            val lat = prev[0] + (cur[0] - prev[0]) * alpha
+                            val lon = prev[1] + (cur[1] - prev[1]) * alpha
+                            out += lat to lon
+                        }
+                    }
+                }
+                return if (out.size >= 2) out else emptyList()
+            }
+
+            // 2. `[lat, lon]` polyline spanned across `[startedAtMs, endedAtMs]`
+            val rawPts = points
+            if (rawPts.size < 2) return emptyList()
+            val effEnd = if (endedAtMs > 0L) endedAtMs else startedAtMs
+            val effStart = if (startedAtMs in 1L..effEnd) startedAtMs else effEnd
+            if (effEnd > 0L && effEnd < cutoffMs) return emptyList()
+            if (effStart <= 0L || (effStart >= cutoffMs && effEnd <= nowMs) || effEnd <= effStart) {
+                return rawPts
+            }
+
+            val startFrac = if (effStart < cutoffMs) {
+                ((cutoffMs - effStart).toDouble() / (effEnd - effStart).toDouble()).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+            val endFrac = if (effEnd > nowMs) {
+                ((nowMs - effStart).toDouble() / (effEnd - effStart).toDouble()).coerceIn(0.0, 1.0)
+            } else {
+                1.0
+            }
+            if (endFrac <= startFrac) return emptyList()
+
+            val cumDist = DoubleArray(rawPts.size)
+            var totalDist = 0.0
+            for (i in 1 until rawPts.size) {
+                val a = rawPts[i - 1]
+                val b = rawPts[i]
+                totalDist += org.tucsoncommunity.kokoho.service.DeviceRegistry.metersBetween(a.first, a.second, b.first, b.second)
+                cumDist[i] = totalDist
+            }
+            if (totalDist < 1.0) {
+                val i0 = (startFrac * (rawPts.size - 1)).toInt().coerceIn(0, rawPts.size - 1)
+                val i1 = kotlin.math.ceil(endFrac * (rawPts.size - 1)).toInt().coerceIn(i0, rawPts.size - 1)
+                val slice = rawPts.subList(i0, i1 + 1)
+                return if (slice.size >= 2) slice else emptyList()
+            }
+
+            fun pointAtDistance(dTarget: Double): Pair<Double, Double> {
+                if (dTarget <= 0.0) return rawPts.first()
+                if (dTarget >= totalDist) return rawPts.last()
+                for (i in 1 until rawPts.size) {
+                    val d0 = cumDist[i - 1]
+                    val d1 = cumDist[i]
+                    if (dTarget <= d1 && d1 > d0) {
+                        val t = ((dTarget - d0) / (d1 - d0)).coerceIn(0.0, 1.0)
+                        val p0 = rawPts[i - 1]
+                        val p1 = rawPts[i]
+                        return (p0.first + (p1.first - p0.first) * t) to (p0.second + (p1.second - p0.second) * t)
+                    }
+                }
+                return rawPts.last()
+            }
+
+            val dStart = startFrac * totalDist
+            val dEnd = endFrac * totalDist
+            val clipped = ArrayList<Pair<Double, Double>>(rawPts.size + 2)
+            clipped += pointAtDistance(dStart)
+            for (i in 1 until rawPts.size - 1) {
+                val d = cumDist[i]
+                if (d > dStart + 0.25 && d < dEnd - 0.25) {
+                    clipped += rawPts[i]
+                }
+            }
+            val endPt = pointAtDistance(dEnd)
+            val prev = clipped.last()
+            if (kotlin.math.abs(endPt.first - prev.first) > 1e-7 || kotlin.math.abs(endPt.second - prev.second) > 1e-7) {
+                clipped += endPt
+            }
+            return if (clipped.size >= 2) clipped else emptyList()
+        }
     }
 
     private data class RemoteWitnessDto(
@@ -145,6 +258,8 @@ object KokohoHubClient {
         @SerializedName("h3_res8") val h3Res8: Long = 0L,
         @SerializedName("bearing_deg") val bearingDeg: Double? = null,
         @SerializedName("velocity_mps") val velocityMps: Double? = null,
+        @SerializedName("altitude_ft") val altitudeFt: Int? = null,
+        @SerializedName("altitude_ft_agl") val altitudeFtAgl: Int? = null,
         @SerializedName("propagation_class") val propagationClass: String = "GROUND_DIRECT",
         @SerializedName("recent_trail") val recentTrail: List<List<Double>> = emptyList()
     )
@@ -716,20 +831,26 @@ object KokohoHubClient {
     fun fetchFlightTracks(
         context: Context,
         target: String? = null,
+        windowMs: Long? = null,
         onResult: (List<RemoteFlightTrack>) -> Unit
     ) {
         val app = context.applicationContext ?: context
         scope.launch {
+            val nowMs = System.currentTimeMillis()
             val tracks = runCatching {
-                val q = if (!target.isNullOrBlank()) {
-                    "?target=" + java.net.URLEncoder.encode(target.trim(), "UTF-8")
-                } else {
-                    ""
+                val params = ArrayList<String>(2)
+                if (!target.isNullOrBlank()) {
+                    params += "target=" + java.net.URLEncoder.encode(target.trim(), "UTF-8")
                 }
+                if (windowMs != null && windowMs > 0L) {
+                    val sinceMs = (nowMs - windowMs).coerceAtLeast(0L)
+                    params += "since_ms=$sinceMs"
+                }
+                val q = if (params.isNotEmpty()) "?" + params.joinToString("&") else ""
                 val envResp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/flights$q")
                 if (envResp != null && envResp.code in 200..299 && !envResp.body.isNullOrBlank()) {
                     val type = object : com.google.gson.reflect.TypeToken<List<RemoteFlightTrack>>() {}.type
-                    (gson.fromJson<List<RemoteFlightTrack>>(envResp.body, type) ?: emptyList()).filterNot { tr ->
+                    val parsed = (gson.fromJson<List<RemoteFlightTrack>>(envResp.body, type) ?: emptyList()).filterNot { tr ->
                         KokohoSignatures.isAnomalousUnattributedAirRecord(
                             primaryKey = "adsb:",
                             category = tr.category,
@@ -738,6 +859,19 @@ object KokohoHubClient {
                             avgVelocityMps = tr.avgVelocityMps
                         )
                     }
+                    if (target.isNullOrBlank() && parsed.isNotEmpty()) {
+                        val merged = LinkedHashMap<String, RemoteFlightTrack>()
+                        for (t in parsed) {
+                            val k = t.trackUuid.ifBlank { "${t.entityUuid}:${t.startedAtMs}" }
+                            merged[k] = t
+                        }
+                        for (t in latestTrendsTracks) {
+                            val k = t.trackUuid.ifBlank { "${t.entityUuid}:${t.startedAtMs}" }
+                            merged.putIfAbsent(k, t)
+                        }
+                        latestTrendsTracks = merged.values.toList()
+                    }
+                    parsed
                 } else {
                     emptyList()
                 }

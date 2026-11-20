@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - Verifies that seated devices (holding a seat identity or actively claiming/authorizing a seat)
  *    are not routing directly from a Tucson metropolitan IP address before opening outbound
  *    connections to Kokoho Hub.
- *  - Recommends a reputable provider-agnostic no-log VPN (such as ProtonVPN) routed outside
+ *  - Requires an active VPN routed to an exit outside
  *    Southern Arizona.
  *  - Listens to [ConnectivityManager.NetworkCallback] (`TRANSPORT_VPN` and active network changes)
  *    to invalidate cached verdicts immediately and auto-resume Hub sync when the user connects
@@ -50,7 +50,7 @@ object VpnGeoGate {
 
     const val TUCSON_VPN_ADVISORY_MESSAGE =
         "Tucson network detected without an active VPN. Hub sync, enrollment, and sharing are paused. " +
-            "Connect a trusted VPN (ProtonVPN recommended) to an exit outside Southern Arizona, then tap Re-Check VPN."
+            "Connect your VPN to an exit outside Southern Arizona, then tap Re-Check VPN."
 
     private const val ALLOWED_TTL_MS = 90_000L
     private const val BLOCKED_TTL_MS = 20_000L

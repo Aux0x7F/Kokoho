@@ -355,13 +355,64 @@ object PoliceAircraft {
 
     private const val LANDED_PREFS = "kokoho_landed_air"
     private const val KEY_LANDED_JSON = "landed_spots_json"
-    private const val TRAIL_MAX_AGE_MS = 90 * 60_000L
+    private const val TRAIL_MAX_AGE_MS = 24 * 60 * 60_000L
     private const val GROUNDED_RECENT_MS = 15 * 60_000L
+    private const val FLIGHT_GAP_BREAK_MS = 20 * 60_000L
+
+    data class LocalDroneTrail(
+        val entityUuid: String,
+        val agencyId: String,
+        val label: String,
+        val points: List<Pair<Double, Double>>,
+        val endedAtMs: Long
+    )
+
+    private data class DroneTrailState(
+        var agencyId: String,
+        var label: String,
+        val fixes: ArrayDeque<FlightFix> = ArrayDeque()
+    )
 
     private val airborneTrails = java.util.concurrent.ConcurrentHashMap<String, ArrayDeque<FlightFix>>()
+    private val droneTrails = java.util.concurrent.ConcurrentHashMap<String, DroneTrailState>()
     private val groundedAtByHex = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val landedSpotsByKey = java.util.concurrent.ConcurrentHashMap<String, LandedSpot>()
     @Volatile private var landedSpotsLoaded = false
+
+    /**
+     * Non-destructively clips a timestamped [FlightFix] sequence to `[nowMs - windowMs, nowMs]`,
+     * interpolating the entry boundary vertex at `cutoffMs` when a continuous leg crosses the cutoff.
+     */
+    fun clipFixesToWindow(
+        fixes: List<FlightFix>,
+        nowMs: Long,
+        windowMs: Long
+    ): List<Pair<Double, Double>> {
+        if (windowMs <= 0L || fixes.size < 2) return emptyList()
+        val cutoffMs = nowMs - windowMs
+        val out = ArrayList<Pair<Double, Double>>(fixes.size)
+        for (i in fixes.indices) {
+            val cur = fixes[i]
+            if (i > 0) {
+                val prev = fixes[i - 1]
+                val gap = cur.timeMs - prev.timeMs
+                if (prev.timeMs < cutoffMs && cur.timeMs >= cutoffMs && gap in 1L..FLIGHT_GAP_BREAK_MS) {
+                    val alpha = ((cutoffMs - prev.timeMs).toDouble() / gap.toDouble()).coerceIn(0.0, 1.0)
+                    val lat = prev.lat + (cur.lat - prev.lat) * alpha
+                    val lon = prev.lon + (cur.lon - prev.lon) * alpha
+                    out += lat to lon
+                }
+            }
+            if (cur.timeMs in cutoffMs..nowMs) {
+                if (out.isNotEmpty() && i > 0 && cur.timeMs - fixes[i - 1].timeMs > FLIGHT_GAP_BREAK_MS) {
+                    // Start fresh on the most recent contiguous flight leg within the window
+                    out.clear()
+                }
+                out += cur.lat to cur.lon
+            }
+        }
+        return if (out.size >= 2) out else emptyList()
+    }
 
     fun recordAirborneFix(hex: String, lat: Double, lon: Double, nowMs: Long = System.currentTimeMillis()) {
         val normHex = hex.trim().uppercase()
@@ -374,24 +425,85 @@ object PoliceAircraft {
                 q.addLast(FlightFix(nowMs, lat, lon))
             }
             while (q.isNotEmpty() && nowMs - q.first().timeMs > TRAIL_MAX_AGE_MS) q.removeFirst()
-            while (q.size > 120) q.removeFirst()
+            while (q.size > 360) q.removeFirst()
         }
     }
 
     fun recentAirborneTrail(
         hex: String,
         nowMs: Long = System.currentTimeMillis(),
-        maxAgeMs: Long = TRAIL_MAX_AGE_MS
+        maxAgeMs: Long = TRAIL_MAX_AGE_MS,
+        includeLandedWithinWindow: Boolean = false
     ): List<Pair<Double, Double>> {
         val normHex = hex.trim().uppercase()
-        if (normHex in currentlyGroundedHexes(nowMs)) return emptyList()
+        if (!includeLandedWithinWindow && normHex in currentlyGroundedHexes(nowMs)) return emptyList()
         val q = airborneTrails[normHex] ?: return emptyList()
-        synchronized(q) {
-            while (q.isNotEmpty() && nowMs - q.first().timeMs > maxAgeMs) q.removeFirst()
+        val snapshot = synchronized(q) {
+            while (q.isNotEmpty() && nowMs - q.first().timeMs > TRAIL_MAX_AGE_MS) q.removeFirst()
             val newest = q.lastOrNull() ?: return emptyList()
-            if (nowMs - newest.timeMs > 5 * 60_000L) return emptyList()
-            return q.map { it.lat to it.lon }
+            if (!includeLandedWithinWindow && nowMs - newest.timeMs > 5 * 60_000L) return emptyList()
+            if (nowMs - newest.timeMs > maxAgeMs) return emptyList()
+            q.toList()
         }
+        return clipFixesToWindow(snapshot, nowMs, maxAgeMs)
+    }
+
+    fun recordPinpointDroneFix(
+        entityUuid: String,
+        agencyId: String,
+        label: String,
+        lat: Double,
+        lon: Double,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        val key = entityUuid.trim()
+        if (key.isEmpty()) return
+        val state = droneTrails.computeIfAbsent(key) { DroneTrailState(agencyId, label) }
+        synchronized(state) {
+            state.agencyId = agencyId
+            if (label.isNotBlank()) state.label = label
+            val last = state.fixes.lastOrNull()
+            if (last == null || (nowMs - last.timeMs >= 2_500L && DeviceRegistry.metersBetween(last.lat, last.lon, lat, lon) >= 12.0)) {
+                state.fixes.addLast(FlightFix(nowMs, lat, lon))
+            }
+            while (state.fixes.isNotEmpty() && nowMs - state.fixes.first().timeMs > TRAIL_MAX_AGE_MS) {
+                state.fixes.removeFirst()
+            }
+            while (state.fixes.size > 300) state.fixes.removeFirst()
+        }
+    }
+
+    fun recentDroneTrailsForWindow(nowMs: Long, windowMs: Long): List<LocalDroneTrail> {
+        if (windowMs <= 0L) return emptyList()
+        val out = ArrayList<LocalDroneTrail>()
+        for ((uuid, state) in droneTrails) {
+            val (agId, lbl, snap, endMs) = synchronized(state) {
+                while (state.fixes.isNotEmpty() && nowMs - state.fixes.first().timeMs > TRAIL_MAX_AGE_MS) {
+                    state.fixes.removeFirst()
+                }
+                val newest = state.fixes.lastOrNull() ?: continue
+                if (nowMs - newest.timeMs > windowMs) continue
+                listOf(state.agencyId, state.label, state.fixes.toList(), newest.timeMs)
+            }
+            @Suppress("UNCHECKED_CAST")
+            val clipped = clipFixesToWindow(snap as List<FlightFix>, nowMs, windowMs)
+            if (clipped.size >= 2) {
+                out += LocalDroneTrail(
+                    entityUuid = uuid,
+                    agencyId = agId as String,
+                    label = lbl as String,
+                    points = clipped,
+                    endedAtMs = endMs as Long
+                )
+            }
+        }
+        return out
+    }
+
+    internal fun clearTrailsForTest() {
+        airborneTrails.clear()
+        droneTrails.clear()
+        groundedAtByHex.clear()
     }
 
     private fun ensureLandedLoaded(context: Context?) {

@@ -883,6 +883,8 @@ object KokohoSignatures {
         return MapTimeWindow.fromId(raw)
     }
 
+    fun getActiveMapTimeWindow(context: Context): MapTimeWindow = getMapTimeWindow(context)
+
     fun setMapTimeWindow(context: Context, window: MapTimeWindow) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putString(KEY_MAP_TIME_WINDOW, window.id)
@@ -1337,7 +1339,7 @@ object KokohoSignatures {
 
     /**
      * Matches close-range (`snrDb >= 30`) public-safety mobile radio uplinks in the
-     * 700 MHz (`799–805 MHz`) and 800 MHz rebanded (`806–813.9 MHz`) bands.
+     * 700 MHz (`799-805 MHz`) and 800 MHz rebanded (`806-813.9 MHz`) bands.
      * When the frequency is not explicitly cataloged in `rfChannels`, biases attribution toward
      * [primaryPresenceAgency] if a dominant agency presence is already attested in the colocated
      * environment (e.g. a colocated federal scene) rather than blindly assuming Police/Sheriff.
@@ -2826,7 +2828,7 @@ object KokohoSignatures {
     fun importChannelText(context: Context, text: String, sourceName: String): Int {
         ensureLoaded(context)
         val trimmed = text.trim()
-        val airRegex = Regex("""(?i)\b(AIR\s*\d+)\s*[-–:]\s*([0-9]{2,4}\.[0-9]{1,6})\s*MHz(?:.*?NAC\s*([0-9A-Fa-f]{1,3}))?""")
+        val airRegex = Regex("""(?i)\b(AIR\s*\d+)\s*[-\u2013:]\s*([0-9]{2,4}\.[0-9]{1,6})\s*MHz(?:.*?NAC\s*([0-9A-Fa-f]{1,3}))?""")
         val nacRegex = Regex("""(?i)\b([0-9A-Fa-f]{1,3})\s*NAC\b""")
         val freqStartRegex = Regex("""^\s*([0-9]{2,4}\.[0-9]{2,6})\b""")
         val updated = rfChannels.toMutableList()

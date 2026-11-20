@@ -798,7 +798,7 @@ object DeviceTrustManager {
                 when {
                     resp == null -> onResult(
                         false,
-                        "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN (such as ProtonVPN) and internet connection are active."
+                        "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
                     )
                     resp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> onResult(
                         false,
@@ -836,7 +836,7 @@ object DeviceTrustManager {
             norm == "REVOKED" ->
                 "This invitation seat has been revoked."
             enr == null && hasSeatRef ->
-                "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN (such as ProtonVPN) and internet connection are active."
+                "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
             else ->
                 "This app is not yet enrolled on a Hub seat. Install your seat APK from the Field Guide first."
         }
@@ -859,7 +859,7 @@ object DeviceTrustManager {
         val low = cleaned.lowercase()
         return when {
             httpCode == 0 ->
-                "Could not reach Kokoho Hub. Make sure your VPN (such as ProtonVPN) and internet connection are active."
+                "Could not reach Kokoho Hub. Make sure your VPN and internet connection are active."
             low.contains("expired") || low.contains("not found") && httpCode == 400 ->
                 "That authorization prompt expired. Switch back to your browser (it refreshes automatically) and tap or scan again."
             low.contains("mismatch") ->

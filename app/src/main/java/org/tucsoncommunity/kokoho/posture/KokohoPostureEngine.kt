@@ -2060,11 +2060,14 @@ object KokohoPostureEngine {
             var remoteOpLat: Double? = null
             var remoteOpLon: Double? = null
             var remoteIsDrone = agency == KokohoAgency.DRONE
+            var remoteAltFt: Int? = remote.location.altitudeFtAgl ?: remote.location.altitudeFt
+            var remoteFacetHdgDeg: Double? = null
             for (b in badges) {
-                if (b.facetKey.startsWith("uas:mac:", ignoreCase = true)) remoteIsDrone = true
-                if (b.facetKey.startsWith("uas:op:", ignoreCase = true)) {
+                val fk = b.facetKey.trim()
+                if (fk.startsWith("uas:mac:", ignoreCase = true)) remoteIsDrone = true
+                if (fk.startsWith("uas:op:", ignoreCase = true)) {
                     remoteIsDrone = true
-                    val parts = b.facetKey.substringAfter("uas:op:", "").split(',')
+                    val parts = fk.substringAfter("uas:op:", "").split(',')
                     if (parts.size == 2) {
                         val olat = parts[0].trim().toDoubleOrNull()
                         val olon = parts[1].trim().toDoubleOrNull()
@@ -2073,6 +2076,16 @@ object KokohoPostureEngine {
                             remoteOpLon = olon
                         }
                     }
+                }
+                if (remoteAltFt == null && fk.startsWith("air:alt_ft_msl:", ignoreCase = true)) {
+                    remoteAltFt = fk.substringAfterLast(':').trim().toIntOrNull()
+                }
+                if (remoteAltFt == null && fk.startsWith("uas:alt_ft_agl:", ignoreCase = true)) {
+                    remoteIsDrone = true
+                    remoteAltFt = fk.substringAfterLast(':').trim().toIntOrNull()
+                }
+                if (remoteFacetHdgDeg == null && fk.startsWith("air:hdg:", ignoreCase = true)) {
+                    remoteFacetHdgDeg = fk.substringAfterLast(':').trim().toDoubleOrNull()
                 }
             }
 
@@ -2115,10 +2128,11 @@ object KokohoPostureEngine {
                 isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
                 isAircraft = isAir,
                 isHelicopter = remoteHeli,
-                aircraftTrackDeg = remote.location.bearingDeg,
+                aircraftTrackDeg = remote.location.bearingDeg ?: remoteFacetHdgDeg,
                 aircraftHex = remoteHex,
                 isCircling = remoteIsCircling,
                 isDrone = remoteIsDrone,
+                altitudeFtAgl = remoteAltFt,
                 operatorLat = remoteOpLat,
                 operatorLon = remoteOpLon,
                 hardwareIdentifier = badges.firstOrNull()?.facetKey,
@@ -2128,6 +2142,16 @@ object KokohoPostureEngine {
                     badges.map { it.detail } + remote.classification.label
                 )
             )
+            if (remoteIsDrone && uncertM <= PINPOINT_POINT_RADIUS_M) {
+                org.tucsoncommunity.kokoho.online.PoliceAircraft.recordPinpointDroneFix(
+                    entityUuid = remote.uuid,
+                    agencyId = agency.id,
+                    label = remote.classification.label.ifBlank { agency.friendlyLabel },
+                    lat = remote.location.lat,
+                    lon = remote.location.lon,
+                    nowMs = remote.updatedAtMs
+                )
+            }
         }
     }
 
@@ -2224,6 +2248,16 @@ object KokohoPostureEngine {
                 hardwareIdentifier = rid?.uasId?.takeIf { it.isNotBlank() } ?: normMac
             )
             upsertAndFuseThreat(evaluated, threat)
+            if (hasExactDroneGps && droneLat != null && droneLon != null) {
+                org.tucsoncommunity.kokoho.online.PoliceAircraft.recordPinpointDroneFix(
+                    entityUuid = uuid,
+                    agencyId = KokohoAgency.DRONE.id,
+                    label = threat.friendlyLabel,
+                    lat = droneLat,
+                    lon = droneLon,
+                    nowMs = snap.lastSeen
+                )
+            }
             if (droneLat != null && droneLon != null) {
                 localRawObservations += RawSensorReportCandidate(
                     facetKey = facetKey,

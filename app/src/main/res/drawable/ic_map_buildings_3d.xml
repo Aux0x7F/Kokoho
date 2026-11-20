@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Isometric 3D extruded buildings icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Main tall 3D prism: roof diamond -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M9.5,2.6L3.5,5.9L9.5,9.2L15.5,5.9Z" />
+    <!-- Main tall 3D prism: left face -->
+    <path
+        android:fillColor="#D8FFFFFF"
+        android:pathData="M3.5,7.3V18.1L8.8,21.1V10.3Z" />
+    <!-- Main tall 3D prism: right face (cut slightly where front block overlaps) -->
+    <path
+        android:fillColor="#A6FFFFFF"
+        android:pathData="M10.2,10.3V21.1L13.0,19.5V12.2L15.5,10.8V7.3Z" />
+    <!-- Secondary shorter 3D building block at lower-right -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M17.2,11.2L13.8,13.1L17.2,15.0L20.6,13.1Z" />
+    <path
+        android:fillColor="#D8FFFFFF"
+        android:pathData="M13.8,14.3V19.6L16.6,21.2V15.9Z" />
+    <path
+        android:fillColor="#A6FFFFFF"
+        android:pathData="M17.8,15.9V21.2L20.6,19.6V14.3Z" />
+</vector>
