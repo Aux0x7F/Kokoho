@@ -11,6 +11,7 @@ import org.tucsoncommunity.kokoho.util.Units
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * Hierarchical agency taxonomy for Kokoho, ordered by strict alerting priority:
@@ -235,6 +236,9 @@ object KokohoSignatures {
     fun clearWitnessAndConfirmedCacheInMemory() {
         witnessCache.clear()
         confirmedEvidenceFacets.clear()
+        ownTpmsCache.clear()
+        learnedTpmsCache.clear()
+        tpmsIntelLoaded = false
     }
 
     @Synchronized
@@ -580,6 +584,9 @@ object KokohoSignatures {
                         out += "hw:mac:${routerRadioGroupKey(mac)}"
                     }
                 }
+                t.startsWith("hw:kit:tpms:", ignoreCase = true) -> {
+                    canonicalTpmsFacetKey(t)?.let { out += it }
+                }
                 t.startsWith("hw:kit:", ignoreCase = true) -> {
                     val afterKit = t.substringAfter("hw:kit:")
                     val kind = afterKit.substringBefore(':').lowercase()
@@ -633,19 +640,24 @@ object KokohoSignatures {
 
     private fun harvestConfirmedEvidenceFromReport(context: Context, report: WitnessReportRecord) {
         val normKey = normalizeEntityId(report.targetKey)
+        val normUuid = report.entityUuid?.let { normalizeEntityId(it) }
         if (report.reportKind.equals("FALSE_POSITIVE", ignoreCase = true)) {
             confirmedEvidenceFacets.remove("entity:$normKey")
-            report.entityUuid?.let { confirmedEvidenceFacets.remove("entity:${normalizeEntityId(it)}") }
+            normUuid?.let { confirmedEvidenceFacets.remove("entity:$it") }
+            revokeTpmsForEntity(context, normKey, normUuid)
             persistConfirmedEvidence(context)
             return
         }
         if (!hasConfirmingReport(report)) return
         confirmedEvidenceFacets.add("entity:$normKey")
-        report.entityUuid?.let { confirmedEvidenceFacets.add("entity:${normalizeEntityId(it)}") }
+        normUuid?.let { confirmedEvidenceFacets.add("entity:$it") }
         val (facets, hwId) = KokohoPostureEngine.peekThreatFacets(context, normKey)
         confirmedEvidenceFacets.addAll(
             canonicalConfirmableFacetKeys(facets + listOfNotNull(report.targetKey, report.entityUuid), hwId)
         )
+        val wrAgency = KokohoAgency.fromCode(report.agencyCode) ?: KokohoAgency.DHS_ICE
+        val entityId = normUuid ?: normKey
+        promoteWitnessTpmsForReport(context, entityId, wrAgency, report)
         persistConfirmedEvidence(context)
     }
 
@@ -680,6 +692,9 @@ object KokohoSignatures {
         )
         witnessCache[normKey] = cleaned
         cleaned.entityUuid?.let { witnessCache[normalizeEntityId(it)] = cleaned }
+        if (cleaned.reportKind.equals("LE", ignoreCase = true)) {
+            org.tucsoncommunity.kokoho.sdr.SdrRadio.requestTpmsHarvest(cleaned.updatedAtMs)
+        }
         harvestConfirmedEvidenceFromReport(context, cleaned)
         if (cleaned.isApproved && (cleaned.agentName.isNotBlank() || cleaned.badgeNumber.isNotBlank())) {
             val summary = listOfNotNull(
@@ -2104,6 +2119,310 @@ object KokohoSignatures {
         return learnedMacCache[normalizeMac(mac)]
     }
 
+    // ---- TPMS Own-Vehicle Exclusion & Corroborated Agent Chassis Store ----
+
+    data class OwnTpmsEntry(
+        val facetKey: String,
+        val soloGridCells: Set<String> = emptySet(),
+        val pairedEntityIds: Set<String> = emptySet(),
+        val isOwnVehicle: Boolean = false,
+        val updatedAtMs: Long = 0L
+    )
+
+    data class LearnedTpmsIntel(
+        val facetKey: String,
+        val protocol: String,
+        val sensorId: String,
+        val boundEntityUuid: String,
+        val agencyId: String,
+        val label: String,
+        val lastPsi: Int? = null,
+        val distinctGridCells: Set<String> = emptySet(),
+        val encounterCount: Int = 1,
+        val colocatedHits: Int = 1,
+        val witnessVerified: Boolean = false,
+        val updatedAtMs: Long = 0L
+    ) {
+        val agencyEnum: KokohoAgency
+            get() = KokohoAgency.fromCode(agencyId) ?: KokohoAgency.DHS_CBP
+    }
+
+    private const val KEY_OWN_TPMS_JSON = "own_tpms_v1"
+    private const val KEY_LEARNED_TPMS_JSON = "learned_tpms_v1"
+    private const val TPMS_ENCOUNTER_GAP_MS = 15 * 60_000L
+    private const val OWN_TPMS_MIN_SOLO_CELLS = 4
+    private const val OWN_TPMS_MAX_PAIRED_ENTITIES = 3
+    private val ownTpmsCache = java.util.concurrent.ConcurrentHashMap<String, OwnTpmsEntry>()
+    private val learnedTpmsCache = java.util.concurrent.ConcurrentHashMap<String, LearnedTpmsIntel>()
+    @Volatile private var tpmsIntelLoaded = false
+
+    fun canonicalTpmsFacetKey(raw: String): String? {
+        val trimmed = raw.trim()
+        val after = when {
+            trimmed.startsWith("hw:kit:tpms:", ignoreCase = true) -> trimmed.substringAfter("hw:kit:tpms:")
+            trimmed.startsWith("tpms:", ignoreCase = true) -> trimmed.substringAfter("tpms:")
+            else -> return null
+        }
+        val parts = after.split(':').map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size < 2) return null
+        val proto = parts[0].uppercase(java.util.Locale.US).replace(Regex("[^A-Z0-9]+"), "_")
+        val id = parts[1].uppercase(java.util.Locale.US).filter { it.isLetterOrDigit() }
+        if (proto.isEmpty() || id.length < 4) return null
+        return "hw:kit:tpms:$proto:$id"
+    }
+
+    private fun ensureTpmsIntelLoaded(context: Context?) {
+        if (tpmsIntelLoaded || context == null) return
+        synchronized(this) {
+            if (tpmsIntelLoaded) return
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            runCatching {
+                prefs.getString(KEY_OWN_TPMS_JSON, null)?.takeIf { it.isNotBlank() }?.let { raw ->
+                    val t = object : TypeToken<List<OwnTpmsEntry>>() {}.type
+                    val list: List<OwnTpmsEntry> = Gson().fromJson(raw, t) ?: emptyList()
+                    for (e in list) {
+                        canonicalTpmsFacetKey(e.facetKey)?.let { k -> ownTpmsCache[k] = e.copy(facetKey = k) }
+                    }
+                }
+                prefs.getString(KEY_LEARNED_TPMS_JSON, null)?.takeIf { it.isNotBlank() }?.let { raw ->
+                    val t = object : TypeToken<List<LearnedTpmsIntel>>() {}.type
+                    val list: List<LearnedTpmsIntel> = Gson().fromJson(raw, t) ?: emptyList()
+                    for (m in list) {
+                        val k = canonicalTpmsFacetKey(m.facetKey) ?: continue
+                        if (ownTpmsCache[k]?.isOwnVehicle == true) continue
+                        learnedTpmsCache[k] = m.copy(facetKey = k)
+                    }
+                }
+            }
+            tpmsIntelLoaded = true
+        }
+    }
+
+    private fun persistTpmsIntel(context: Context?) {
+        if (context == null) return
+        val ownList = ownTpmsCache.values.sortedByDescending { it.updatedAtMs }.take(120)
+        val learnedList = learnedTpmsCache.values.sortedByDescending { it.updatedAtMs }.take(250)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_OWN_TPMS_JSON, Gson().toJson(ownList))
+            putString(KEY_LEARNED_TPMS_JSON, Gson().toJson(learnedList))
+        }
+    }
+
+    fun clearTpmsStateForTest(context: Context?) {
+        ownTpmsCache.clear()
+        learnedTpmsCache.clear()
+        tpmsIntelLoaded = false
+        context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit {
+            remove(KEY_OWN_TPMS_JSON)
+            remove(KEY_LEARNED_TPMS_JSON)
+        }
+    }
+
+    private fun tpmsGridCell500m(lat: Double, lon: Double): String =
+        "${(lat * 200.0).roundToInt()},${(lon * 200.0).roundToInt()}"
+
+    private fun tpmsGridCell400m(lat: Double, lon: Double): String =
+        "${(lat * 250.0).roundToInt()},${(lon * 250.0).roundToInt()}"
+
+    fun isOwnOrAmbientTpms(context: Context?, rawFacetKey: String): Boolean {
+        ensureTpmsIntelLoaded(context)
+        val k = canonicalTpmsFacetKey(rawFacetKey) ?: return false
+        val own = ownTpmsCache[k] ?: return false
+        return own.isOwnVehicle ||
+            own.soloGridCells.size >= OWN_TPMS_MIN_SOLO_CELLS ||
+            own.pairedEntityIds.size > OWN_TPMS_MAX_PAIRED_ENTITIES
+    }
+
+    /**
+     * Tracks background TPMS observations so the observer's own vehicle wheels (heard across >= 4 distinct ~500m grid
+     * cells when no nearby agent is present) are permanently excluded from agent attribution and Hub sharing.
+     */
+    fun observeTpmsAmbient(
+        context: Context?,
+        rawFacetKey: String,
+        lat: Double?,
+        lon: Double?,
+        hasNearbyAgent: Boolean,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        ensureTpmsIntelLoaded(context)
+        val k = canonicalTpmsFacetKey(rawFacetKey) ?: return
+        if (hasNearbyAgent || lat == null || lon == null) return
+        val cell = tpmsGridCell500m(lat, lon)
+        val prev = ownTpmsCache[k]
+        val nextCells = ((prev?.soloGridCells.orEmpty()) + cell)
+        if (prev != null && nextCells.size == prev.soloGridCells.size && prev.isOwnVehicle) return
+        val becameOwn = prev?.isOwnVehicle == true ||
+            nextCells.size >= OWN_TPMS_MIN_SOLO_CELLS ||
+            (prev?.pairedEntityIds?.size ?: 0) > OWN_TPMS_MAX_PAIRED_ENTITIES
+        ownTpmsCache[k] = OwnTpmsEntry(
+            facetKey = k,
+            soloGridCells = nextCells,
+            pairedEntityIds = prev?.pairedEntityIds.orEmpty(),
+            isOwnVehicle = becameOwn,
+            updatedAtMs = nowMs
+        )
+        if (becameOwn) {
+            learnedTpmsCache.remove(k)
+            confirmedEvidenceFacets.remove(k)
+        }
+        persistTpmsIntel(context)
+    }
+
+    fun recordTpmsAgentCorroboration(
+        context: Context?,
+        reading: org.tucsoncommunity.kokoho.sdr.Tpms.Reading,
+        entityUuid: String,
+        agency: KokohoAgency,
+        label: String,
+        lat: Double?,
+        lon: Double?,
+        witnessVerified: Boolean = false,
+        nowMs: Long = System.currentTimeMillis()
+    ): LearnedTpmsIntel? {
+        ensureTpmsIntelLoaded(context)
+        val k = reading.canonicalFacetKey
+        if (isOwnOrAmbientTpms(context, k)) return null
+        val normEntity = normalizeEntityId(entityUuid)
+
+        val prevOwn = ownTpmsCache[k]
+        val nextPaired = (prevOwn?.pairedEntityIds.orEmpty()) + normEntity
+        if (nextPaired.size > OWN_TPMS_MAX_PAIRED_ENTITIES) {
+            ownTpmsCache[k] = OwnTpmsEntry(
+                facetKey = k,
+                soloGridCells = prevOwn?.soloGridCells.orEmpty(),
+                pairedEntityIds = nextPaired,
+                isOwnVehicle = true,
+                updatedAtMs = nowMs
+            )
+            learnedTpmsCache.remove(k)
+            confirmedEvidenceFacets.remove(k)
+            persistTpmsIntel(context)
+            return null
+        }
+        ownTpmsCache[k] = OwnTpmsEntry(
+            facetKey = k,
+            soloGridCells = prevOwn?.soloGridCells.orEmpty(),
+            pairedEntityIds = nextPaired,
+            isOwnVehicle = false,
+            updatedAtMs = nowMs
+        )
+
+        val prev = learnedTpmsCache[k]
+        val cell400 = if (lat != null && lon != null) setOf(tpmsGridCell400m(lat, lon)) else emptySet()
+        val sameEntity = prev == null || prev.boundEntityUuid == normEntity || witnessVerified
+        val nextCells = if (sameEntity) (prev?.distinctGridCells.orEmpty()) + cell400 else cell400
+        val nextEncounters = when {
+            prev == null -> 1
+            !sameEntity -> 1
+            nowMs - prev.updatedAtMs >= TPMS_ENCOUNTER_GAP_MS -> prev.encounterCount + 1
+            else -> prev.encounterCount
+        }
+        val psiInt = reading.psi?.roundToInt() ?: prev?.lastPsi
+        val updated = LearnedTpmsIntel(
+            facetKey = k,
+            protocol = reading.protocol,
+            sensorId = reading.id.uppercase(java.util.Locale.US),
+            boundEntityUuid = if (sameEntity) (prev?.boundEntityUuid ?: normEntity) else normEntity,
+            agencyId = if (witnessVerified || prev == null) agency.id else prev.agencyId,
+            label = label.ifBlank { prev?.label.orEmpty().ifBlank { agency.friendlyLabel } },
+            lastPsi = psiInt,
+            distinctGridCells = nextCells,
+            encounterCount = nextEncounters,
+            colocatedHits = (prev?.colocatedHits ?: 0) + 1,
+            witnessVerified = witnessVerified || prev?.witnessVerified == true || (k in confirmedEvidenceFacets),
+            updatedAtMs = nowMs
+        )
+        learnedTpmsCache[k] = updated
+        if (witnessVerified) {
+            confirmedEvidenceFacets.add(k)
+        }
+        persistTpmsIntel(context)
+        return updated
+    }
+
+    fun isTpmsVerifiedAgentChassis(context: Context?, intel: LearnedTpmsIntel): Boolean {
+        if (isOwnOrAmbientTpms(context, intel.facetKey)) return false
+        return intel.witnessVerified ||
+            intel.encounterCount >= 2 ||
+            intel.distinctGridCells.size >= 2 ||
+            (intel.facetKey in confirmedEvidenceFacets)
+    }
+
+    fun lookupVerifiedAgentTpms(context: Context?, rawFacetKey: String): LearnedTpmsIntel? {
+        ensureTpmsIntelLoaded(context)
+        val k = canonicalTpmsFacetKey(rawFacetKey) ?: return null
+        if (isOwnOrAmbientTpms(context, k)) return null
+        val intel = learnedTpmsCache[k] ?: return null
+        return intel.takeIf { isTpmsVerifiedAgentChassis(context, it) }
+    }
+
+    fun hasVerifiedAgentTpms(context: Context?): Boolean {
+        ensureTpmsIntelLoaded(context)
+        return learnedTpmsCache.values.any { isTpmsVerifiedAgentChassis(context, it) }
+    }
+
+    private fun promoteWitnessTpmsForReport(
+        context: Context,
+        entityId: String,
+        agency: KokohoAgency,
+        report: WitnessReportRecord
+    ) {
+        ensureTpmsIntelLoaded(context)
+        var changed = false
+        for ((k, existing) in learnedTpmsCache) {
+            if (existing.boundEntityUuid == entityId && !isOwnOrAmbientTpms(context, k)) {
+                learnedTpmsCache[k] = existing.copy(
+                    agencyId = agency.id,
+                    witnessVerified = true,
+                    updatedAtMs = report.updatedAtMs
+                )
+                confirmedEvidenceFacets.add(k)
+                changed = true
+            }
+        }
+        val rLat = report.lat
+        val rLon = report.lon
+        for (entry in org.tucsoncommunity.kokoho.sdr.TpmsLog.current(report.updatedAtMs)) {
+            if (report.updatedAtMs - entry.lastSeen > 45_000L) continue
+            if (isOwnOrAmbientTpms(context, entry.facetKey)) continue
+            val obsLat = entry.lastLat ?: entry.firstLat
+            val obsLon = entry.lastLon ?: entry.firstLon
+            val closeEnough = if (rLat != null && rLon != null && obsLat != null && obsLon != null) {
+                KokohoPostureEngine.haversineMeters(rLat, rLon, obsLat, obsLon) <= 100.0
+            } else {
+                true
+            }
+            if (!closeEnough) continue
+            recordTpmsAgentCorroboration(
+                context = context,
+                reading = entry.reading,
+                entityUuid = entityId,
+                agency = agency,
+                label = agency.friendlyLabel,
+                lat = rLat ?: obsLat,
+                lon = rLon ?: obsLon,
+                witnessVerified = true,
+                nowMs = report.updatedAtMs
+            )
+            changed = true
+        }
+        if (changed) persistTpmsIntel(context)
+    }
+
+    private fun revokeTpmsForEntity(context: Context, normKey: String, normUuid: String?) {
+        ensureTpmsIntelLoaded(context)
+        val targets = setOfNotNull(normKey, normUuid)
+        val toRemove = learnedTpmsCache.values
+            .filter { it.boundEntityUuid in targets }
+            .map { it.facetKey }
+        for (k in toRemove) {
+            learnedTpmsCache.remove(k)
+            confirmedEvidenceFacets.remove(k)
+        }
+        if (toRemove.isNotEmpty()) persistTpmsIntel(context)
+    }
+
     fun lookupAssignedMacBlock(context: Context?, mac: String): LearnedMacBlock? {
         ensureLearnedIntelLoaded(context)
         val (oui, nic, _) = parseMacOuiAndNic(mac) ?: return null
@@ -2309,6 +2628,9 @@ object KokohoSignatures {
         if (facets.any { it.startsWith("hw:kit:mdt:", ignoreCase = true) }) {
             caps.add("Patrol MDT")
         }
+        if (facets.any { it.startsWith("hw:kit:tpms:", ignoreCase = true) }) {
+            caps.add("Vehicle TPMS")
+        }
         val combined = (facets + details).joinToString(" ").uppercase()
         val sanitizedBodycam = combined
             .replace("AXON NETWORKS", "")
@@ -2318,6 +2640,7 @@ object KokohoSignatures {
             .replace("HW:KIT:PRINTER:", "")
             .replace("HW:KIT:RADIO:", "")
             .replace("HW:KIT:MDT:", "")
+            .replace("HW:KIT:TPMS:", "")
         if ("Bodycam" !in caps && ("00:25:DF" in sanitizedBodycam || "D8:1F:65" in sanitizedBodycam || "FC:01:9E" in sanitizedBodycam || "00:1D:96" in sanitizedBodycam || "00:23:BD" in sanitizedBodycam || "BWCDEVICE" in sanitizedBodycam || "BODY_CAM" in sanitizedBodycam || "AXON" in sanitizedBodycam || "TASER" in sanitizedBodycam || "BODYCAM" in sanitizedBodycam || "WATCHGUARD" in sanitizedBodycam || "BODYWORN" in sanitizedBodycam)) {
             caps.add("Bodycam")
         }

@@ -332,6 +332,7 @@ object KokohoPostureEngine {
         localThreatCache.clear()
         lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
+        org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
         KokohoEntityLedger.clearAll()
         KokohoSignatures.clearWitnessAndConfirmedCacheInMemory()
         lastSharedAtByUuid.clear()
@@ -366,6 +367,7 @@ object KokohoPostureEngine {
         localThreatCache.clear()
         lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
+        org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
         cachedFallbackLocation = null
@@ -405,8 +407,9 @@ object KokohoPostureEngine {
 
     /** Clears transient local RF/P25 threats when the RTL-SDR hardware stops or is unplugged. */
     fun onSdrDisconnected() {
+        org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
         localThreatCache.entries.removeIf { (_, t) ->
-            t.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" }
+            t.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" || it.kind == "TPMS_CHASSIS" }
         }
         lastEvaluateNowMs = 0L
         latestSnapshot = null
@@ -565,6 +568,15 @@ object KokohoPostureEngine {
                     last.estDistanceM = estDistanceM
                     last.timestampMs = nowMs
                 } else {
+                    if (last != null &&
+                        nowMs - last.timestampMs >= 60_000L &&
+                        estDistanceM <= 350 &&
+                        haversineMeters(last.lat, last.lon, gpsLat, gpsLon) > 600.0
+                    ) {
+                        // Short-range mobile emitter relocated to a new scene (> 600m away after >= 60s): start fresh anchor.
+                        list.clear()
+                        triangulationCache.remove(uuid)
+                    }
                     list.add(SpatialSample(gpsLat, gpsLon, signalDb, estDistanceM, nowMs))
                     if (list.size > 32) list.removeAt(0)
                     geometryChanged = true
@@ -723,12 +735,16 @@ object KokohoPostureEngine {
                 val strongerPeak = cached == null || best.signalDb > cached.peakSignalDb + 2
                 val (anchorLat, anchorLon, settledRadiusM) = if (!strongerPeak && prevCenterLat != null && prevCenterLon != null) {
                     val shiftM = haversineMeters(prevCenterLat, prevCenterLon, anchorCandidateLat, anchorCandidateLon)
-                    val widenedRad = if (shiftM > max(40.0, prevRad * 0.70)) {
-                        max(convergedPeakRadiusM, min(prevRad + 25, (shiftM * 0.8).roundToInt()))
+                    if (shiftM > 450.0) {
+                        Triple(anchorCandidateLat, anchorCandidateLon, convergedPeakRadiusM)
                     } else {
-                        min(prevRad, convergedPeakRadiusM)
+                        val widenedRad = if (shiftM > max(40.0, prevRad * 0.70)) {
+                            max(convergedPeakRadiusM, min(prevRad + 25, (shiftM * 0.8).roundToInt()))
+                        } else {
+                            min(prevRad, convergedPeakRadiusM)
+                        }
+                        Triple(prevCenterLat, prevCenterLon, widenedRad)
                     }
-                    Triple(prevCenterLat, prevCenterLon, widenedRad)
                 } else {
                     Triple(anchorCandidateLat, anchorCandidateLon, convergedPeakRadiusM)
                 }
@@ -1888,6 +1904,16 @@ object KokohoPostureEngine {
             localRawObservations = localRawObservations
         )
 
+        evaluateLocalTpmsAgentCorroboration(
+            context = context,
+            nowMs = nowMs,
+            triDecayMs = triDecayMs,
+            enabled = enabled,
+            userLoc = userLoc,
+            evaluated = evaluated,
+            localRawObservations = localRawObservations
+        )
+
         if (KokohoSignatures.isAdsbEnabled(context)) {
             evaluateAdsbAircraft(
                 context = context,
@@ -2815,6 +2841,213 @@ object KokohoPostureEngine {
                 isFlagged = !isUnattributedCircling,
                 obsTimestampMs = seenAtMs
             )
+        }
+    }
+
+    private fun evaluateLocalTpmsAgentCorroboration(
+        context: Context,
+        nowMs: Long,
+        triDecayMs: Long,
+        enabled: Set<KokohoAgency>,
+        userLoc: android.location.Location?,
+        evaluated: MutableMap<String, EvaluatedThreat>,
+        localRawObservations: MutableList<RawSensorReportCandidate>
+    ) {
+        val closeGroundAgents = evaluated.values.filter { t ->
+            !t.isAircraft &&
+                !t.isDrone &&
+                t.agency != KokohoAgency.DRONE &&
+                t.agency != KokohoAgency.DHS_INTEROP &&
+                (lastHeardByLocalHardwareAtMs[t.uuid] ?: 0L).let { it > 0L && (nowMs - it) <= 25_000L } &&
+                t.estimatedDistanceM <= 180
+        }
+        if (closeGroundAgents.isNotEmpty()) {
+            org.tucsoncommunity.kokoho.sdr.SdrRadio.requestTpmsHarvest(nowMs)
+        }
+
+        val liveTpms = org.tucsoncommunity.kokoho.sdr.TpmsLog.current(nowMs)
+            .filter { nowMs - it.lastSeen <= 45_000L }
+        if (liveTpms.isEmpty()) return
+
+        val standaloneVerifiedByEntity = LinkedHashMap<String, MutableList<Pair<org.tucsoncommunity.kokoho.sdr.TpmsLog.Entry, KokohoSignatures.LearnedTpmsIntel>>>()
+
+        for (entry in liveTpms) {
+            val freshUserLoc = userLoc?.takeIf { abs(nowMs - entry.lastSeen) <= 5_000L }
+            val obsLat = entry.lastLat ?: entry.firstLat ?: freshUserLoc?.latitude
+            val obsLon = entry.lastLon ?: entry.firstLon ?: freshUserLoc?.longitude
+
+            KokohoSignatures.observeTpmsAmbient(
+                context = context,
+                rawFacetKey = entry.facetKey,
+                lat = obsLat,
+                lon = obsLon,
+                hasNearbyAgent = closeGroundAgents.isNotEmpty(),
+                nowMs = entry.lastSeen
+            )
+            if (KokohoSignatures.isOwnOrAmbientTpms(context, entry.facetKey)) continue
+
+            val colocatedCandidates = if (nowMs - entry.lastSeen <= 30_000L) {
+                closeGroundAgents.filter { t ->
+                    t.estimatedDistanceM <= 120 &&
+                        spatiallyCompatible(obsLat, obsLon, t.lat, t.lon, 120.0)
+                }
+            } else {
+                emptyList()
+            }
+
+            if (colocatedCandidates.size == 1) {
+                val target = evaluated[colocatedCandidates.single().uuid] ?: colocatedCandidates.single()
+                val wr = KokohoSignatures.getWitnessReport(context, target.uuid, approvedOnly = false)
+                val intel = KokohoSignatures.recordTpmsAgentCorroboration(
+                    context = context,
+                    reading = entry.reading,
+                    entityUuid = target.uuid,
+                    agency = target.agency,
+                    label = target.label,
+                    lat = obsLat ?: target.lat,
+                    lon = obsLon ?: target.lon,
+                    witnessVerified = KokohoSignatures.hasConfirmingReport(wr),
+                    nowMs = entry.lastSeen
+                )
+                if (intel != null && KokohoSignatures.isTpmsVerifiedAgentChassis(context, intel)) {
+                    val psiPart = entry.reading.psi?.let { " · ${it.roundToInt()} psi" }.orEmpty()
+                    val badge = EvidenceBadge(
+                        kind = "TPMS_CHASSIS",
+                        facetKey = entry.facetKey,
+                        detail = "Vehicle TPMS ${entry.reading.protocol} ${entry.reading.id}$psiPart",
+                        weight = 0.65,
+                        lastSeenMs = entry.lastSeen
+                    )
+                    val mergedBadges = (target.evidenceSources + badge).distinctBy { it.facetKey }
+                    val mergedCaps = (target.capabilities + "Vehicle TPMS").distinct()
+                    val updatedTarget = target.copy(
+                        classificationConfidence = min(99, max(target.classificationConfidence + 4, 92)),
+                        overallConfidence = ((min(99, max(target.classificationConfidence + 4, 92)) + target.spatialConfidence) / 2.0)
+                            .roundToInt().coerceIn(1, 99),
+                        evidenceSources = mergedBadges,
+                        updatedAtMs = max(target.updatedAtMs, entry.lastSeen),
+                        capabilities = mergedCaps
+                    )
+                    upsertAndFuseThreat(evaluated, updatedTarget)
+                    val targetPrimaryKey = target.hardwareIdentifier?.let { "hw:mac:$it" }
+                        ?: target.evidenceSources.firstOrNull()?.facetKey
+                    if (targetPrimaryKey != null) {
+                        for (idx in localRawObservations.indices) {
+                            if (localRawObservations[idx].facetKey == targetPrimaryKey) {
+                                val prevAdd = localRawObservations[idx].additionalFacets
+                                if (entry.facetKey !in prevAdd) {
+                                    localRawObservations[idx] = localRawObservations[idx].copy(
+                                        additionalFacets = prevAdd + entry.facetKey
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                continue
+            }
+
+            // No unambiguous active router/kit/RF signal right now: ONLY surface if this TPMS sensor has
+            // already graduated to verified agent chassis status (e.g. a radio-silent agent pass).
+            val verified = KokohoSignatures.lookupVerifiedAgentTpms(context, entry.facetKey) ?: continue
+            if (verified.agencyEnum !in enabled) continue
+            standaloneVerifiedByEntity.getOrPut(verified.boundEntityUuid) { mutableListOf() }.add(entry to verified)
+        }
+
+        for ((entityUuid, wheelItems) in standaloneVerifiedByEntity) {
+            val leadIntel = wheelItems.first().second
+            val agency = leadIntel.agencyEnum
+            val newestSeen = wheelItems.maxOf { it.first.lastSeen }
+            val peakSnr = wheelItems.maxOf { it.first.peakSnrDb }
+            val sampleWithLoc = wheelItems.firstOrNull { (it.first.lastLat ?: it.first.firstLat) != null }?.first
+                ?: wheelItems.first().first
+            val freshUserLoc = userLoc?.takeIf { abs(nowMs - newestSeen) <= 5_000L }
+            val obsLat = sampleWithLoc.lastLat ?: sampleWithLoc.firstLat ?: freshUserLoc?.latitude
+            val obsLon = sampleWithLoc.lastLon ?: sampleWithLoc.firstLon ?: freshUserLoc?.longitude
+
+            val rawEstDistM = when {
+                peakSnr >= 26 -> 30
+                peakSnr >= 18 -> 55
+                else -> 85
+            }
+            val tri = recordAndTriangulate(
+                uuid = entityUuid,
+                gpsLat = obsLat,
+                gpsLon = obsLon,
+                signalDb = peakSnr,
+                estDistanceM = rawEstDistM,
+                nowMs = newestSeen,
+                decayMs = triDecayMs,
+                userLat = userLoc?.latitude,
+                userLon = userLoc?.longitude,
+                evalNowMs = nowMs
+            )
+
+            val badges = wheelItems.map { (e, intel) ->
+                val psiVal = e.reading.psi?.roundToInt() ?: intel.lastPsi
+                val psiPart = psiVal?.let { " · $it psi" }.orEmpty()
+                EvidenceBadge(
+                    kind = "TPMS_CHASSIS",
+                    facetKey = e.facetKey,
+                    detail = "Corroborated ${agency.friendlyLabel} vehicle TPMS (${e.reading.protocol} ${e.reading.id}$psiPart)",
+                    weight = 0.85,
+                    lastSeenMs = e.lastSeen
+                )
+            }
+            val posture = when {
+                tri.estimatedDistanceM <= 250 -> PostureColor.RED
+                tri.estimatedDistanceM <= 600 -> PostureColor.ORANGE
+                else -> PostureColor.YELLOW
+            }
+            val classConf = if (wheelItems.any { it.second.witnessVerified } || wheelItems.size >= 2) 94 else 88
+            val spatConf = max(tri.spatialConfidence, 68)
+            val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+            val wheelSummary = wheelItems.joinToString(", ") { "${it.first.reading.protocol} ${it.first.reading.id}" }
+
+            val threat = EvaluatedThreat(
+                uuid = entityUuid,
+                trackUuid = entityUuid,
+                agency = agency,
+                label = agency.friendlyLabel,
+                posture = posture,
+                overallConfidence = combinedConf,
+                classificationConfidence = classConf,
+                spatialConfidence = spatConf,
+                estimatedDistanceM = tri.estimatedDistanceM,
+                uncertaintyRadiusM = tri.uncertaintyRadiusM.coerceAtMost(120),
+                bearingDeg = null,
+                closingVelocityMps = null,
+                recurrenceSummary = "${agency.friendlyLabel} Vehicle (TPMS $wheelSummary)",
+                evidenceSources = badges,
+                updatedAtMs = newestSeen,
+                lat = tri.centerLat,
+                lon = tri.centerLon,
+                isApproximatedPosition = tri.isApproximatedPosition,
+                isPinpointed = tri.isPinpointed,
+                hardwareIdentifier = badges.first().facetKey,
+                sightingCount = max(tri.sampleCount, wheelItems.maxOf { it.first.sightings }),
+                capabilities = listOf("Vehicle TPMS")
+            )
+            upsertAndFuseThreat(evaluated, threat)
+            if (obsLat != null && obsLon != null) {
+                localRawObservations += RawSensorReportCandidate(
+                    facetKey = badges.first().facetKey,
+                    rawLat = obsLat,
+                    rawLon = obsLon,
+                    signalDb = peakSnr.toDouble(),
+                    modality = "TPMS_CHASSIS",
+                    additionalFacets = badges.drop(1).map { it.facetKey },
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    propClass = "GROUND_DIRECT",
+                    uncertaintyRadiusM = tri.uncertaintyRadiusM.coerceAtMost(120).toDouble(),
+                    isDerived = tri.isApproximatedPosition,
+                    localSightings = threat.sightingCount,
+                    ssidHint = "${wheelItems.first().first.reading.protocol} TPMS",
+                    isFlagged = true,
+                    obsTimestampMs = newestSeen
+                )
+            }
         }
     }
 

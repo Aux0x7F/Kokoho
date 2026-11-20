@@ -67,7 +67,10 @@ object SdrRadio {
     private const val KNOWN_PPM = 100e-6       // a heard / announced frequency pair further apart than this is a different channel
     /** Tire sensors: tuned this far below the channel, a multiple of [Tpms.RATE] so the centre spike lands on a null. */
     private const val TPMS_OFFSET_HZ = 512_000L
-    private const val TPMS_DWELL_MS = 10_000L   // each band this long: a sensor sends about every 15-60 s while driving
+    private const val TPMS_TRIGGERED_SLICE_MS = 1_400L
+    private const val TPMS_OPPORTUNISTIC_SLICE_MS = 1_500L
+    private const val TPMS_TRIGGERED_COOLDOWN_MS = 60_000L
+    private const val TPMS_OPPORTUNISTIC_GAP_MS = 75_000L
     /** An FM station fills at least this much. */
     private const val FM_WIDTH_HZ = 100_000L
     private const val INPUT_OFFSET_HZ = 250_000L // the input this far above the tuned centre, clear of the DC spike
@@ -378,6 +381,20 @@ object SdrRadio {
     @Volatile var location: (() -> Pair<Double, Double>?)? = null
     /** Aircraft with a position, and addresses heard without one, every couple of seconds in ADS-B mode. */
     @Volatile var onAircraft: ((List<org.tucsoncommunity.kokoho.online.PoliceAircraft.Plane>, List<String>) -> Unit)? = null
+    /** Sparing TPMS callback: silent corroboration and post-verification agent chassis matching only. */
+    @Volatile var onTpms: ((Tpms.Reading, Double) -> Unit)? = null
+    /** True when moving (>= ~10 mph) or when corroborated agent TPMS signatures exist to watch for. */
+    @Volatile var shouldOpportunisticTpmsProbe: (() -> Boolean)? = null
+    @Volatile private var requestedTpmsHarvestUntilMs = 0L
+    @Volatile private var lastTpmsSliceAtMs = 0L
+    private var nextTpmsBandIdx = 0
+
+    fun requestTpmsHarvest(nowMs: Long = System.currentTimeMillis()) {
+        val until = nowMs + 20_000L
+        if (until > requestedTpmsHarvestUntilMs) {
+            requestedTpmsHarvestUntilMs = until
+        }
+    }
 
     fun isSdr(d: UsbDevice) = RtlSdr.isRtlSdr(d.vendorId, d.productId) || HackRf.isHackRf(d.vendorId, d.productId)
     fun labelOf(d: UsbDevice) = if (HackRf.isHackRf(d.vendorId, d.productId)) "HackRF" else "RTL-SDR"
@@ -991,8 +1008,86 @@ object SdrRadio {
                     noise.entries.joinToString { (hz, v) -> "%.0f MHz %.0f dB".format(hz / 1e6, v.first / v.second) })
                 noise.clear()
             }
+            if (watch.sweeps >= 4 && maybeRunSparingTpmsSlice(sdr, name)) {
+                sweepStart = System.currentTimeMillis()
+            }
         }
         org.tucsoncommunity.kokoho.util.HwLogs.sdr.log("$deviceLabel: radio sweep stopped after ${watch.sweeps} sweeps")
+    }
+
+    private fun maybeRunSparingTpmsSlice(sdr: SdrDevice, name: String): Boolean {
+        val cb = onTpms ?: return false
+        if (SdrWaterfall.listening || Mode.SWEEP !in active || halted || sdr.lost || !keeps(Mode.SWEEP)) return false
+        val now = System.currentTimeMillis()
+        val triggered = now <= requestedTpmsHarvestUntilMs && (now - lastTpmsSliceAtMs) >= TPMS_TRIGGERED_COOLDOWN_MS
+        val opportunistic = !triggered &&
+            (now - lastTpmsSliceAtMs) >= TPMS_OPPORTUNISTIC_GAP_MS &&
+            (shouldOpportunisticTpmsProbe?.invoke() == true)
+        if (!triggered && !opportunistic) return false
+
+        lastTpmsSliceAtMs = now
+        if (triggered) requestedTpmsHarvestUntilMs = 0L
+
+        val slices = if (triggered) {
+            Tpms.CHANNELS.map { it to TPMS_TRIGGERED_SLICE_MS }
+        } else {
+            val idx = (nextTpmsBandIdx++ and 0x7fffffff) % Tpms.CHANNELS.size
+            listOf(Tpms.CHANNELS[idx] to TPMS_OPPORTUNISTIC_SLICE_MS)
+        }
+
+        val streamBuf = ByteArray(STREAM_XFER)
+        var gain = AdsbGain.STEPS.last()
+        var gainAt = 0L
+        var totalBursts = 0
+        var totalFrames = 0
+        try {
+            sdr.setSampleRate(SAMPLE_RATE)
+            sdr.setGain(gain)
+            sdr.resetBuffer()
+            for ((hz, dwellMs) in slices) {
+                if (halted || sdr.lost || !keeps(Mode.SWEEP) || SdrWaterfall.listening) break
+                if (!sdr.tune(hz - TPMS_OFFSET_HZ)) continue
+                sdr.resetBuffer()
+                val demod = Tpms.Demod(sdr.sampleRate, TPMS_OFFSET_HZ.toDouble()) { reading, snrDb ->
+                    cb(reading, snrDb)
+                }
+                val until = System.currentTimeMillis() + dwellMs
+                var fails = 0
+                while (!halted && !sdr.lost && keeps(Mode.SWEEP) && !SdrWaterfall.listening && System.currentTimeMillis() < until) {
+                    val n = sdr.read(streamBuf)
+                    if (n <= 0) {
+                        if (++fails >= STALL_CHUNKS) {
+                            if (gone(name)) break
+                            sdr.resetBuffer()
+                            fails = 0
+                        }
+                        continue
+                    }
+                    fails = 0
+                    val stepNow = System.currentTimeMillis()
+                    if (P25Hunt.clips(streamBuf, n) * 200 > n && gain > AdsbGain.STEPS.first() && stepNow - gainAt >= 300L) {
+                        gain = P25Hunt.lowerGain(gain)
+                        sdr.setGain(gain)
+                        gainAt = stepNow
+                    }
+                    demod.feed(streamBuf, n / 2)
+                }
+                totalBursts += demod.bursts
+                totalFrames += demod.frames
+            }
+        } finally {
+            runCatching {
+                sdr.setSampleRate(SAMPLE_RATE)
+                sdr.setGain(GAIN_TENTHS_DB)
+                sdr.resetBuffer()
+            }
+        }
+        if (totalFrames > 0 || logAll) {
+            org.tucsoncommunity.kokoho.util.HwLogs.sdr.log(
+                "$deviceLabel: TPMS ${if (triggered) "agent-harvest" else "probe"} slice: $totalBursts bursts, $totalFrames frames decoded, gain ${gain / 10.0} dB"
+            )
+        }
+        return true
     }
 
     /** What the sweep covers: the TETRA band only while no extra dongle watches it. */

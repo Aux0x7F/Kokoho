@@ -615,6 +615,13 @@ class ScanForegroundService : Service() {
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onP25Position = { pos, hz, nac -> pipeline.post { onP25Position(pos, hz, nac) } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.location = { (lastLocation ?: lastFix)?.let { it.latitude to it.longitude } }
         org.tucsoncommunity.kokoho.sdr.SdrRadio.onAircraft = { planes, unlocated -> onlineWatch.localAircraft(planes, unlocated) }
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.onTpms = { reading, snrDb -> pipeline.post { onTpmsReading(reading, snrDb) } }
+        org.tucsoncommunity.kokoho.sdr.SdrRadio.shouldOpportunisticTpmsProbe = {
+            Prefs.categoryEnabled(this, Category.RADIO) && (
+                ((lastLocation ?: lastFix)?.let { if (it.hasSpeed()) it.speed else 0f } ?: 0f) >= 4.5f ||
+                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasVerifiedAgentTpms(this)
+                )
+        }
         if (sdrModes.isNotEmpty() || radioOn) {
             // Load multi-MB reference tables & watched frequencies off the Main UI Thread so launch never drops frames.
             serviceScope.launch(Dispatchers.IO) {
@@ -1995,6 +2002,25 @@ class ScanForegroundService : Service() {
         val hit = Hit(Category.RADIO, label, e.confidence, detail, "SDR direct/mobile tactical signature")
         val spoken = if (Prefs.radioSpeakFreq(this)) "Radio ${spokenMhz(e.freqHz)}, $name" else "${resolvedAgency.friendlyLabel} radio nearby"
         radioDetection(hit, "RADIO " + e.mhz + " MHz", e.snrDb, now, "radio:" + e.freqHz, spoken, e.confidence >= threshold && !quiet, via)
+    }
+
+    /**
+     * Silent TPMS ingestion: never emits raw tire alerts or map rows. Feeds TpmsLog so KokohoPostureEngine
+     * can exclude the observer's own wheels, corroborate colocated agent vehicles, and surface verified
+     * agent vehicles when they later pass radio-silent.
+     */
+    private fun onTpmsReading(reading: org.tucsoncommunity.kokoho.sdr.Tpms.Reading, snrDb: Double) {
+        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        val now = System.currentTimeMillis()
+        val geo = (lastLocation ?: lastFix)?.takeIf { usableForPlacing(it) }?.let { placeAt(now, it) }
+        org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(reading, snrDb, now, geo?.lat, geo?.lon)
+        val verified = org.tucsoncommunity.kokoho.posture.KokohoSignatures.lookupVerifiedAgentTpms(this, reading.canonicalFacetKey)
+        if (verified != null) {
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this, now)
+            NotificationHelper.updateServiceNotification(this)
+        } else if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isSharingActive(this)) {
+            maybeEvaluatePostureForSharing(now)
+        }
     }
 
     @Volatile private var lastPostureShareEvalAt = 0L

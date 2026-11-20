@@ -1831,6 +1831,186 @@ class KokohoTest {
         }
     }
 
+    @Test
+    fun v1315Next2TpmsAgentCorroborationOwnCarExclusionAndZeroRawMapClutter() {
+        val ctx: android.content.Context = org.robolectric.RuntimeEnvironment.getApplication()
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        KokohoSignatures.clearTpmsStateForTest(ctx)
+        org.tucsoncommunity.kokoho.service.DeviceRegistry.clear()
+        RadioLog.clear()
+        org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+
+        val t0 = 1_795_160_000_000L
+        val idWifi = org.tucsoncommunity.kokoho.detect.DeviceIntel.Identity("WiFi access point", emptyList())
+        val ownTire = org.tucsoncommunity.kokoho.sdr.Tpms.Reading("Ford", "00112233", 240.0, 25.0)
+        val civilianNeighborTire = org.tucsoncommunity.kokoho.sdr.Tpms.Reading("Toyota", "AABBCCDD", 230.0, 26.0)
+        val cbpWheelFrontLeft = org.tucsoncommunity.kokoho.sdr.Tpms.Reading("Schrader", "7F4E11A", 345.0, 31.0) // ~50 PSI heavy SUV
+        val cbpWheelRearRight = org.tucsoncommunity.kokoho.sdr.Tpms.Reading("Schrader", "7F4E11B", 345.0, 31.0)
+
+        try {
+            // 1. Raw unverified TPMS sensors alone MUST produce ZERO Map dots, ZERO Monitor threats, and ZERO notifications!
+            val startLoc = android.location.Location("gps").apply {
+                latitude = 32.1920
+                longitude = -110.8560
+                time = t0
+            }
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(startLoc)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(ownTire, 24.0, t0, 32.1920, -110.8560)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(civilianNeighborTire, 22.0, t0, 32.1920, -110.8560)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelFrontLeft, 25.0, t0, 32.1920, -110.8560)
+
+            val rawOnlySnap = KokohoPostureEngine.evaluate(ctx, t0)
+            assertEquals("Raw TPMS without corroborated agent identity must stay GREEN", PostureColor.GREEN, rawOnlySnap.color)
+            assertTrue("Raw TPMS must NEVER appear in activeThreats", rawOnlySnap.activeThreats.isEmpty())
+            assertTrue("Raw TPMS must NEVER appear in mapThreats", rawOnlySnap.mapThreats.isEmpty())
+            assertEquals(
+                "No threats detected" to null,
+                org.tucsoncommunity.kokoho.util.NotificationHelper.currentPostureSummary(ctx, t0)
+            )
+
+            // 2. Observer drives across 4 solo ~500m grid spots -> own car's tire (`Ford:00112233`) is auto-excluded!
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+            for (step in 1..4) {
+                val ts = t0 + step * 30_000L
+                val lat = 32.1920 + step * 0.008 // ~890m per step
+                val loc = android.location.Location("gps").apply {
+                    latitude = lat
+                    longitude = -110.8560
+                    time = ts
+                }
+                org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(loc)
+                org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(ownTire, 28.0, ts, lat, -110.8560)
+                KokohoPostureEngine.evaluate(ctx, ts)
+            }
+            assertTrue(
+                "Observer's own vehicle TPMS must be auto-excluded after >= 4 solo grid cells",
+                KokohoSignatures.isOwnOrAmbientTpms(ctx, ownTire.canonicalFacetKey)
+            )
+
+            // 3. Encounter 1 with an active CBP Cradlepoint R920 SUV (`00:30:44:D0:6C:04`):
+            //    - Own tire is ignored even right next to CBP SUV.
+            //    - Civilian neighbor tire seen ONLY at this 1 red light (`encounterCount == 1`, `1` spot) is NOT yet verified!
+            val enc1Ts = t0 + 5 * 60_000L
+            val enc1Lat = 32.13428
+            val enc1Lon = -110.88491
+            val enc1Loc = android.location.Location("gps").apply {
+                latitude = enc1Lat
+                longitude = enc1Lon
+                time = enc1Ts
+            }
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(enc1Loc)
+            val enc1Geo = org.tucsoncommunity.kokoho.service.DeviceRegistry.GeoSample(enc1Ts, enc1Lat, enc1Lon)
+            org.tucsoncommunity.kokoho.service.DeviceRegistry.report(
+                org.tucsoncommunity.kokoho.detect.Advert(
+                    mac = "00:30:44:D0:6C:04",
+                    source = org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI,
+                    rssi = -56,
+                    name = "R920-c02-5g",
+                    wifi = org.tucsoncommunity.kokoho.detect.Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                    timestamp = enc1Ts
+                ),
+                emptyList(), idWifi, "Cradlepoint", null, enc1Geo, enc1Ts, here = enc1Geo
+            )
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(ownTire, 29.0, enc1Ts, enc1Lat, enc1Lon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(civilianNeighborTire, 21.0, enc1Ts, enc1Lat, enc1Lon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelFrontLeft, 26.0, enc1Ts, enc1Lat, enc1Lon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelRearRight, 25.0, enc1Ts, enc1Lat, enc1Lon)
+            KokohoPostureEngine.evaluate(ctx, enc1Ts)
+
+            assertNull(
+                "Own-car tire must never bind to CBP SUV",
+                KokohoSignatures.lookupVerifiedAgentTpms(ctx, ownTire.canonicalFacetKey)
+            )
+            assertNull(
+                "Single-spot traffic-light co-occurrence must NOT prematurely verify a tire as an agent",
+                KokohoSignatures.lookupVerifiedAgentTpms(ctx, civilianNeighborTire.canonicalFacetKey)
+            )
+            assertNull(
+                "CBP SUV tires after only 1 unconfirmed encounter must wait for corroboration",
+                KokohoSignatures.lookupVerifiedAgentTpms(ctx, cbpWheelFrontLeft.canonicalFacetKey)
+            )
+
+            // 4. Encounter 2 (20 minutes later, 2 km away) with the SAME CBP R920 SUV + its 2 Schrader wheels (no civilian neighbor):
+            //    Both CBP wheels graduate to verified agent chassis status, while civilianNeighborTire stays unverified!
+            val enc2Ts = enc1Ts + 20 * 60_000L
+            val enc2Lat = 32.15500
+            val enc2Lon = -110.88491
+            val enc2Loc = android.location.Location("gps").apply {
+                latitude = enc2Lat
+                longitude = enc2Lon
+                time = enc2Ts
+            }
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(enc2Loc)
+            val enc2Geo = org.tucsoncommunity.kokoho.service.DeviceRegistry.GeoSample(enc2Ts, enc2Lat, enc2Lon)
+            org.tucsoncommunity.kokoho.service.DeviceRegistry.report(
+                org.tucsoncommunity.kokoho.detect.Advert(
+                    mac = "00:30:44:D0:6C:04",
+                    source = org.tucsoncommunity.kokoho.detect.Advert.Source.WIFI,
+                    rssi = -55,
+                    name = "R920-c02-5g",
+                    wifi = org.tucsoncommunity.kokoho.detect.Advert.WifiInfo(5180, "[WPA2-PSK-CCMP][ESS]", null, emptyList(), client = false),
+                    timestamp = enc2Ts
+                ),
+                emptyList(), idWifi, "Cradlepoint", null, enc2Geo, enc2Ts, here = enc2Geo
+            )
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelFrontLeft, 27.0, enc2Ts, enc2Lat, enc2Lon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelRearRight, 26.0, enc2Ts, enc2Lat, enc2Lon)
+            val enc2Snap = KokohoPostureEngine.evaluate(ctx, enc2Ts)
+
+            assertNotNull("CBP front-left wheel must now be verified", KokohoSignatures.lookupVerifiedAgentTpms(ctx, cbpWheelFrontLeft.canonicalFacetKey))
+            assertNotNull("CBP rear-right wheel must now be verified", KokohoSignatures.lookupVerifiedAgentTpms(ctx, cbpWheelRearRight.canonicalFacetKey))
+            assertNull("Civilian neighbor from Encounter 1 must remain unverified", KokohoSignatures.lookupVerifiedAgentTpms(ctx, civilianNeighborTire.canonicalFacetKey))
+            assertTrue(
+                "Corroborated CBP entity should carry Vehicle TPMS capability",
+                enc2Snap.activeThreats.single { it.agency == KokohoAgency.DHS_CBP }.capabilities.contains("Vehicle TPMS")
+            )
+
+            // 5. Radio-Silent Pass (4 hours later across town, Golf Links U-turn scenario):
+            //    CBP SUV has Wi-Fi OFF, BLE OFF, and radio silent - ONLY its 2 spinning Schrader tires + civilianNeighborTire are heard!
+            //    -> Must surface 1 SINGLE DHS_CBP agent threat (fusing both wheels into 1 unit, ZERO civilian tire clutter)!
+            org.tucsoncommunity.kokoho.service.DeviceRegistry.clear()
+            RadioLog.clear()
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+            KokohoPostureEngine.clearLocalState() // Note: clearLocalState clears RAM; persisted learned_tpms_v1 reloads from SharedPreferences!
+
+            val silentPassTs = enc2Ts + 4 * 3_600_000L
+            val golfLinksLat = 32.19208
+            val golfLinksLon = -110.85639
+            val golfLinksLoc = android.location.Location("gps").apply {
+                latitude = golfLinksLat
+                longitude = golfLinksLon
+                time = silentPassTs
+            }
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(golfLinksLoc)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(civilianNeighborTire, 24.0, silentPassTs, golfLinksLat, golfLinksLon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelFrontLeft, 27.0, silentPassTs, golfLinksLat, golfLinksLon)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(cbpWheelRearRight, 26.0, silentPassTs, golfLinksLat, golfLinksLon)
+
+            val silentSnap = KokohoPostureEngine.evaluate(ctx, silentPassTs)
+            assertEquals("Radio-silent corroborated CBP SUV must trigger RED close-range agent posture", PostureColor.RED, silentSnap.color)
+            assertEquals("Both wheels of the CBP SUV must fuse into 1 single agent unit (zero per-tire clutter)", 1, silentSnap.activeThreats.size)
+            assertEquals(1, silentSnap.mapThreats.size)
+            val silentCbp = silentSnap.activeThreats.single()
+            assertEquals(KokohoAgency.DHS_CBP, silentCbp.agency)
+            assertTrue(silentCbp.capabilities.contains("Vehicle TPMS"))
+            assertEquals("Both corroborated wheel facets must be attached to the single CBP unit", 2, silentCbp.evidenceSources.count { it.kind == "TPMS_CHASSIS" })
+        } finally {
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(null)
+            org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+            KokohoSignatures.clearTpmsStateForTest(ctx)
+            KokohoHubClient.clearCachedObjects()
+            KokohoPostureEngine.clearLocalState()
+            org.tucsoncommunity.kokoho.service.DeviceRegistry.clear()
+            KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.DHS_AGENCIES.toSet())
+        }
+    }
+
     private fun renderViewToPng(view: View, widthPx: Int, heightPx: Int, bgColor: Int, fileName: String) {
         val wSpec = View.MeasureSpec.makeMeasureSpec(widthPx, View.MeasureSpec.EXACTLY)
         val hSpec = View.MeasureSpec.makeMeasureSpec(heightPx, View.MeasureSpec.EXACTLY)
