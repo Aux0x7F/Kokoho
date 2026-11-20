@@ -266,8 +266,9 @@ class KokohoTest {
             """.trimIndent()
         )
         val noFixSnap = KokohoPostureEngine.evaluate(activity, 1794373000000L)
-        assertEquals(PostureColor.YELLOW, noFixSnap.color)
-        assertTrue(noFixSnap.primaryThreat!!.estimatedDistanceM >= 5000)
+        assertEquals(PostureColor.GREEN, noFixSnap.color)
+        assertTrue(noFixSnap.activeThreats.isEmpty())
+        assertTrue(noFixSnap.mapThreats.single().estimatedDistanceM >= 5000)
         KokohoHubClient.clearCachedObjects()
         KokohoPostureEngine.clearLocalState()
 
@@ -1173,8 +1174,12 @@ class KokohoTest {
         RadioLog.observe(org.tucsoncommunity.kokoho.sdr.RadioWatch.Event(169_162_500L, 26, sharedBand, 80), "AIR 4", 3, farTime - 2_000L, farLat, farLon)
 
         val highwaySnap = KokohoPostureEngine.evaluate(ctx, farTime)
-        val passedSheriff = highwaySnap.activeThreats.firstOrNull { it.agency == KokohoAgency.SHERIFF }
+        val passedSheriff = highwaySnap.mapThreats.firstOrNull { it.agency == KokohoAgency.SHERIFF }
         assertNotNull("Passed stationary Sheriff unit should remain known on map behind car", passedSheriff)
+        assertTrue(
+            "Passed stationary Sheriff unit >3km behind car must drop off Monitor/Notifications",
+            highwaySnap.activeThreats.none { it.agency == KokohoAgency.SHERIFF }
+        )
         val driftFromPassM = KokohoPostureEngine.haversineMeters(passLat, passLon, passedSheriff!!.lat!!, passedSheriff.lon!!)
         assertTrue("Passed stationary unit must stay locked within 15m of pass point, drifted $driftFromPassM m", driftFromPassM <= 15.0)
         assertTrue("Distance to passed stationary unit must grow > 2800m behind car, got ${passedSheriff.estimatedDistanceM}", passedSheriff.estimatedDistanceM > 2800)
@@ -1682,6 +1687,147 @@ class KokohoTest {
             org.tucsoncommunity.kokoho.online.PoliceAircraft.latestAt = 0L
             org.robolectric.Shadows.shadowOf(lm).setLastKnownLocation(android.location.LocationManager.GPS_PROVIDER, null)
             KokohoPostureEngine.clearLocalState()
+        }
+    }
+
+    @Test
+    fun v1315MonitorProximity3hWindowAndFieldLapFixes() {
+        val ctx: android.content.Context = org.robolectric.RuntimeEnvironment.getApplication()
+        KokohoSignatures.ensureLoaded(ctx)
+        KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        org.tucsoncommunity.kokoho.service.DeviceRegistry.clear()
+        RadioLog.clear()
+        KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
+        KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
+
+        val baseMs = 1_795_148_000_000L
+        val userLoc = android.location.Location("gps").apply {
+            latitude = 32.2226
+            longitude = -110.9747
+            time = baseMs
+        }
+        org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(userLoc)
+        try {
+            // 1. User-relative Monitor & Notification gate:
+            //    A detection 5 miles (~8.05 km) north of the user stays on the Map, NEVER triggers Monitor or Notifications!
+            KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.HOURS_24)
+            val fiveMilesNorthLat = 32.2226 + (8050.0 / 111_132.0)
+            KokohoHubClient.ingestThreatObjectJson(
+                """
+                {
+                  "uuid": "550e8400-e29b-41d4-a716-446655440500",
+                  "track_uuid": "550e8400-e29b-41d4-a716-446655440500",
+                  "updated_at_ms": $baseMs,
+                  "confidence": { "overall": 0.92, "classification": 0.95, "spatial": 0.88, "temporal_freshness": 1.0 },
+                  "location": { "lat": $fiveMilesNorthLat, "lon": -110.9747, "uncertainty_radius_m": 120.0, "h3_res8": 614259430555648001, "propagation_class": "GROUND_DIRECT" },
+                  "classification": { "master_group": "DHS", "category": "DHS_ICE", "label": "ICE ERO", "recurrence_summary": "5mi away unit", "evidence_sources": [{ "kind": "WIFI_BLE_OUI", "facet_key": "hw:mac:00:30:44:AA:BB:55", "detail": "Remote router", "weight": 0.90, "last_seen_ms": $baseMs }] }
+                }
+                """.trimIndent()
+            )
+            val fiveMiSnap = KokohoPostureEngine.evaluate(ctx, baseMs)
+            assertEquals("5-mile-away detection must keep Monitor GREEN", PostureColor.GREEN, fiveMiSnap.color)
+            assertTrue("5-mile-away detection must not enter Monitor activeThreats", fiveMiSnap.activeThreats.isEmpty())
+            assertTrue("5-mile-away detection must still appear on Map", fiveMiSnap.mapThreats.any { it.uuid == "550e8400-e29b-41d4-a716-446655440500" })
+            assertEquals(
+                "5-mile-away detection must not trigger persistent notification",
+                "No threats detected" to null,
+                org.tucsoncommunity.kokoho.util.NotificationHelper.currentPostureSummary(ctx, baseMs)
+            )
+
+            // 2. 3-hour Monitor/Notification window with RED <= 30m and ORANGE suppression for 30m..3h
+            //    (prevents driving through a past detection from going ORANGE -> RED -> ORANGE, even when Map window is 30m!)
+            KokohoHubClient.clearCachedObjects()
+            KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+            KokohoHubClient.ingestThreatObjectJson(
+                """
+                {
+                  "uuid": "550e8400-e29b-41d4-a716-446655440300",
+                  "track_uuid": "550e8400-e29b-41d4-a716-446655440300",
+                  "updated_at_ms": $baseMs,
+                  "confidence": { "overall": 0.94, "classification": 0.96, "spatial": 0.90, "temporal_freshness": 1.0 },
+                  "location": { "lat": 32.2226, "lon": -110.9747, "uncertainty_radius_m": 60.0, "h3_res8": 614259430555648001, "propagation_class": "GROUND_DIRECT" },
+                  "classification": { "master_group": "DHS", "category": "DHS_CBP", "label": "CBP", "recurrence_summary": "Past detection spot", "evidence_sources": [{ "kind": "WIFI_BLE_OUI", "facet_key": "hw:mac:00:30:44:CC:DD:11", "detail": "R920", "weight": 0.92, "last_seen_ms": $baseMs }] }
+                }
+                """.trimIndent()
+            )
+            // a) At 10 minutes (<= 30m) right at user location (0m): RED
+            val at10m = baseMs + 10 * 60_000L
+            val snap10m = KokohoPostureEngine.evaluate(ctx, at10m)
+            assertEquals("Within 30m, close-range detection must reach RED", PostureColor.RED, snap10m.color)
+
+            // b) At 45 minutes (> 30m, <= 3h) driving directly through 0m: capped at ORANGE (never RED!), while 30m Map hides it
+            val at45m = baseMs + 45 * 60_000L
+            val snap45m = KokohoPostureEngine.evaluate(ctx, at45m)
+            assertEquals("Driving through a 45m-old detection must be capped at ORANGE (never RED)", PostureColor.ORANGE, snap45m.color)
+            assertTrue("30m Map window must still hide 45m-old detection", snap45m.mapThreats.isEmpty())
+            assertTrue(
+                "Notification must reflect proximate 45m-old CBP detection within 3h window",
+                org.tucsoncommunity.kokoho.util.NotificationHelper.currentPostureSummary(ctx, at45m).first.startsWith("CBP")
+            )
+
+            // c) At 2h 45m (<= 3h) driving directly through 0m: still capped at ORANGE
+            val at165m = baseMs + 165 * 60_000L
+            val snap165m = KokohoPostureEngine.evaluate(ctx, at165m)
+            assertEquals("At 2h 45m, driving through past detection stays capped at ORANGE", PostureColor.ORANGE, snap165m.color)
+
+            // d) At 3h 05m (> 3h) driving directly through 0m: excluded from Monitor and Notification (GREEN)
+            val at185m = baseMs + 185 * 60_000L
+            val snap185m = KokohoPostureEngine.evaluate(ctx, at185m)
+            assertEquals("Past 3 hours, Monitor must drop to GREEN", PostureColor.GREEN, snap185m.color)
+            assertEquals(
+                "Past 3 hours, Notification must clear to No threats detected",
+                "No threats detected" to null,
+                org.tucsoncommunity.kokoho.util.NotificationHelper.currentPostureSummary(ctx, at185m)
+            )
+
+            // 3. Valencia McDonald's & commercial Inseego FWA ('CrystalMT' 18:EE:86:41:88:0C) suppression vs real Cradlepoint R920
+            for (ssid in listOf("McDonalds Free WiFi", "McD-Crew", "eBOS", "CrystalMT", "ShopBusiness5G")) {
+                assertNull(
+                    "Commercial/McDonald's SSID '$ssid' on Inseego 18:EE:86 must be suppressed",
+                    KokohoSignatures.matchOuiOrSsid("18:EE:86:41:88:0C", ssid, "Inseego")
+                )
+            }
+            assertNull(
+                "McDonald's failover SSID on Cradlepoint must be suppressed",
+                KokohoSignatures.matchOuiOrSsid("00:30:44:AA:11:22", "McDonalds Free WiFi", "Cradlepoint")
+            )
+            assertEquals(
+                "Hidden-SSID Inseego router must still match CBP",
+                KokohoAgency.DHS_CBP,
+                KokohoSignatures.matchOuiOrSsid("18:EE:86:AA:BB:CC", null, "Inseego")?.first
+            )
+            assertEquals(
+                "Real Cradlepoint R920-c02-5g from Valencia return leg must match CBP",
+                KokohoAgency.DHS_CBP,
+                KokohoSignatures.matchOuiOrSsid("00:30:44:D0:6C:04", "R920-c02-5g", "Cradlepoint")?.first
+            )
+
+            // 4. Close-range Federal VHF bursts from CBP U-turn & Davis-Monthan Sector HQ (171.3500 MHz @ 49-66 dB, 169.5875 MHz @ 47-49 dB)
+            //    match DHS_INTEROP while VA hospital paging (167.8625 MHz) & DoD trunking (408.5750 MHz) stay suppressed!
+            val dhsSet = KokohoAgency.DHS_AGENCIES.toSet()
+            assertEquals(
+                KokohoAgency.DHS_INTEROP,
+                KokohoSignatures.matchCloseRangeFederalBand(171_350_000L, 49, enabledAgencies = dhsSet)?.agencyEnum
+            )
+            assertEquals(
+                KokohoAgency.DHS_INTEROP,
+                KokohoSignatures.matchCloseRangeFederalBand(169_587_500L, 47, enabledAgencies = dhsSet)?.agencyEnum
+            )
+            assertNull(
+                "Southern Arizona VA hospital paging 167.8625 MHz must stay suppressed even with DHS_INTEROP enabled",
+                KokohoSignatures.matchCloseRangeFederalBand(167_862_500L, 48, enabledAgencies = dhsSet)
+            )
+            assertNull(
+                "Davis-Monthan DoD UHF trunk channel 408.5750 MHz must stay suppressed even with DHS_INTEROP enabled",
+                KokohoSignatures.matchCloseRangeFederalBand(408_575_000L, 50, enabledAgencies = dhsSet)
+            )
+        } finally {
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(null)
+            KokohoHubClient.clearCachedObjects()
+            KokohoPostureEngine.clearLocalState()
+            KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.MIN_30)
+            KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.DHS_AGENCIES.toSet())
         }
     }
 

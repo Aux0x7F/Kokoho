@@ -151,8 +151,17 @@ object KokohoSignatures {
     private const val KEY_WITNESS_REPORTS_JSON = "witness_reports_json"
     private const val ASSET_FILE = "kokoho_signatures.json"
 
-    /** Monitor view active alert window: 3 minutes. */
-    const val MONITOR_ACTIVE_WINDOW_MS = 3 * 60_000L
+    /** Monitor and notification active alert window: 3 hours. */
+    const val MONITOR_ACTIVE_WINDOW_MS = 3 * 3_600_000L
+
+    /** Maximum detection age at which Monitor/Notification posture can reach RED (30 minutes); 30m..3h is capped at ORANGE. */
+    const val MONITOR_RED_MAX_AGE_MS = 30 * 60_000L
+
+    fun capMonitorPostureByAge(posture: PostureColor, ageMs: Long): PostureColor {
+        if (ageMs > MONITOR_ACTIVE_WINDOW_MS) return PostureColor.GREEN
+        if (ageMs > MONITOR_RED_MAX_AGE_MS && posture == PostureColor.RED) return PostureColor.ORANGE
+        return posture
+    }
 
     /** Map view solid opacity window (default 30 min) and linear fade window (+2 hours = 120 min). */
     const val DEFAULT_DECAY_MINUTES = 30
@@ -1271,10 +1280,9 @@ object KokohoSignatures {
     /**
      * Matches close-range Federal / Tactical Interop radio transmissions (`DHS_INTEROP`) when not already
      * matched to a specific agency channel in `rfChannels`:
-     *  - NTIA Federal VHF (`162.025–173.9875 MHz`, excluding NOAA Weather `162.400–162.550 MHz`) or
-     *    NTIA Federal UHF (`406.125–419.9875 MHz`) with `snrDb >= 32`
-     *  - High-SNR close-range VHF (`151.0–159.475 MHz`) or UHF (`451.0–469.9875 MHz`, excluding FRS `462.550–462.725` / `467.550–467.725`)
-     *    tactical handheld/mobile transmissions with `snrDb >= 36`
+     *  - NTIA Federal VHF (`162.025-173.9875 MHz`, excluding NOAA Weather `162.400-162.550 MHz` and
+     *    Southern Arizona VA hospital paging `167.8625 MHz`) or
+     *    NTIA Federal UHF (`411.0125-419.9875 MHz`, excluding `406.1-411.0 MHz` DoD base trunking) with `snrDb >= 36`
      * Never matches known repeaters or control channels in `rfChannels`, and never outranks specific agencies.
      */
     fun matchCloseRangeFederalBand(
@@ -1284,8 +1292,11 @@ object KokohoSignatures {
         enabledAgencies: Set<KokohoAgency>? = null
     ): RfChannelSig? {
         if (enabledAgencies == null || KokohoAgency.DHS_INTEROP !in enabledAgencies) return null
-        // Exclude NOAA Weather Radio (162.400 - 162.550 MHz) and FRS consumer walkie-talkies
+        // Exclude NOAA Weather Radio (162.400 - 162.550 MHz), VA Medical Center paging (167.8625 MHz),
+        // DoD base trunking (406.100 - 411.000 MHz), and FRS consumer walkie-talkies
         if (hz in 162_395_000L..162_555_000L) return null
+        if (abs(hz - 167_862_500L) <= toleranceHz) return null
+        if (hz in 406_100_000L..411_000_000L) return null
         if (hz in 462_545_000L..462_730_000L || hz in 467_545_000L..467_730_000L) return null
         // If this frequency is already in rfChannels (e.g., as a suppressed REPEATER or CONTROL_CHANNEL), do not synthesize
         val existingCatalog = rfChannels.firstOrNull { abs(it.hz - hz) <= toleranceHz }
@@ -1295,7 +1306,7 @@ object KokohoSignatures {
         // Suppress any frequency licensed as AZ commercial/business (`IG_COMM`) or fixed repeater (`PS_REP`) in FCC ULS
         val azRef = KokohoReferenceTables.lookupAzRf(hz, minOf(toleranceHz, 1_200L))
         if (azRef != null && azRef.isSuppressedCommercialOrRepeater) return null
-        val inNtiaFedBand = (hz in 162_025_000L..173_987_500L) || (hz in 406_125_000L..419_987_500L)
+        val inNtiaFedBand = (hz in 162_025_000L..173_987_500L) || (hz in 411_012_500L..419_987_500L)
         if (!inNtiaFedBand || snrDb < 36) return null
         val mhzStr = "%.4f".format(java.util.Locale.US, hz / 1_000_000.0)
         return RfChannelSig(
@@ -1438,7 +1449,12 @@ object KokohoSignatures {
     private val KARR_DEALER_BLE_ALARM_REGEX = Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
 
     private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*|OutOfService|XFINITY|xfinitywifi|CableWiFi)\\s*$"
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|McDonalds.*|McD[-_ ].*|Waystation.*|eBOS|CrystalMT|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*|OutOfService|XFINITY|xfinitywifi|CableWiFi)\\s*$"
+    )
+
+    /** Inseego / Novatel 5G FWA & MiFi OUIs widely deployed as Verizon/T-Mobile business broadband gateways. */
+    private val INSEEGO_FWA_OR_MIFI_OUIS = setOf(
+        "00:15:FF", "18:EE:86", "28:80:A2", "78:0C:71", "E0:86:14"
     )
 
     private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TFD\\d+|TUCSON_?FIRE|NWFD.*|GRFD.*|GVFD.*|AVFD.*|OVFD.*|RMFD.*|PCFD.*|SVFD.*|RVFD.*|MTFD.*|PTFD.*))$")
@@ -1703,6 +1719,14 @@ object KokohoSignatures {
         if (IGNORED_INFRA_MAC_PREFIXES.any { it != "24:B2:B9:" && normMac.startsWith(it) }) return true
         val ssid = ssidOrName?.trim().orEmpty()
         if (ssid.isNotEmpty() && (KARR_DEALER_BLE_ALARM_REGEX.matches(ssid) || IGNORED_INFRA_OR_RETAIL_SSID_REGEX.matches(ssid))) return true
+        // Custom-named Inseego 5G FWA business gateways (e.g. "CrystalMT") are commercial internet modems unless explicitly tactical/fleet-named.
+        val canonPrefix = canonicalHardwareOuiMac(normMac).take(8)
+        if (canonPrefix in INSEEGO_FWA_OR_MIFI_OUIS &&
+            ssid.isNotEmpty() &&
+            !isMobileVehicleRouterModelSsid(ssid)
+        ) {
+            return true
+        }
         return false
     }
 
@@ -1901,6 +1925,8 @@ object KokohoSignatures {
                             upMac.startsWith("00:11:AB:") ||
                             upMac.startsWith("D8:12:65:") ||
                             upMac.startsWith("60:E3:27:") ||
+                            upMac.startsWith("18:EE:86:41:88:") ||
+                            isIgnoredInfrastructureOrRetail(upMac, m.ssidHint) ||
                             KARR_DEALER_BLE_ALARM_REGEX.containsMatchIn(m.label) ||
                             KARR_DEALER_BLE_ALARM_REGEX.matches(m.ssidHint)
                         ) {
@@ -1948,7 +1974,10 @@ object KokohoSignatures {
         var changed = false
         for (m in macs) {
             val k = normalizeMac(m.mac)
-            if (k.take(8) in NON_BLOCK_LEARNING_OUIs) continue
+            if (k.take(8) in NON_BLOCK_LEARNING_OUIs ||
+                k.startsWith("18:EE:86:41:88:") ||
+                isIgnoredInfrastructureOrRetail(k, m.ssidHint)
+            ) continue
             val prev = learnedMacCache[k]
             if (prev == null || m.updatedAtMs >= prev.updatedAtMs || m.corroboratedHits >= prev.corroboratedHits) {
                 learnedMacCache[k] = m.copy(mac = k)
@@ -1975,7 +2004,10 @@ object KokohoSignatures {
     ) {
         ensureLearnedIntelLoaded(context)
         val (oui, nic, canonical) = parseMacOuiAndNic(mac) ?: return
-        if (oui in NON_BLOCK_LEARNING_OUIs) return
+        if (oui in NON_BLOCK_LEARNING_OUIs ||
+            canonical.startsWith("18:EE:86:41:88:") ||
+            isIgnoredInfrastructureOrRetail(canonical, ssidHint)
+        ) return
         val prev = learnedMacCache[canonical]
         val mergedCaps = ((prev?.capabilities.orEmpty()) + capabilities).distinct()
         val delta = when {

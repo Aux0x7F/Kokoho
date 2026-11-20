@@ -37,7 +37,7 @@ object KokohoHubClient {
     private const val KEY_SENSOR_SLOT = "sensor_slot"
 
     private const val CHECKIN_INTERVAL_MS = 5 * 60_000L
-    private const val OBJECT_TTL_MS = 150 * 60_000L
+    private const val OBJECT_TTL_MS = 3 * 3_600_000L
 
     data class RemoteFlightTrack(
         @SerializedName("track_uuid") val trackUuid: String = "",
@@ -586,7 +586,8 @@ object KokohoHubClient {
                                 pkClean.startsWith("00:11:AB:") ||
                                 pkClean.startsWith("D8:12:65:") ||
                                 pkClean.startsWith("60:E3:27:") ||
-                                Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("${e.label} ${e.primaryFacetKey}")
+                                pkClean.startsWith("18:EE:86:41:88:") ||
+                                Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bCrystalMT\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("${e.label} ${e.primaryFacetKey}")
                             ) {
                                 objects.remove(e.entityUuid)
                                 continue

@@ -160,9 +160,14 @@ object NotificationHelper {
      * summary (either "No threats detected" or "[comma separated agencies] [nearest current detection]").
      * Never includes verbose help text or spawns multiple notification entries (#13).
      */
-    fun currentPostureSummary(context: Context): Pair<String, String?> {
+    @JvmOverloads
+    fun currentPostureSummary(context: Context, nowMs: Long? = null): Pair<String, String?> {
         val snap = runCatching {
-            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.latestOrEvaluate(context, maxAgeMs = 3_000L)
+            if (nowMs != null) {
+                org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(context, nowMs)
+            } else {
+                org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.latestOrEvaluate(context, maxAgeMs = 3_000L)
+            }
         }.getOrNull()
         val groups = snap?.monitorGroups.orEmpty()
         if (groups.isEmpty()) {
@@ -171,7 +176,7 @@ object NotificationHelper {
         val agencies = groups.joinToString(", ") { it.agency.friendlyLabel }
         val nearest = groups.flatMap { it.distinctUnits }.minByOrNull { it.nearestEdgeDistanceM }
             ?: groups.first().leadThreat
-        val nowMs = System.currentTimeMillis()
+        val effNowMs = nowMs ?: System.currentTimeMillis()
         val distPart = if (nearest.nearestEdgeDistanceM <= 15.0) {
             "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(context, nearest.uncertaintyRadiusM)}"
         } else {
@@ -179,7 +184,7 @@ object NotificationHelper {
             val rad = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(context, nearest.uncertaintyRadiusM)
             "$edge (±$rad)"
         }
-        val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, nearest.lastSeenMs)
+        val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(effNowMs, nearest.lastSeenMs)
         return "$agencies · $distPart" to staleness
     }
 

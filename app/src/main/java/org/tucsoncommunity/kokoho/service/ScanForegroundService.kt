@@ -1411,12 +1411,18 @@ class ScanForegroundService : Service() {
             org.tucsoncommunity.kokoho.link.PhoneLink.Path.NET -> "$name · internet"
         }
         val byMesh = path != org.tucsoncommunity.kokoho.link.PhoneLink.Path.BLUETOOTH
-        val quiet = !org.tucsoncommunity.kokoho.link.LinkStore.alerts(this, path)
         // Phones' clocks differ: ages are kept, times are this phone's.
         val shift = now - b.time
         val at = if (b.lat.isNaN() || b.lon.isNaN()) null else Location("sentinel-link").apply {
             latitude = b.lat; longitude = b.lon; time = now
         }
+        val myLoc = lastLocation ?: lastFix
+        val peerTooFarForAlert = byMesh && (
+            myLoc == null ||
+                at == null ||
+                myLoc.distanceTo(at) > org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.MONITOR_GROUND_NEARBY_MAX_CENTER_M
+            )
+        val quiet = !org.tucsoncommunity.kokoho.link.LinkStore.alerts(this, path) || peerTooFarForAlert
         val heardBy = org.tucsoncommunity.kokoho.esp.HeardBy
         for (s in b.sightings) {
             val mac = s.advert.mac
@@ -1939,8 +1945,11 @@ class ScanForegroundService : Service() {
             org.tucsoncommunity.kokoho.sdr.RadioLog.recordRepeaterBurst(now)
         }
         // Solidly exclude unknown commercial/municipal VHF/UHF and repeater downlinks (#2, #17, Question 2, Review #2)
-        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz)
+        val kokohoFreq = org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchFrequency(e.freqHz, snrDb = e.snrDb)
             ?: org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchPublicSafetyMobileUplink(
+                e.freqHz, e.snrDb, enabledAgencies = enabledAgencies
+            )
+            ?: org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchCloseRangeFederalBand(
                 e.freqHz, e.snrDb, enabledAgencies = enabledAgencies
             )
         if (via == null) {

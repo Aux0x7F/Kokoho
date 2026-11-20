@@ -176,9 +176,9 @@ data class PostureSnapshot(
     val distanceAndBearingText: String,
     val bottomConfidenceText: String,
     val primaryThreat: EvaluatedThreat?,
-    /** Active threats within the 3-minute Monitor window, sorted by priorityRank. */
+    /** Active proximate threats within the 3-hour Monitor window, sorted by priorityRank. */
     val activeThreats: List<EvaluatedThreat>,
-    /** Grouped agencies within the 3-minute Monitor window, sorted strictly by priorityRank. */
+    /** Grouped proximate agencies within the 3-hour Monitor window, sorted strictly by priorityRank. */
     val monitorGroups: List<AgencyMonitorGroup>,
     /** Retained threats within the Map visibility window (30m solid + 2h fade = 2.5h). */
     val mapThreats: List<EvaluatedThreat>,
@@ -272,6 +272,7 @@ object KokohoPostureEngine {
     private val triangulationCache = ConcurrentHashMap<String, CachedTriangulation>()
     private val coMovingState = ConcurrentHashMap<String, CoMovingTrackState>()
     private val localThreatCache = ConcurrentHashMap<String, EvaluatedThreat>()
+    private val lastHeardByLocalHardwareAtMs = ConcurrentHashMap<String, Long>()
     private val lrrpRadioFixes = ConcurrentHashMap<Int, LrrpRadioFix>()
     private val lastSharedAtByUuid = ConcurrentHashMap<String, Long>()
     private val lastRawReportByFacet = ConcurrentHashMap<String, LastRawReportState>()
@@ -329,6 +330,7 @@ object KokohoPostureEngine {
         triangulationCache.clear()
         coMovingState.clear()
         localThreatCache.clear()
+        lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
         KokohoEntityLedger.clearAll()
         KokohoSignatures.clearWitnessAndConfirmedCacheInMemory()
@@ -362,6 +364,7 @@ object KokohoPostureEngine {
         triangulationCache.clear()
         coMovingState.clear()
         localThreatCache.clear()
+        lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
@@ -441,6 +444,10 @@ object KokohoPostureEngine {
         evaluated: MutableMap<String, EvaluatedThreat>,
         incoming: EvaluatedThreat
     ) {
+        val prevLocalMs = lastHeardByLocalHardwareAtMs[incoming.uuid] ?: 0L
+        if (incoming.updatedAtMs > prevLocalMs) {
+            lastHeardByLocalHardwareAtMs[incoming.uuid] = incoming.updatedAtMs
+        }
         val existing = evaluated[incoming.uuid]
         if (existing == null) {
             evaluated[incoming.uuid] = incoming
@@ -497,29 +504,27 @@ object KokohoPostureEngine {
         localThreatCache[incoming.uuid] = fused
     }
 
+    private const val UNLOCATED_LOCAL_CACHE_TTL_MS = 3 * 60_000L
+
     private fun shouldEvictLocalCache(
         t: EvaluatedThreat,
         nowMs: Long,
-        mapVisibilityMs: Long,
+        retentionWindowMs: Long,
         groundedHexes: Set<String> = emptySet()
     ): Boolean {
         val ageMs = nowMs - t.updatedAtMs
-        if (ageMs > mapVisibilityMs) return true
+        if (ageMs > retentionWindowMs) return true
         if (t.isAircraft) {
             if (t.aircraftHex?.uppercase() in groundedHexes) return true
-            return ageMs > min(mapVisibilityMs, LIVE_AIRCRAFT_MAX_AGE_MS)
+            return ageMs > min(retentionWindowMs, LIVE_AIRCRAFT_MAX_AGE_MS)
         }
-        // Located ground/drone detections remain visible for the full active rolling map window
-        // (`30m`, `3h`, `24h`, `1wk`, `1mo`, `Heat`), never evicted prematurely at 3m or 24h.
+        // Located ground/drone detections remain available for both the active rolling Map window
+        // and the 3-hour Monitor window.
         if (t.lat != null && t.lon != null) {
             return false
         }
-        val rfOnly = t.evidenceSources.isNotEmpty() &&
-            t.evidenceSources.all { it.kind.startsWith("RF_") || it.kind == "P25_UNIT" }
-        if (rfOnly && !t.isApproximatedPosition) {
-            return ageMs > min(mapVisibilityMs, LOCAL_RF_ONLY_CACHE_TTL_MS)
-        }
-        return ageMs > min(mapVisibilityMs, LOCAL_SENSOR_CACHE_TTL_MS)
+        // Unlocated local detections (no GPS fix when heard) expire after 3 minutes so they never trail a moving user.
+        return ageMs > min(retentionWindowMs, UNLOCATED_LOCAL_CACHE_TTL_MS)
     }
 
     /**
@@ -884,6 +889,33 @@ object KokohoPostureEngine {
             (isCircling && distM <= AIRCRAFT_NEARBY_CIRCLING_MAX_M)
     }
 
+    /** Ground and drone detections only alert Monitor and Notifications within 1.0 mi (1,609 m) nearest edge and 1.5 mi (2,414 m) center. */
+    const val MONITOR_GROUND_NEARBY_MAX_EDGE_M = 1_609.0
+    const val MONITOR_GROUND_NEARBY_MAX_CENTER_M = 2_414
+
+    /** Wide-area air-to-ground RF detections alert Monitor and Notifications within 1.5 mi (2,414 m) nearest edge and 2.5 mi (4,023 m) center. */
+    const val MONITOR_AIR_RF_NEARBY_MAX_EDGE_M = 2_414.0
+    const val MONITOR_AIR_RF_NEARBY_MAX_CENTER_M = 4_023
+
+    fun isGroundOrDroneNearbyForMonitor(
+        threat: EvaluatedThreat,
+        hasUserLoc: Boolean,
+        nowMs: Long,
+        heardLocallyLive: Boolean
+    ): Boolean {
+        if (!hasUserLoc || threat.lat == null || threat.lon == null) {
+            // Without user GPS (or when unlocated), only live signals physically heard by this phone's own radios
+            // within the last 90 seconds can alert Monitor/Notifications - never remote Hub or historical entities.
+            return heardLocallyLive &&
+                (nowMs - threat.updatedAtMs) <= 90_000L &&
+                threat.estimatedDistanceM <= MONITOR_GROUND_NEARBY_MAX_CENTER_M
+        }
+        val isAirRf = threat.agency == KokohoAgency.DHS_AMO
+        val maxEdge = if (isAirRf) MONITOR_AIR_RF_NEARBY_MAX_EDGE_M else MONITOR_GROUND_NEARBY_MAX_EDGE_M
+        val maxCenter = if (isAirRf) MONITOR_AIR_RF_NEARBY_MAX_CENTER_M else MONITOR_GROUND_NEARBY_MAX_CENTER_M
+        return threat.nearestEdgeDistanceM <= maxEdge && threat.estimatedDistanceM <= maxCenter
+    }
+
     private fun spatiallyCompatible(lat1: Double?, lon1: Double?, lat2: Double?, lon2: Double?, maxDistM: Double): Boolean {
         if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return true
         return haversineMeters(lat1, lon1, lat2, lon2) <= maxDistM
@@ -949,6 +981,7 @@ object KokohoPostureEngine {
         val activeMapWindow = KokohoSignatures.getMapTimeWindow(context)
         val mapVisibilityMs = activeMapWindow.windowMs
         val monitorWindowMs = KokohoSignatures.MONITOR_ACTIVE_WINDOW_MS
+        val retentionWindowMs = max(mapVisibilityMs, monitorWindowMs)
         val auxnetOn = KokohoSignatures.isAuxnetEnabled(context)
 
         val enabledScopeText = if (alarmEnabled.isEmpty()) {
@@ -993,14 +1026,14 @@ object KokohoPostureEngine {
         val groundedHexes = org.tucsoncommunity.kokoho.online.PoliceAircraft.currentlyGroundedHexes(nowMs)
 
         // Prune expired local threat cache entries using bounded local TTLs (never let All Time pin transient RF on the user)
-        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, mapVisibilityMs, groundedHexes) }
+        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes) }
 
         // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub
         if (auxnetOn) {
             evaluateRemoteHubObjects(
                 context = context,
                 nowMs = nowMs,
-                mapVisibilityMs = mapVisibilityMs,
+                mapVisibilityMs = retentionWindowMs,
                 enabled = enabled,
                 groundedHexes = groundedHexes,
                 userLoc = userLoc,
@@ -1009,9 +1042,9 @@ object KokohoPostureEngine {
         }
 
         // 2. Evaluate local RTL-SDR RF hits, Pro/Enterprise/RemoteID Drones, and close-range Fleet OUI devices
-        val rfWindowMs = min(mapVisibilityMs, LOCAL_RF_ONLY_CACHE_TTL_MS)
-        val devWindowMs = min(mapVisibilityMs, LOCAL_SENSOR_CACHE_TTL_MS)
-        val triDecayMs = min(mapVisibilityMs, LOCAL_TRIANGULATION_DECAY_MS)
+        val rfWindowMs = min(retentionWindowMs, LOCAL_RF_ONLY_CACHE_TTL_MS)
+        val devWindowMs = min(retentionWindowMs, LOCAL_SENSOR_CACHE_TTL_MS)
+        val triDecayMs = min(retentionWindowMs, LOCAL_TRIANGULATION_DECAY_MS)
         val localRfHits = RadioLog.current(nowMs).filter { nowMs - it.lastSeen <= rfWindowMs }
         val localDevices = DeviceRegistry.snapshot(nowMs).filter { nowMs - it.lastSeen <= devWindowMs }
 
@@ -2534,9 +2567,10 @@ object KokohoPostureEngine {
                 }
             }
         }
-        lrrpRadioFixes.entries.removeIf { nowMs - it.value.atMs > mapVisibilityMs }
+        val retentionWindowMs = max(mapVisibilityMs, KokohoSignatures.MONITOR_ACTIVE_WINDOW_MS)
+        lrrpRadioFixes.entries.removeIf { nowMs - it.value.atMs > retentionWindowMs }
         for ((radioId, fix) in lrrpRadioFixes) {
-            if (nowMs - fix.atMs > mapVisibilityMs) continue
+            if (nowMs - fix.atMs > retentionWindowMs) continue
             val pos = fix.pos
             val tg = SdrRadio.p25Log.talkgroupOf(radioId)
             if (tg != null && KokohoReferenceTables.lookupTalkgroup(tg)?.agencyCode == "IGNORE") continue
@@ -2799,12 +2833,13 @@ object KokohoPostureEngine {
         evaluated: MutableMap<String, EvaluatedThreat>,
         localRawObservations: List<RawSensorReportCandidate>
     ): PostureSnapshot {
+        val retentionWindowMs = max(mapVisibilityMs, monitorWindowMs)
         for (fresh in evaluated.values) {
             if (!fresh.isAircraft && fresh.lat != null && fresh.lon != null && localThreatCache.containsKey(fresh.uuid)) {
                 KokohoEntityLedger.upsert(context, fresh, nowMs)
             }
         }
-        for (persisted in KokohoEntityLedger.getWithinRollingWindow(context, nowMs, mapVisibilityMs)) {
+        for (persisted in KokohoEntityLedger.getWithinRollingWindow(context, nowMs, retentionWindowMs)) {
             val persistedAllowed = if (persisted.isDrone) {
                 KokohoSignatures.isDroneDetectionEnabled(context) || KokohoAgency.DRONE in mapVisible
             } else {
@@ -2816,20 +2851,27 @@ object KokohoPostureEngine {
         }
         for (wr in KokohoSignatures.getAllWitnessReports(context)) {
             if (wr.reportKind != "LE" || wr.lat == null || wr.lon == null) continue
-            if (nowMs - wr.updatedAtMs > mapVisibilityMs) continue
+            if (nowMs - wr.updatedAtMs > retentionWindowMs) continue
             val wrUuid = KokohoSignatures.normalizeEntityId(wr.entityUuid ?: wr.targetKey)
             if (wrUuid in evaluated) continue
             val wrAgency = KokohoAgency.fromCode(wr.agencyCode) ?: KokohoAgency.DHS_ICE
             if (wrAgency !in enabled) continue
             val distM = if (userLoc != null) {
                 haversineMeters(userLoc.latitude, userLoc.longitude, wr.lat, wr.lon).roundToInt()
-            } else 120
+            } else 9_999
+            val wrAgeMs = (nowMs - wr.updatedAtMs).coerceAtLeast(0L)
+            val rawWrPosture = when {
+                userLoc == null -> PostureColor.YELLOW
+                distM <= 300 -> PostureColor.RED
+                distM <= 850 -> PostureColor.ORANGE
+                else -> PostureColor.YELLOW
+            }
             val pointEntity = EvaluatedThreat(
                 uuid = wrUuid,
                 trackUuid = wrUuid,
                 agency = wrAgency,
                 label = wrAgency.friendlyLabel,
-                posture = if (nowMs - wr.updatedAtMs <= monitorWindowMs && distM <= 300) PostureColor.RED else PostureColor.YELLOW,
+                posture = if (wrAgeMs <= monitorWindowMs) KokohoSignatures.capMonitorPostureByAge(rawWrPosture, wrAgeMs) else PostureColor.YELLOW,
                 overallConfidence = 92,
                 classificationConfidence = 94,
                 spatialConfidence = 90,
@@ -2858,9 +2900,9 @@ object KokohoPostureEngine {
             KokohoEntityLedger.upsert(context, pointEntity, nowMs)
         }
 
-        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, mapVisibilityMs, groundedHexes) }
+        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes) }
         for ((uuid, cached) in localThreatCache) {
-            if (uuid !in evaluated && !shouldEvictLocalCache(cached, nowMs, mapVisibilityMs, groundedHexes)) {
+            if (uuid !in evaluated && !shouldEvictLocalCache(cached, nowMs, retentionWindowMs, groundedHexes)) {
                 val allowed = when {
                     cached.isAircraft -> {
                         val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
@@ -2876,13 +2918,33 @@ object KokohoPostureEngine {
                         if (cached.isAircraft) {
                             cached.copy(estimatedDistanceM = rawLiveDistM)
                         } else {
-                            val liveDistM = max(rawLiveDistM, cached.uncertaintyRadiusM.coerceAtLeast(15))
-                            val refreshedPosture = if (nowMs - cached.updatedAtMs > 20_000L && liveDistM > 120) {
-                                PostureColor.YELLOW
+                            val uncertM = cached.uncertaintyRadiusM.coerceAtLeast(15)
+                            val edgeDistM = max(0, rawLiveDistM - uncertM)
+                            val effectiveDistM = max(edgeDistM, uncertM)
+                            val liveDistM = max(rawLiveDistM, uncertM)
+                            val ageMs = (nowMs - cached.updatedAtMs).coerceAtLeast(0L)
+                            val rawProximityPosture = if (ageMs > 20_000L) {
+                                when {
+                                    effectiveDistM <= 300 -> PostureColor.RED
+                                    effectiveDistM <= 850 -> PostureColor.ORANGE
+                                    else -> PostureColor.YELLOW
+                                }
                             } else {
                                 cached.posture
                             }
+                            val refreshedPosture = if (ageMs <= monitorWindowMs) {
+                                KokohoSignatures.capMonitorPostureByAge(rawProximityPosture, ageMs)
+                            } else {
+                                PostureColor.YELLOW
+                            }
                             cached.copy(estimatedDistanceM = liveDistM, posture = refreshedPosture)
+                        }
+                    } else if (userLoc == null && cached.lat != null && cached.lon != null) {
+                        val ageMs = (nowMs - cached.updatedAtMs).coerceAtLeast(0L)
+                        if (ageMs > 90_000L) {
+                            cached.copy(estimatedDistanceM = 9_999, posture = PostureColor.YELLOW)
+                        } else {
+                            cached
                         }
                     } else {
                         cached
@@ -2911,9 +2973,16 @@ object KokohoPostureEngine {
                     t.evidenceSources.map { it.detail } + listOf(t.recurrenceSummary, t.label)
                 )).distinct()
                 val highestOrderTitle = KokohoSignatures.formatHighestOrderTitle(t.copy(agency = effectiveAgency, capabilities = inferredCaps), witness)
+                val ageMs = (nowMs - t.updatedAtMs).coerceAtLeast(0L)
+                val cappedPosture = if (ageMs <= monitorWindowMs) {
+                    KokohoSignatures.capMonitorPostureByAge(t.posture, ageMs)
+                } else {
+                    PostureColor.YELLOW
+                }
                 val updated = t.copy(
                     agency = effectiveAgency,
                     label = highestOrderTitle,
+                    posture = cappedPosture,
                     recurrenceSummary = if (t.recurrenceSummary.isBlank()) highestOrderTitle else t.recurrenceSummary,
                     capabilities = inferredCaps
                 )
@@ -2925,7 +2994,13 @@ object KokohoPostureEngine {
 
         val mapThreats = allRetained
             .filter { t ->
-                when {
+                val ageMs = (nowMs - t.updatedAtMs).coerceAtLeast(0L)
+                val withinMapWindow = if (t.isAircraft) {
+                    ageMs <= min(mapVisibilityMs, LIVE_AIRCRAFT_MAX_AGE_MS)
+                } else {
+                    ageMs <= mapVisibilityMs
+                }
+                withinMapWindow && when {
                     t.isAircraft -> true
                     t.isDrone -> KokohoAgency.DRONE in mapVisible
                     else -> t.agency in mapVisible
@@ -2947,8 +3022,8 @@ object KokohoPostureEngine {
                     .thenByDescending { it.updatedAtMs }
             )
 
-        // Monitor threats: strictly filtered by Alarm (`alarmEnabled`) within the 3-minute Monitor window.
-        // Aircraft only count as Monitor ("nearby") when <= 1 mi (1,609 m) or circling <= 3 mi (4,828 m).
+        // Monitor threats: strictly filtered by Alarm (`alarmEnabled`), user-relative proximity, and the 3-hour Monitor window.
+        // Posture is RED only within 30 minutes and capped at ORANGE from 30 minutes to 3 hours.
         val monitorThreats = allRetained
             .filter { t ->
                 if (nowMs - t.updatedAtMs > monitorWindowMs) return@filter false
@@ -2961,7 +3036,15 @@ object KokohoPostureEngine {
                         hasUserLoc = userLoc != null
                     )
                 } else {
-                    t.agency in alarmEnabled
+                    val heardLocallyLive = (lastHeardByLocalHardwareAtMs[t.uuid] ?: 0L).let {
+                        it > 0L && (nowMs - it) <= 90_000L
+                    }
+                    t.agency in alarmEnabled && isGroundOrDroneNearbyForMonitor(
+                        threat = t,
+                        hasUserLoc = userLoc != null,
+                        nowMs = nowMs,
+                        heardLocallyLive = heardLocallyLive
+                    )
                 }
             }
             .sortedWith(
