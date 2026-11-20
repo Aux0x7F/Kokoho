@@ -254,7 +254,7 @@ object UpdateChecker {
             } else {
                 notifyListeners(null)
                 if (!silent) {
-                    val current = BuildConfig.VERSION_NAME.substringBefore('-')
+                    val current = if (BuildConfig.DEBUG) BuildConfig.VERSION_NAME else BuildConfig.VERSION_NAME.substringBefore('-')
                     MaterialAlertDialogBuilder(activity)
                         .setTitle("You're up to date")
                         .setMessage("Kokoho $current is the latest version on ${KokohoHubClient.hubUrl(activity)}.")

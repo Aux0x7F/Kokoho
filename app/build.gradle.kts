@@ -6,10 +6,10 @@ plugins {
     id("com.google.protobuf")
 }
 
-// Bump both for every release. versionName ends up in the APK file name.
-// Unified single-build versionCode = 1422 (v1.3.14 > 1421 so all prior installs upgrade cleanly in-place).
-val baseVersionCode = 1422
-val baseVersionName = "1.3.14"
+// Bump both for every release or staged next build. versionName ends up in the APK file name.
+val baseVersionCode = 1423
+val baseVersionName = "1.3.15"
+val nextIteration = 1
 val releaseChannel = "public"
 val appVersionCode = baseVersionCode
 val appVersionName = baseVersionName
@@ -64,8 +64,10 @@ android {
 
     buildTypes {
         debug {
-            // Installs next to the release app (demo data, screenshots) without touching it.
+            // Installs next to the release app without touching it, and tracks /v1/update/next for debug OTAs.
             applicationIdSuffix = ".debug"
+            versionNameSuffix = "-next.$nextIteration"
+            buildConfigField("String", "UPDATE_MANIFEST_PATH", "\"/v1/update/next\"")
         }
         release {
             isDebuggable = false

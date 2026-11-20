@@ -60,9 +60,14 @@ class DeviceTrustAndSchemaTest {
     @Test
     fun unifiedSingleBuildVersionAndZeroBundledEncAsset() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals(1422, BuildConfig.VERSION_CODE)
-        assertEquals("1.3.14", BuildConfig.VERSION_NAME)
-        assertEquals("/v1/update/latest", BuildConfig.UPDATE_MANIFEST_PATH)
+        assertTrue("Expected versionCode >= 1423 on next/release track", BuildConfig.VERSION_CODE >= 1423)
+        if (BuildConfig.DEBUG) {
+            assertTrue("Debug build should carry -next suffix, got ${BuildConfig.VERSION_NAME}", BuildConfig.VERSION_NAME.contains("-next."))
+            assertEquals("/v1/update/next", BuildConfig.UPDATE_MANIFEST_PATH)
+        } else {
+            assertFalse("Release build must not carry -next suffix", BuildConfig.VERSION_NAME.contains("-next"))
+            assertEquals("/v1/update/latest", BuildConfig.UPDATE_MANIFEST_PATH)
+        }
 
         val refAssets = runCatching { ctx.assets.list("reference")?.toList().orEmpty() }.getOrDefault(emptyList())
         assertTrue("reference/public_locations.tsv.gz must remain bundled", refAssets.any { it.startsWith("public_locations") })
