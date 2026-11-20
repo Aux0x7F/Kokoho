@@ -2231,7 +2231,7 @@ object KokohoPostureEngine {
                     rawLon = droneLon,
                     signalDb = snap.rssi.toDouble(),
                     modality = if (rid != null) "REMOTE_ID" else "TACTICAL_DRONE_OUI",
-                    additionalFacets = badges.drop(1).map { it.facetKey },
+                    additionalFacets = badges.drop(1).map { it.facetKey } + listOfNotNull(altFtAgl?.let { "uas:alt_ft_agl:$it" }),
                     agency = KokohoAgency.DRONE,
                     label = threat.friendlyLabel,
                     propClass = "GROUND_DIRECT",
@@ -2833,7 +2833,10 @@ object KokohoPostureEngine {
                 rawLon = p.lon,
                 signalDb = 42.0,
                 modality = "ADSB",
-                additionalFacets = emptyList(),
+                additionalFacets = listOfNotNull(
+                    p.altitudeFt?.let { "air:alt_ft_msl:$it" },
+                    p.trackDeg?.roundToInt()?.let { "air:hdg:$it" }
+                ),
                 agency = agency,
                 label = agency.friendlyLabel,
                 propClass = "AIRBORNE",
