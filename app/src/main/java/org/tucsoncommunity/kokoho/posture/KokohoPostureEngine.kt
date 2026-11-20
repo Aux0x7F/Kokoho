@@ -1042,7 +1042,10 @@ object KokohoPostureEngine {
         val groundedHexes = org.tucsoncommunity.kokoho.online.PoliceAircraft.currentlyGroundedHexes(nowMs)
 
         // Prune expired local threat cache entries using bounded local TTLs (never let All Time pin transient RF on the user)
-        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes) }
+        localThreatCache.entries.removeIf {
+            KokohoEntityLedger.isSuppressedFalsePositiveThreat(it.value) ||
+                shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes)
+        }
 
         // 1. Evaluate remote sanitized ThreatObjects from Auxnet kokoho-hub
         if (auxnetOn) {
@@ -3073,13 +3076,18 @@ object KokohoPostureEngine {
             }
         }
         for (persisted in KokohoEntityLedger.getWithinRollingWindow(context, nowMs, retentionWindowMs)) {
+            if (KokohoEntityLedger.isSuppressedFalsePositiveThreat(persisted)) continue
             val persistedAllowed = if (persisted.isDrone) {
                 KokohoSignatures.isDroneDetectionEnabled(context) || KokohoAgency.DRONE in mapVisible
             } else {
                 persisted.agency in enabled
             }
             if (persisted.uuid !in evaluated && persistedAllowed) {
-                localThreatCache.putIfAbsent(persisted.uuid, persisted)
+                val existingCached = localThreatCache[persisted.uuid]
+                val heardLocally = (lastHeardByLocalHardwareAtMs[persisted.uuid] ?: 0L) > 0L
+                if (existingCached == null || (!heardLocally && persisted.updatedAtMs >= existingCached.updatedAtMs)) {
+                    localThreatCache[persisted.uuid] = persisted
+                }
             }
         }
         for (wr in KokohoSignatures.getAllWitnessReports(context)) {
@@ -3133,7 +3141,10 @@ object KokohoPostureEngine {
             KokohoEntityLedger.upsert(context, pointEntity, nowMs)
         }
 
-        localThreatCache.entries.removeIf { shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes) }
+        localThreatCache.entries.removeIf {
+            KokohoEntityLedger.isSuppressedFalsePositiveThreat(it.value) ||
+                shouldEvictLocalCache(it.value, nowMs, retentionWindowMs, groundedHexes)
+        }
         for ((uuid, cached) in localThreatCache) {
             if (uuid !in evaluated && !shouldEvictLocalCache(cached, nowMs, retentionWindowMs, groundedHexes)) {
                 val allowed = when {

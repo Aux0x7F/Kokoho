@@ -574,22 +574,15 @@ object KokohoHubClient {
                         val ledgerHydrated = ArrayList<EvaluatedThreat>()
                         for (e in snap?.entities.orEmpty()) {
                             if (e.entityUuid.isBlank()) continue
-                            if (e.entityUuid.startsWith("3f7147ac", ignoreCase = true)) {
-                                objects.remove(e.entityUuid)
-                                continue
-                            }
-                            val pkClean = e.primaryFacetKey.trim().removePrefix("hw:mac:").uppercase()
-                            if (pkClean.startsWith("40:84:32:") ||
-                                pkClean.startsWith("24:79:2A:") ||
-                                pkClean.startsWith("AC:82:47:") ||
-                                pkClean.startsWith("C8:B3:73:") ||
-                                pkClean.startsWith("00:11:AB:") ||
-                                pkClean.startsWith("D8:12:65:") ||
-                                pkClean.startsWith("60:E3:27:") ||
-                                pkClean.startsWith("18:EE:86:41:88:") ||
-                                Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bCrystalMT\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("${e.label} ${e.primaryFacetKey}")
+                            if (KokohoEntityLedger.isSuppressedFalsePositiveRow(
+                                    uuid = e.entityUuid,
+                                    hwRaw = e.primaryFacetKey,
+                                    summaryRaw = e.label,
+                                    extraText = e.facets.joinToString(" ")
+                                )
                             ) {
                                 objects.remove(e.entityUuid)
+                                KokohoEntityLedger.remove(app, e.entityUuid)
                                 continue
                             }
                             if (KokohoSignatures.isFlockCamera(e.primaryFacetKey, e.label)) continue
@@ -603,6 +596,7 @@ object KokohoHubClient {
                                 objects.remove(e.entityUuid)
                                 continue
                             }
+                            val pkClean = e.primaryFacetKey.trim().removePrefix("hw:mac:").removePrefix("OUI:").uppercase()
                             val resolvedCategory = when {
                                 pkClean.startsWith("00:30:44:74:") || pkClean.startsWith("06:30:44:74:") -> "SHERIFF"
                                 pkClean.startsWith("00:30:44:22:8") -> "FIRE"

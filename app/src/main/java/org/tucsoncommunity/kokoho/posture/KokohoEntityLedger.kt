@@ -117,6 +117,56 @@ object KokohoEntityLedger {
     private fun stampOf(t: EvaluatedThreat): String =
         "${t.updatedAtMs}|${t.agency.id}|${t.label}|${t.sightingCount}|${t.uncertaintyRadiusM}|${t.lat}|${t.lon}|${t.evidenceSources.size}|${t.capabilities.size}"
 
+    private val suppressedLedgerTextRegex = Regex(
+        "(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b|\\bCrystalMT\\b|\\bMcDonalds|\\bMcD[-_]|\\beBOS\\b)"
+    )
+
+    internal fun isSuppressedFalsePositiveRow(
+        uuid: String,
+        hwRaw: String?,
+        summaryRaw: String?,
+        extraText: String = ""
+    ): Boolean {
+        if (uuid.startsWith("3f7147ac", ignoreCase = true) ||
+            uuid.startsWith("4fcf52c4", ignoreCase = true) ||
+            uuid.startsWith("ce0f80f6", ignoreCase = true)
+        ) {
+            return true
+        }
+        val hwClean = hwRaw.orEmpty().trim().removePrefix("hw:mac:").removePrefix("OUI:").uppercase()
+        if (hwClean.startsWith("40:84:32:") ||
+            hwClean.startsWith("24:79:2A:") ||
+            hwClean.startsWith("AC:82:47:") ||
+            hwClean.startsWith("C8:B3:73:") ||
+            hwClean.startsWith("00:11:AB:") ||
+            hwClean.startsWith("D8:12:65:") ||
+            hwClean.startsWith("60:E3:27:") ||
+            hwClean.startsWith("18:EE:86:41:88:") ||
+            hwClean.startsWith("RF:CHAN:167862500") ||
+            hwClean.startsWith("FREQ:167862500")
+        ) {
+            return true
+        }
+        val combined = "${summaryRaw.orEmpty()} ${hwRaw.orEmpty()} $extraText"
+        if (combined.contains("167.8625", ignoreCase = true) ||
+            combined.contains("167862500", ignoreCase = true) ||
+            combined.contains("18:EE:86:41:88:", ignoreCase = true)
+        ) {
+            return true
+        }
+        return suppressedLedgerTextRegex.containsMatchIn(combined)
+    }
+
+    internal fun isSuppressedFalsePositiveThreat(t: EvaluatedThreat): Boolean {
+        val evText = t.evidenceSources.joinToString(" ") { "${it.facetKey} ${it.detail}" }
+        return isSuppressedFalsePositiveRow(
+            uuid = t.uuid,
+            hwRaw = t.hardwareIdentifier,
+            summaryRaw = "${t.label} ${t.recurrenceSummary}",
+            extraText = evText
+        )
+    }
+
     private fun hydrateMemoryMirror(database: SQLiteDatabase) {
         runCatching {
             val stalePoisonUuids = ArrayList<String>()
@@ -129,18 +179,10 @@ object KokohoEntityLedger {
                     val uuid = c.getString(0) ?: continue
                     val summaryRaw = c.getString(8) ?: ""
                     val hwRaw = if (c.isNull(19)) "" else (c.getString(19) ?: "")
-                    // Evict legacy false-positive rows (KARR dealership car alarms QT/DR, consumer IDW wearables, transit Veh ###-5g, removed consumer OUIs)
+                    val evRaw = if (c.isNull(22)) "" else (c.getString(22) ?: "")
+                    // Evict suppressed false-positive rows (KARR car alarms, consumer wearables/FWA CrystalMT, McDonald's Wi-Fi, 167.8625 MHz VA hospital paging)
                     val hwClean = hwRaw.removePrefix("hw:mac:").uppercase()
-                    if (uuid.startsWith("3f7147ac", ignoreCase = true) ||
-                        hwClean.startsWith("40:84:32:") ||
-                        hwClean.startsWith("24:79:2A:") ||
-                        hwClean.startsWith("AC:82:47:") ||
-                        hwClean.startsWith("C8:B3:73:") ||
-                        hwClean.startsWith("00:11:AB:") ||
-                        hwClean.startsWith("D8:12:65:") ||
-                        hwClean.startsWith("60:E3:27:") ||
-                        Regex("(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b)").containsMatchIn("$summaryRaw $hwRaw")
-                    ) {
+                    if (isSuppressedFalsePositiveRow(uuid, hwRaw, summaryRaw, evRaw)) {
                         stalePoisonUuids += uuid
                         continue
                     }
@@ -198,6 +240,7 @@ object KokohoEntityLedger {
     fun upsert(context: Context?, threat: EvaluatedThreat, nowMs: Long = System.currentTimeMillis()) {
         if (threat.isAircraft) return
         if (threat.lat == null || threat.lon == null) return
+        if (isSuppressedFalsePositiveThreat(threat)) return
         val appCtx = context?.applicationContext ?: context
         if (appCtx != null && db == null) {
             ensureDb(appCtx)
@@ -277,6 +320,7 @@ object KokohoEntityLedger {
         val toPersist = ArrayList<EvaluatedThreat>()
         for (threat in threats) {
             if (threat.isAircraft || threat.lat == null || threat.lon == null) continue
+            if (isSuppressedFalsePositiveThreat(threat)) continue
             val prev = memoryMirror[threat.uuid]
             val merged = if (prev != null && prev.updatedAtMs > threat.updatedAtMs) prev else threat
             memoryMirror[threat.uuid] = merged
