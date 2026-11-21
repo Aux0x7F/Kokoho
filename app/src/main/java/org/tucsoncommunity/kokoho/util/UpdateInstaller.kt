@@ -78,6 +78,14 @@ object UpdateInstaller {
      */
     suspend fun download(context: Context, url: String, version: String, expectedSize: Long, sha256: String?,
                          onProgress: (Long, Long) -> Unit): File = withContext(Dispatchers.IO) {
+        val isHubDownload = url.startsWith(org.tucsoncommunity.kokoho.posture.KokohoHubClient.hubUrl(context), ignoreCase = true)
+        if (isHubDownload &&
+            org.tucsoncommunity.kokoho.posture.DeviceTrustManager.loadOrExtractSeatIdentity(context) != null &&
+            org.tucsoncommunity.kokoho.posture.VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) ==
+            org.tucsoncommunity.kokoho.posture.VpnGeoGate.Verdict.BLOCKED_TUCSON
+        ) {
+            throw IllegalStateException(org.tucsoncommunity.kokoho.posture.VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE)
+        }
         val folder = dir(context).apply { mkdirs() }
         folder.listFiles()?.forEach { it.delete() }
         val part = File(folder, "Kokoho-$version.apk.part")
@@ -86,7 +94,7 @@ object UpdateInstaller {
             connectTimeout = 15_000; readTimeout = 30_000
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", "${BuildConfig.APPLICATION_ID}/${BuildConfig.VERSION_NAME}")
-            if (url.startsWith(org.tucsoncommunity.kokoho.posture.KokohoHubClient.hubUrl(context), ignoreCase = true)) {
+            if (isHubDownload) {
                 org.tucsoncommunity.kokoho.posture.DeviceTrustManager.attachSignedHeaders(context, this)
             }
         }

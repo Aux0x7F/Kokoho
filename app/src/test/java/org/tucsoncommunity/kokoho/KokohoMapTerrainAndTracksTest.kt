@@ -1095,4 +1095,22 @@ class KokohoMapTerrainAndTracksTest {
             )
         )
     }
+
+    @Test
+    fun manifestDisablesBackupAndCleartextAndLocksExtractionRules() {
+        val root = java.io.File("src/main")
+        val manifest = java.io.File(root, "AndroidManifest.xml").readText()
+        assertTrue(manifest.contains("android:allowBackup=\"false\""))
+        assertTrue(manifest.contains("android:usesCleartextTraffic=\"false\""))
+        assertTrue(manifest.contains("android:networkSecurityConfig=\"@xml/network_security_config\""))
+
+        val netCfg = java.io.File(root, "res/xml/network_security_config.xml").readText()
+        assertTrue(netCfg.contains("<base-config cleartextTrafficPermitted=\"false\">"))
+
+        val extraction = java.io.File(root, "res/xml/data_extraction_rules.xml").readText()
+        val transferBlock = extraction.substringAfter("<device-transfer>").substringBefore("</device-transfer>")
+        assertTrue(transferBlock.contains("<exclude domain=\"database\" path=\".\" />"))
+        assertTrue(transferBlock.contains("<exclude domain=\"sharedpref\" path=\".\" />"))
+        assertFalse(transferBlock.contains("<include"))
+    }
 }
