@@ -1466,12 +1466,17 @@ object KokohoSignatures {
     private val KARR_DEALER_BLE_ALARM_REGEX = Regex("^\\s*(DR|QT)\\s+[0-9A-Fa-f]{8}\\s*$")
 
     private val IGNORED_INFRA_OR_RETAIL_SSID_REGEX = Regex(
-        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|McDonalds.*|McD[-_ ].*|Waystation.*|eBOS|CrystalMT|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*|OutOfService|XFINITY|xfinitywifi|CableWiFi)\\s*$"
+        "(?i)^\\s*(rmat|cotwifi|cotpublic|cot-iot|GMREPCR|SunTran.*|SunLink.*|CatTran.*|Veh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?|MimoSeries.*|Chill N NW|Tap4G.*|RAI-SIGNAGE.*|H&R Block.*|Saladandgo.*|McDonalds.*|McD[-_ ].*|Waystation.*|eBOS|CrystalMT|GoEnergy.*|HCI Mobile.*|MWMBackUp.*|AISMobile.*|Phone|Guys Win|Tucsonmemorials|Club Demonstration.*|TeslaWiFi.*|sscw_Store_WIFI.*|SBXL.*|Aloha_POS.*|Toast_POS.*|sc-RD.*-Maint|TrakkaStream.*|PEPLINK_[0-9A-Fa-f]{4}|E10[0-9][A-Z]?-.*|E11[0-9][A-Z]?-.*|E30[0-9][A-Z]?-.*|E3000[A-Z]?-.*|IBR[236][05]0[A-Z]?-.*|CBA[78]50.*|W185[05].*|FX3100.*|FX4100.*|FX4200.*|Verizon-M3100.*|Verizon-MiFi.*|Verizon Jetpack.*|Young Donut.*|ArmMan WiFi.*|NWAF.*|SUSD-BUS.*|TUSD[-_ ].*|MUSD[-_ ].*|VAIL[-_ ].*|.*-BUS.*|PioneerStore.*|WRANGLERS.*|OutOfService|XFINITY|xfinitywifi|CableWiFi)\\s*$"
     )
 
     /** Inseego / Novatel 5G FWA & MiFi OUIs widely deployed as Verizon/T-Mobile business broadband gateways. */
     private val INSEEGO_FWA_OR_MIFI_OUIS = setOf(
         "00:15:FF", "18:EE:86", "28:80:A2", "78:0C:71", "E0:86:14"
+    )
+
+    /** Peplink / Pepwave OUIs: unmarked HSI/federal fleet deployments hide SSID (`""`), whereas commercial/RV/SOHO units broadcast cleartext SSIDs. */
+    private val PEPLINK_OUIS = setOf(
+        "D4:13:F8", "10:56:CA", "00:11:6E", "6C:A3:D3", "00:1A:DD", "A8:C0:EA"
     )
 
     private val FIRE_SSID_REGEX = Regex("(?i)^(TFDCP.*|KNOX|KNOX[-_ ]?(BOX|MED|WIFI|EKEY|KEY).*|\\s*(TFD_|TFD\\d+|TUCSON_?FIRE|NWFD.*|GRFD.*|GVFD.*|AVFD.*|OVFD.*|RMFD.*|PCFD.*|SVFD.*|RVFD.*|MTFD.*|PTFD.*))$")
@@ -1735,11 +1740,23 @@ object KokohoSignatures {
         val normMac = normalizeMac(mac)
         if (IGNORED_INFRA_MAC_PREFIXES.any { it != "24:B2:B9:" && normMac.startsWith(it) }) return true
         val ssid = ssidOrName?.trim().orEmpty()
+        if (isAttestedAgencySubblock(normMac) && ssid.startsWith("PEPLINK_", ignoreCase = true)) {
+            return false
+        }
         if (ssid.isNotEmpty() && (KARR_DEALER_BLE_ALARM_REGEX.matches(ssid) || IGNORED_INFRA_OR_RETAIL_SSID_REGEX.matches(ssid))) return true
         // Custom-named Inseego 5G FWA business gateways (e.g. "CrystalMT") are commercial internet modems unless explicitly tactical/fleet-named.
         val canonPrefix = canonicalHardwareOuiMac(normMac).take(8)
         if (canonPrefix in INSEEGO_FWA_OR_MIFI_OUIS &&
             ssid.isNotEmpty() &&
+            !isMobileVehicleRouterModelSsid(ssid)
+        ) {
+            return true
+        }
+        // Commercial/RV/SOHO/utility Peplink routers with cleartext non-tactical SSIDs (e.g. "TrakkaStream", "sc-RD3147-Maint", "PEPLINK_3BE0")
+        // are suppressed unless on an attested agency subblock or broadcasting an explicit tactical/mobile-router SSID.
+        if (canonPrefix in PEPLINK_OUIS &&
+            ssid.isNotEmpty() &&
+            !isAttestedAgencySubblock(normMac) &&
             !isMobileVehicleRouterModelSsid(ssid)
         ) {
             return true
@@ -1863,7 +1880,7 @@ object KokohoSignatures {
         ) {
             return KokohoAgency.DHS_CBP to KokohoAgency.DHS_CBP.friendlyLabel
         }
-        if (combined.contains("Peplink", ignoreCase = true) && cleanSsid.isEmpty()) {
+        if (combined.contains("Peplink", ignoreCase = true) && (cleanSsid.isEmpty() || isAttestedAgencySubblock(mac))) {
             return KokohoAgency.DHS_HSI to KokohoAgency.DHS_HSI.friendlyLabel
         }
         return null
@@ -2600,6 +2617,7 @@ object KokohoSignatures {
         vendor: String?,
         advert: org.tucsoncommunity.kokoho.detect.Advert? = null
     ): Boolean {
+        if (isIgnoredInfrastructureOrRetail(mac, nameOrSsid)) return false
         if (isAxonNetworksConsumerRouter(mac, nameOrSsid, vendor)) return false
         val cleanName = nameOrSsid?.trim().orEmpty()
         if (cleanName.isNotEmpty() && (CONSUMER_BLE_WEARABLE_OR_AUDIO_REGEX.matches(cleanName) || KARR_DEALER_BLE_ALARM_REGEX.matches(cleanName))) {
@@ -2616,7 +2634,18 @@ object KokohoSignatures {
 
     fun inferCapabilitiesFromEvidence(facets: List<String>, details: List<String>): List<String> {
         val caps = ArrayList<String>()
-        if (facets.any { it.startsWith("uas:op:", ignoreCase = true) || (it.startsWith("uas:mac:", ignoreCase = true) && facets.size > 1) }) {
+        val isDroneAirframe = facets.any { f ->
+            f.startsWith("uas:mac:", ignoreCase = true) ||
+                f.startsWith("uas:id:", ignoreCase = true) ||
+                f.startsWith("uas:alt_", ignoreCase = true) ||
+                f.startsWith("drone:", ignoreCase = true)
+        } || details.any { d ->
+            d.contains("Tactical Drone", ignoreCase = true) ||
+                d.contains("Skydio", ignoreCase = true) ||
+                d.contains("Remote ID", ignoreCase = true) ||
+                d.contains("sUAS", ignoreCase = true)
+        }
+        if (!isDroneAirframe && facets.any { it.startsWith("uas:op:", ignoreCase = true) }) {
             caps.add("Drone Operator")
         }
         if (facets.any { it.startsWith("hw:kit:bwc:", ignoreCase = true) }) {

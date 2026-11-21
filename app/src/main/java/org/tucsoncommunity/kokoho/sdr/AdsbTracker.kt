@@ -84,6 +84,28 @@ class AdsbTracker {
         .filter { now - it.lastSeen <= STALE_MS && (it.positionAt == 0L || now - it.positionAt > STALE_MS) }
         .map { "%06x".format(Locale.US, it.icao) }
 
+    /** Enriched metadata (including Mode-S altitude/callsign) for aircraft heard without a CPR position. */
+    fun unlocatedPlanes(now: Long): List<PoliceAircraft.Plane> = planes.values
+        .filter { now - it.lastSeen <= STALE_MS && (it.positionAt == 0L || now - it.positionAt > STALE_MS) }
+        .map { p ->
+            val hex = "%06x".format(Locale.US, p.icao)
+            val ref = KokohoReferenceTables.lookupAircraft(hex)
+            PoliceAircraft.Plane(
+                hex = hex,
+                callsign = p.callsign,
+                registration = ref?.registration?.takeIf { it.isNotBlank() },
+                type = ref?.icaoType?.takeIf { it.isNotBlank() },
+                owner = ref?.owner?.takeIf { it.isNotBlank() },
+                lat = Double.NaN,
+                lon = Double.NaN,
+                altitudeFt = p.altitudeFt,
+                speedKt = p.speedKt,
+                trackDeg = p.trackDeg,
+                military = ref?.disposition == "MIL",
+                onGround = p.onGround
+            )
+        }
+
     /**
      * True when a recently heard (<= [PENDING_TACTICAL_MS]) aircraft still lacks a fresh CPR position
      * lock and matches a non-suppressed LE/DHS/GOV entry in [KokohoReferenceTables] or tactical callsign.

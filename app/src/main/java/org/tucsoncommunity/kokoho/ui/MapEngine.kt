@@ -74,8 +74,6 @@ internal interface MapEngine {
     fun setLayerVisible(layer: String, visible: Boolean) {}
     /** Toggles height-graded 3D building extrusions in both light and dark styles. */
     fun setBuildings3d(enabled: Boolean) {}
-    /** Toggles self-hosted DEM terrain + hillshade with camera orbit elevation compensation. */
-    fun setTerrain(enabled: Boolean, animateCamera: Boolean = false) {}
 
     // ---- camera ----
     val camera: Camera

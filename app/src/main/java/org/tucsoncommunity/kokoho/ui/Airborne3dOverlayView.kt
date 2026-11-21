@@ -20,15 +20,17 @@ import kotlin.math.tan
  * Hardware-accelerated 3D airborne overlay synchronized with MapLibre camera gestures.
  *
  * Renders two 3D airspace layers in perspective:
- *  1. **Unpinpointed Drone 3D Airspace Domes (`pitch > 4.0 deg`)**:
- *     Translucent 3D spheres / capped hemispheres (`hMax = min(R, 121.92 m = 400 ft AGL)`,
- *     horizontal slice `r(h) = sqrt(R^2 - h^2)`) with soft cyan/agency fill (`alpha ~ 0.16`
- *     so buildings inside remain visible), base ring, mid-latitude ring, `<= 400 ft` ceiling
- *     cap ring, and N-S / E-W spherical meridian arches. Collapses to 2D circle when `pitch <= 4 deg`.
+ *  1. **Unpinpointed Drone & Aircraft 3D Airspace Domes (`pitch > 4.0 deg`)**:
+ *     Translucent 3D spheres / capped hemispheres (`hMax = min(R, maxCeilingM)`,
+ *     horizontal slice `r(h) = sqrt(R^2 - h^2)`) capped at `400 ft / 121.92 m AGL` for sUAS
+ *     and `8,000 ft / 2,438.4 m AGL` (or known Mode-S AGL) for unpinpointed aircraft, with soft
+ *     translucent fill (`alpha ~ 0.16` so 3D buildings inside remain visible), base ring,
+ *     mid-latitude ring, ceiling cap ring, N-S / E-W spherical meridian arches, and optional
+ *     crisp ground operator dot + 3D tether (never a bubble on operators).
  *  2. **Pinpointed ADS-B Aircraft & Remote ID Drone Pucks (`pitch > 6.0 deg`)**:
- *     Projects altitude (`altitudeFt` MSL / `altFtAgl` AGL) above local DEM terrain so pucks
- *     never render underground, with ground shadow ellipse, dashed vertical nadir plumb line,
- *     pilot-to-drone 3D tether, rotated/upright badge icon, selection halo, and altitude label.
+ *     Projects altitude (`altitudeFt` MSL / `altFtAgl` AGL) above local Southern AZ true-MSL ground
+ *     elevation so pucks render at true AGL height above the map plane, with ground shadow ellipse,
+ *     dashed vertical nadir plumb line, pilot-to-drone 3D tether, badge icon, and altitude label.
  */
 internal class Airborne3dOverlayView(context: Context) : View(context) {
 
@@ -186,13 +188,24 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
         val colorArgb: Int,
         val opacity: Float,
         val badgeBitmap: Bitmap,
-        val label: String
+        val label: String,
+        val maxCeilingM: Double = TerrainElevationSampler.MAX_DRONE_AIRSPACE_M,
+        val isAircraft: Boolean = false,
+        val operatorLat: Double? = null,
+        val operatorLon: Double? = null
+    )
+
+    data class StandaloneOperatorPin(
+        val entityUuid: String,
+        val lat: Double,
+        val lon: Double
     )
 
     data class OverlayHit(
         val entityUuid: String,
         val lat: Double,
-        val lon: Double
+        val lon: Double,
+        val isPilotHit: Boolean = false
     )
 
     private data class RenderedHit(
@@ -200,14 +213,22 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
         val airX: Float,
         val airY: Float,
         val groundX: Float,
-        val groundY: Float
+        val groundY: Float,
+        val opScreen: PointF? = null
     )
 
     private data class RenderedDomeHit(
         val dome: DroneAirspaceDome,
         val hull: List<PointF>,
         val badgeX: Float,
-        val badgeY: Float
+        val badgeY: Float,
+        val opScreen: PointF? = null
+    )
+
+    private data class RenderedOperatorHit(
+        val pin: StandaloneOperatorPin,
+        val screenX: Float,
+        val screenY: Float
     )
 
     init {
@@ -221,11 +242,13 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
     private var mapEngine: MapEngine? = null
     private var targets: List<AirborneTarget> = emptyList()
     private var domes: List<DroneAirspaceDome> = emptyList()
+    private var standaloneOperators: List<StandaloneOperatorPin> = emptyList()
     private var selectedEntityUuid: String? = null
     private var topPaddingPx: Double = 0.0
     private var selectionRingBitmap: Bitmap? = null
     private val renderedHits = ArrayList<RenderedHit>()
     private val renderedDomes = ArrayList<RenderedDomeHit>()
+    private val renderedOperators = ArrayList<RenderedOperatorHit>()
 
     private val domeSilhouettePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -306,6 +329,30 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
     private val shadowRect = RectF()
     private val workPath = Path()
 
+    private val pilotBadgeBitmap: Bitmap by lazy {
+        MapIcons.classificationBadgeIcon(density, MapIcons.BadgeIconKind.PILOT, 0xFFD97706.toInt())
+    }
+    private val pilotTextFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        textSize = 11.4f * density
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+        color = 0xFFFDE68A.toInt()
+    }
+
+    private fun drawPilotPin(canvas: Canvas, x: Float, y: Float) {
+        val bmp = pilotBadgeBitmap
+        canvas.save()
+        canvas.translate(x, y)
+        canvas.scale(0.88f, 0.88f)
+        canvas.drawBitmap(bmp, -bmp.width * 0.5f, -bmp.height * 0.5f, bitmapPaint)
+        canvas.restore()
+        val labelY = y + (bmp.height * 0.44f) + 12f * density
+        textHaloPaint.color = 0xF0090D16.toInt()
+        canvas.drawText("Drone Pilot", x, labelY, textHaloPaint)
+        canvas.drawText("Drone Pilot", x, labelY, pilotTextFillPaint)
+    }
+
     fun bind(engine: MapEngine, ringBitmap: Bitmap?) {
         mapEngine = engine
         selectionRingBitmap = ringBitmap
@@ -315,10 +362,12 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
         newTargets: List<AirborneTarget>,
         newDomes: List<DroneAirspaceDome>,
         selectedUuid: String?,
-        cameraTopPaddingPx: Double = topPaddingPx
+        cameraTopPaddingPx: Double = topPaddingPx,
+        newStandaloneOperators: List<StandaloneOperatorPin> = emptyList()
     ) {
         targets = newTargets
         domes = newDomes
+        standaloneOperators = newStandaloneOperators
         selectedEntityUuid = selectedUuid
         topPaddingPx = cameraTopPaddingPx
         syncVisibilityAndRedraw()
@@ -354,19 +403,21 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
     private fun syncVisibilityAndRedraw(): Pair<Boolean, Boolean> {
         val point3d = is3dActive()
         val dome3d = isDome3dActive()
-        val wantVisible = (point3d && targets.isNotEmpty()) || (dome3d && domes.isNotEmpty())
+        val wantVisible = (point3d && (targets.isNotEmpty() || standaloneOperators.isNotEmpty())) ||
+            (dome3d && domes.isNotEmpty())
         if (wantVisible) {
             if (visibility != VISIBLE) visibility = VISIBLE
             invalidate()
         } else {
             renderedHits.clear()
             renderedDomes.clear()
+            renderedOperators.clear()
             if (visibility != GONE) visibility = GONE
         }
         return point3d to dome3d
     }
 
-    /** Hit-tests elevated 3D pucks first, then ground shadows, then 3D unpinpointed drone airspace domes. */
+    /** Hit-tests elevated 3D pucks first, then ground shadows/operators, then 3D unpinpointed drone/aircraft airspace domes. */
     fun hitTest(x: Float, y: Float, radiusPx: Float): OverlayHit? {
         if (visibility != VISIBLE) return null
         var bestTarget: AirborneTarget? = null
@@ -385,14 +436,42 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             val h = renderedHits[i]
             val dGround = hypot((x - h.groundX).toDouble(), (y - h.groundY).toDouble()).toFloat()
             if (dGround <= radiusPx) return OverlayHit(h.target.entityUuid, h.target.lat, h.target.lon)
+            h.opScreen?.let { op ->
+                val dOp = hypot((x - op.x).toDouble(), (y - op.y).toDouble()).toFloat()
+                if (dOp <= radiusPx * 1.15f) {
+                    return OverlayHit(
+                        entityUuid = h.target.entityUuid,
+                        lat = h.target.operatorLat ?: h.target.lat,
+                        lon = h.target.operatorLon ?: h.target.lon,
+                        isPilotHit = true
+                    )
+                }
+            }
         }
 
-        // Check drone dome badges first, then interior of 3D dome silhouette (front-to-back)
+        for (i in renderedOperators.indices.reversed()) {
+            val oh = renderedOperators[i]
+            val dOp = hypot((x - oh.screenX).toDouble(), (y - oh.screenY).toDouble()).toFloat()
+            if (dOp <= radiusPx * 1.15f) return OverlayHit(oh.pin.entityUuid, oh.pin.lat, oh.pin.lon, isPilotHit = true)
+        }
+
+        // Check dome apex badges and crisp operator pins first, then interior of 3D dome silhouette (front-to-back)
         for (i in renderedDomes.indices.reversed()) {
             val dh = renderedDomes[i]
             val dBadge = hypot((x - dh.badgeX).toDouble(), (y - dh.badgeY).toDouble()).toFloat()
             if (dBadge <= radiusPx * 1.15f) {
                 return OverlayHit(dh.dome.entityUuid, dh.dome.lat, dh.dome.lon)
+            }
+            dh.opScreen?.let { op ->
+                val dOp = hypot((x - op.x).toDouble(), (y - op.y).toDouble()).toFloat()
+                if (dOp <= radiusPx * 1.15f) {
+                    return OverlayHit(
+                        entityUuid = dh.dome.entityUuid,
+                        lat = dh.dome.operatorLat ?: dh.dome.lat,
+                        lon = dh.dome.operatorLon ?: dh.dome.lon,
+                        isPilotHit = true
+                    )
+                }
             }
         }
         for (i in renderedDomes.indices.reversed()) {
@@ -419,28 +498,53 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
         super.onDraw(canvas)
         renderedHits.clear()
         renderedDomes.clear()
+        renderedOperators.clear()
         val engine = mapEngine ?: return
         val cam = engine.camera
         if (width <= 0 || height <= 0) return
         val dome3d = cam.tilt > DOME_PITCH_THRESHOLD_DEG && domes.isNotEmpty()
-        val point3d = cam.tilt > PITCH_THRESHOLD_DEG && targets.isNotEmpty()
+        val point3d = cam.tilt > PITCH_THRESHOLD_DEG && (targets.isNotEmpty() || standaloneOperators.isNotEmpty())
         if (!dome3d && !point3d) return
 
         val mpp = engine.metersPerPixelAtLat(cam.lat).takeIf { it.isFinite() && it > 0.0 } ?: return
         val marginPx = 220f * density
 
-        // ---- 1. Translucent 3D Unpinpointed Drone Airspace Domes (`pitch > 4 deg`, capped at 400 ft / 121.92 m AGL) ----
+        // ---- 1. Translucent 3D Unpinpointed Drone & Aircraft Airspace Domes (`pitch > 4 deg`) ----
         if (dome3d) {
-            drawDroneDomes3d(canvas, engine, cam, mpp, marginPx)
+            drawAirspaceDomes3d(canvas, engine, cam, mpp, marginPx)
         }
 
-        // ---- 2. Pinpointed 3D ADS-B Aircraft & Remote ID Drone Pucks (`pitch > 6 deg`) ----
+        // ---- 2. Pinpointed 3D ADS-B Aircraft, Remote ID Drone Pucks & Crisp Operator Dots (`pitch > 6 deg`) ----
         if (point3d) {
-            drawPinpointedAirborneTargets3d(canvas, engine, cam, mpp, marginPx)
+            drawStandaloneOperators3d(canvas, engine, marginPx)
+            if (targets.isNotEmpty()) {
+                drawPinpointedAirborneTargets3d(canvas, engine, cam, mpp, marginPx)
+            }
         }
     }
 
-    private fun drawDroneDomes3d(
+    private fun drawStandaloneOperators3d(
+        canvas: Canvas,
+        engine: MapEngine,
+        marginPx: Float
+    ) {
+        if (standaloneOperators.isEmpty()) return
+        for (opPin in standaloneOperators) {
+            val pt = engine.projectScreen(opPin.lat, opPin.lon) ?: continue
+            if (pt.x < -marginPx || pt.x > width + marginPx || pt.y < -marginPx || pt.y > height + marginPx) {
+                continue
+            }
+            if (selectedEntityUuid != null && selectedEntityUuid.equals(opPin.entityUuid, ignoreCase = true)) {
+                selectionRingBitmap?.let { ring ->
+                    canvas.drawBitmap(ring, pt.x - ring.width * 0.5f, pt.y - ring.height * 0.5f, bitmapPaint)
+                }
+            }
+            drawPilotPin(canvas, pt.x, pt.y)
+            renderedOperators += RenderedOperatorHit(opPin, pt.x, pt.y)
+        }
+    }
+
+    private fun drawAirspaceDomes3d(
         canvas: Canvas,
         engine: MapEngine,
         cam: MapEngine.Camera,
@@ -488,7 +592,8 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             val ewArch: List<PointF>,
             val hull: List<PointF>,
             val topCenter: PointF,
-            val isCappedAt400Ft: Boolean
+            val isCappedAtCeiling: Boolean,
+            val opScreen: PointF?
         )
 
         val preparedDomes = ArrayList<PreparedDome>(domes.size)
@@ -501,9 +606,10 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 continue
             }
             val radiusM = d.radiusM.coerceAtLeast(25.0)
-            val hMax = TerrainElevationSampler.droneDomeCeilingHeightM(radiusM)
-            val rMid = TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hMax * 0.54)
-            val rCap = TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hMax)
+            val maxCeilingM = d.maxCeilingM.coerceAtLeast(TerrainElevationSampler.MIN_DRONE_AGL_M)
+            val hMax = TerrainElevationSampler.airspaceDomeCeilingHeightM(radiusM, maxCeilingM)
+            val rMid = TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hMax * 0.54, maxCeilingM)
+            val rCap = TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hMax, maxCeilingM)
             val isCapped = rCap > 1.5
 
             val baseRing = sampleHorizontalRing(d.lat, d.lon, radiusM, 0.0, RING_SEGMENTS)
@@ -516,13 +622,13 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             }
             val shellLower = sampleHorizontalRing(
                 d.lat, d.lon,
-                TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hMax * 0.30),
+                TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hMax * 0.30, maxCeilingM),
                 hMax * 0.30,
                 16
             )
             val shellUpper = sampleHorizontalRing(
                 d.lat, d.lon,
-                TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hMax * 0.80),
+                TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hMax * 0.80, maxCeilingM),
                 hMax * 0.80,
                 16
             )
@@ -532,7 +638,7 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 val arch = ArrayList<PointF>(MERIDIAN_STEPS_PER_SIDE * 2 + 3)
                 for (k in 0..MERIDIAN_STEPS_PER_SIDE) {
                     val hk = hMax * (k.toDouble() / MERIDIAN_STEPS_PER_SIDE)
-                    val rk = TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hk)
+                    val rk = TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hk, maxCeilingM)
                     val (la, lo) = if (rk > 0.25) MapGeo.offset(d.lat, d.lon, rk, bearingA) else (d.lat to d.lon)
                     projectDomeVertex(la, lo, hk)?.let { arch += it }
                 }
@@ -541,7 +647,7 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 }
                 for (k in MERIDIAN_STEPS_PER_SIDE downTo 0) {
                     val hk = hMax * (k.toDouble() / MERIDIAN_STEPS_PER_SIDE)
-                    val rk = TerrainElevationSampler.droneDomeSliceRadiusM(radiusM, hk)
+                    val rk = TerrainElevationSampler.airspaceDomeSliceRadiusM(radiusM, hk, maxCeilingM)
                     val (la, lo) = if (rk > 0.25) MapGeo.offset(d.lat, d.lon, rk, bearingB) else (d.lat to d.lon)
                     projectDomeVertex(la, lo, hk)?.let { arch += it }
                 }
@@ -561,6 +667,12 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             val hull = computeConvexHull(allSamples)
             if (hull.size < 3) continue
 
+            val opPt = if (!d.isAircraft && d.operatorLat != null && d.operatorLon != null) {
+                engine.projectScreen(d.operatorLat, d.operatorLon)
+            } else {
+                null
+            }
+
             preparedDomes += PreparedDome(
                 dome = d,
                 centerGroundY = gCenter.y,
@@ -571,15 +683,18 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 ewArch = ewArch,
                 hull = hull,
                 topCenter = topCenter,
-                isCappedAt400Ft = isCapped
+                isCappedAtCeiling = isCapped,
+                opScreen = opPt
             )
         }
 
         preparedDomes.sortBy { it.centerGroundY }
+        val opR = 6.5f * density
 
         for (pd in preparedDomes) {
             val d = pd.dome
             val rgb = d.colorArgb and 0x00FFFFFF
+            val solidColor = rgb or 0xFF000000.toInt()
             val opFactor = d.opacity.coerceIn(0.35f, 1.0f)
             val isSelected = selectedEntityUuid != null && selectedEntityUuid.equals(d.entityUuid, ignoreCase = true)
 
@@ -588,8 +703,8 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             domeSilhouettePaint.color = (fillAlpha shl 24) or rgb
             canvas.drawPath(buildClosedRingPath(pd.hull), domeSilhouettePaint)
 
-            // 2. Subtle ceiling disk tint when capped at 400 ft AGL (`R > 121.92 m`)
-            if (pd.isCappedAt400Ft && pd.capRing.size >= 3) {
+            // 2. Subtle ceiling disk tint when capped at max airspace ceiling (`R > maxCeilingM`)
+            if (pd.isCappedAtCeiling && pd.capRing.size >= 3) {
                 val capFillAlpha = (0.08f * opFactor * 255f).toInt().coerceIn(12, 26)
                 domeCapFillPaint.color = (capFillAlpha shl 24) or rgb
                 canvas.drawPath(buildClosedRingPath(pd.capRing), domeCapFillPaint)
@@ -619,16 +734,23 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 }
             }
 
-            // 6. Ceiling cap ring (`<= 400 ft AGL`)
-            if (pd.isCappedAt400Ft && pd.capRing.size >= 3) {
+            // 6. Ceiling cap ring (`<= 400 ft AGL` for drones, `<= 8,000 ft AGL` or Mode-S AGL for aircraft)
+            if (pd.isCappedAtCeiling && pd.capRing.size >= 3) {
                 val capStrokeAlpha = (0.88f * opFactor * 255f).toInt().coerceIn(85, 240)
                 domeCapRingPaint.color = if (isSelected) 0xFFFDE68A.toInt() else ((capStrokeAlpha shl 24) or rgb)
                 canvas.drawPath(buildClosedRingPath(pd.capRing), domeCapRingPaint)
             }
 
-            // 7. Selection halo + drone badge + label at dome apex / ceiling center
             val bx = pd.topCenter.x
             val by = pd.topCenter.y
+
+            // 7. Optional crisp ground pilot badge + dashed 3D tether (never a bubble around the operator!)
+            pd.opScreen?.let { op ->
+                canvas.drawLine(op.x, op.y, bx, by, tetherPaint)
+                drawPilotPin(canvas, op.x, op.y)
+            }
+
+            // 8. Selection halo + drone/aircraft badge + label at dome apex / ceiling center
             if (isSelected) {
                 selectionRingBitmap?.let { ring ->
                     canvas.drawBitmap(ring, bx - ring.width * 0.5f, by - ring.height * 0.5f, bitmapPaint)
@@ -646,7 +768,7 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
 
             if (d.label.isNotBlank()) {
                 val labelY = by + (bmp.height * 0.46f) + 13f * density
-                textHaloPaint.color = 0xEE090D16.toInt()
+                textHaloPaint.color = if (d.isAircraft) solidColor else 0xEE090D16.toInt()
                 val prevTextAlpha = textFillPaint.alpha
                 textFillPaint.alpha = (opFactor * 255f).toInt().coerceIn(110, 255)
                 canvas.drawText(d.label, bx, labelY, textHaloPaint)
@@ -654,7 +776,7 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 textFillPaint.alpha = prevTextAlpha
             }
 
-            renderedDomes += RenderedDomeHit(d, pd.hull, bx, by)
+            renderedDomes += RenderedDomeHit(d, pd.hull, bx, by, pd.opScreen)
         }
     }
 
@@ -680,9 +802,7 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             val groundElevM = TerrainElevationSampler.sampleElevationM(
                 context = context,
                 lat = t.lat,
-                lon = t.lon,
-                allowAsyncFetch = true,
-                onLoaded = { if (visibility == VISIBLE) postInvalidateOnAnimation() }
+                lon = t.lon
             )
             val hAglM = TerrainElevationSampler.computeAirborneHeightAboveGroundM(
                 isAircraft = t.isAircraft,
@@ -726,11 +846,10 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
             nadirDotPaint.color = solidColor
             canvas.drawCircle(p.groundX, p.groundY, nadirR, nadirDotPaint)
 
-            // 2. Optional Remote ID pilot ground pin + 3D tether up to airborne drone
+            // 2. Optional Remote ID pilot ground badge + 3D tether up to airborne drone
             item.opScreen?.let { op ->
                 canvas.drawLine(op.x, op.y, p.airX, p.airY, tetherPaint)
-                canvas.drawCircle(op.x, op.y, opR, opFillPaint)
-                canvas.drawCircle(op.x, op.y, opR, opStrokePaint)
+                drawPilotPin(canvas, op.x, op.y)
             }
 
             // 3. Vertical 3D nadir plumb line from ground shadow to airborne puck
@@ -767,7 +886,9 @@ internal class Airborne3dOverlayView(context: Context) : View(context) {
                 canvas.drawText(t.label, p.airX, labelY, textFillPaint)
             }
 
-            renderedHits += RenderedHit(t, p.airX, p.airY, p.groundX, p.groundY)
+            renderedHits += RenderedHit(t, p.airX, p.airY, p.groundX, p.groundY, item.opScreen)
         }
     }
 }
+
+internal typealias AirspaceDome = Airborne3dOverlayView.DroneAirspaceDome

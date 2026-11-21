@@ -426,7 +426,7 @@ class KokohoTest {
         assertEquals("CBP", redSnap.headline)
         assertTrue(redSnap.subheadline.startsWith("x1 · "))
         assertTrue(redSnap.subheadline.contains("±500 ft"))
-        assertEquals("Distance: ~500 ft", redSnap.distanceAndBearingText)
+        assertEquals("Distance: ~250 ft", redSnap.distanceAndBearingText)
         assertEquals("94% confidence · 2 signals", redSnap.bottomConfidenceText)
         assertEquals(2, redSnap.primaryThreat!!.evidenceSources.size)
         renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#0B0F14"), "kokoho_sandbox_monitor_red.png")

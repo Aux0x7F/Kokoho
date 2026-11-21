@@ -309,7 +309,7 @@ class MapFragment : Fragment() {
         // Long-press names an icon-only button; the ones whose meaning changes update it with their description.
         for (v in listOf(binding.searchButton, binding.fullscreenButton, binding.mapSettingsButton,
             binding.themeButton, binding.orientationButton, binding.centerButton,
-            binding.buildings3dButton, binding.terrainButton)) v.tooltipText = v.contentDescription
+            binding.buildings3dButton)) v.tooltipText = v.contentDescription
         binding.centerButton.setOnClickListener { if (tripId == null) setFollow(true) else centerOnMe() }
         binding.tracesButton.setOnClickListener { startActivity(Intent(act, TripsActivity::class.java)) }
         setupMapControlStack()
@@ -317,7 +317,6 @@ class MapFragment : Fragment() {
         setupSettingsButton()
         setupOrientationButton()
         setupBuildings3dButton()
-        setupTerrainButton()
         setupMenu()
         setupMapTimeWindowPills()
         setupSelectionFooter()
@@ -339,6 +338,7 @@ class MapFragment : Fragment() {
             nav = null // Navigation features removed in v1.3.0
             if (!embedded) {
                 val cards = AlertCardController(act, binding, { lastFix ?: knownFix() }) { lat, lon ->
+                    if (following) setFollow(false, quiet = true)
                     navHost.navLookAtRoute()
                     rf?.map?.easeTo(lat, lon, ms = 500)
                 }
@@ -532,7 +532,6 @@ class MapFragment : Fragment() {
             if (!alive) return@loadStyle
             updateCompassButton()
             styleBuildings3dButton()
-            styleTerrainButton()
             r.safe("location") { startLocation() }
             if (tripId != null) {
                 loadTrip()
@@ -1260,7 +1259,7 @@ class MapFragment : Fragment() {
      */
     private fun fitSideButtons() {
         val b = _binding ?: return
-        val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton, b.terrainButton)
+        val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton)
         if (!embedded || b.root.height == 0) {
             for (v in stackButtons) if (v.visibility != View.VISIBLE) v.visibility = View.VISIBLE
             return
@@ -1274,10 +1273,9 @@ class MapFragment : Fragment() {
             val rowLift = if (rowCrowdsSideButtons()) b.compactControls.height + 8 * d else 0f
             val room = b.root.height - 8 * d - rowLift - top
             hide = when {
-                4 * btnH <= room -> emptyList()
-                3 * btnH <= room -> listOf(b.terrainButton)
-                2 * btnH <= room -> listOf(b.buildings3dButton, b.terrainButton)
-                btnH <= room -> listOf(b.orientationButton, b.buildings3dButton, b.terrainButton)
+                3 * btnH <= room -> emptyList()
+                2 * btnH <= room -> listOf(b.buildings3dButton)
+                btnH <= room -> listOf(b.orientationButton, b.buildings3dButton)
                 else -> stackButtons
             }
         }
@@ -1288,10 +1286,9 @@ class MapFragment : Fragment() {
             val rowLift = if (rowCrowdsSideButtons()) b.compactControls.height + 8 * d else 0f
             val used = panel.measuredHeight + rowLift
             hide = when {
-                used + 4 * btnH <= room -> emptyList()
-                used + 3 * btnH <= room -> listOf(b.terrainButton)
-                used + 2 * btnH <= room -> listOf(b.buildings3dButton, b.terrainButton)
-                used + btnH <= room -> listOf(b.orientationButton, b.buildings3dButton, b.terrainButton)
+                used + 3 * btnH <= room -> emptyList()
+                used + 2 * btnH <= room -> listOf(b.buildings3dButton)
+                used + btnH <= room -> listOf(b.orientationButton, b.buildings3dButton)
                 else -> stackButtons
             }
         }
@@ -1419,7 +1416,7 @@ class MapFragment : Fragment() {
         if (b.sideButtons.orientation != want) {
             b.sideButtons.orientation = want
             val gap = (3 * d).toInt()
-            val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton, b.terrainButton)
+            val stackButtons = listOf(b.orientationButton, b.centerButton, b.buildings3dButton)
             stackButtons.forEachIndexed { idx, btn ->
                 val mlp = btn.layoutParams as? android.widget.LinearLayout.LayoutParams ?: return@forEachIndexed
                 mlp.topMargin = if (!wide && idx > 0) gap else 0
@@ -1588,16 +1585,18 @@ class MapFragment : Fragment() {
 
     private fun onFix(fix: Location) {
         if (!alive) return
-        lastFix = fix
-        gpsFix = fix
-        if (shouldRecenter(Prefs.mapAutoRecenter(act), following, tripId == null, Navigator.active, if (fix.hasSpeed()) fix.speed else 0f,
+        val bestFix = MapGps.best(listOf(fix, lastFix, ScanForegroundService.lastFix)) ?: fix
+        if (!MapGps.shouldAcceptLiveFix(bestFix, lastFix)) return
+        lastFix = bestFix
+        gpsFix = bestFix
+        if (shouldRecenter(Prefs.mapAutoRecenter(act), following, tripId == null, Navigator.active, if (bestFix.hasSpeed()) bestFix.speed else 0f,
                 nav?.cardShown == true, android.os.SystemClock.elapsedRealtime() - touchedAt, Prefs.mapRecenterSec(act) * 1000L)) setFollow(true, quiet = true)
-        if (tripId == null && !Navigator.active && Prefs.mapSpeedometer(act) && Prefs.mapSpeedLimitLive(act) && fix.hasSpeed())
-            org.tucsoncommunity.kokoho.nav.SpeedLimits.Live.onFix(fix.latitude, fix.longitude, fix.speed)
+        if (tripId == null && !Navigator.active && Prefs.mapSpeedometer(act) && Prefs.mapSpeedLimitLive(act) && bestFix.hasSpeed())
+            org.tucsoncommunity.kokoho.nav.SpeedLimits.Live.onFix(bestFix.latitude, bestFix.longitude, bestFix.speed)
         updateGauge()
         val m = map?.takeIf { it.puckOn } ?: return
-        m.pushFix(steady(onRoute(fix)))
-        val kmh = if (fix.hasSpeed()) fix.speed * 3.6f else 0f
+        m.pushFix(steady(onRoute(bestFix)))
+        val kmh = if (bestFix.hasSpeed()) bestFix.speed * 3.6f else 0f
         val before = smoothKmh
         smoothKmh = if (smoothKmh < 0f) kmh else smoothKmh * 0.7f + kmh * 0.3f
         if (!centeredOnce && following) {
@@ -1662,7 +1661,7 @@ class MapFragment : Fragment() {
         listening = false
     }
 
-    // ---- Cohesive 4-button map control stack (Compass, Location Reticle, 3D Buildings, Terrain) -------
+    // ---- Cohesive 3-button map control stack (Compass, Location Reticle, 3D Buildings) -------
 
     private fun is3d() = tripId == null && Prefs.map3d(act) && Prefs.mapHeadingUp(act)
 
@@ -1808,8 +1807,9 @@ class MapFragment : Fragment() {
                     if (following && m.puckOn && tripId == null) {
                         val pad = followPadding(binding.map.height, 0.5) ?: 0.0
                         m.follow(MapEngine.Follow.NORTH, pad, tilt = 45.0, zoom = null, ms = 450)
+                    } else {
+                        m.easeTo(tilt = 45.0, ms = 450)
                     }
-                    m.easeTo(tilt = 45.0, ms = 450)
                 }
             }
             styleBuildings3dButton()
@@ -1830,40 +1830,21 @@ class MapFragment : Fragment() {
         b.buildings3dButton.tooltipText = b.buildings3dButton.contentDescription
     }
 
-    private fun setupTerrainButton() {
-        binding.terrainButton.setOnClickListener {
-            val next = !Prefs.mapTerrain(act)
-            Prefs.setMapTerrain(act, next)
-            if (next && following && map?.puckOn == true && tripId == null && (map?.camera?.tilt ?: 0.0) < 15.0) {
-                val pad = followPadding(binding.map.height, 0.5) ?: 0.0
-                map?.follow(MapEngine.Follow.NORTH, pad, tilt = 36.0, zoom = null, ms = 450)
-            }
-            map?.setTerrain(next, animateCamera = true)
-            styleTerrainButton()
-            updateCompassButton()
-        }
-        styleTerrainButton()
-    }
-
-    private fun styleTerrainButton() {
-        val b = _binding ?: return
-        val on = Prefs.mapTerrain(act)
-        b.terrainButton.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_terrain)
-        b.terrainButton.background = circularControlBg(active = on)
-        b.terrainButton.imageTintList = android.content.res.ColorStateList.valueOf(
-            if (on) KokohoJourneyUi.HIGHLIGHT_AMBER else KokohoJourneyUi.COLOR_TEXT_PRIMARY
-        )
-        b.terrainButton.contentDescription = if (on) "3D terrain elevation enabled (tap to disable)" else "Toggle 3D terrain elevation"
-        b.terrainButton.tooltipText = b.terrainButton.contentDescription
-    }
-
     /** Turns following on (re-centres now and keeps you centred) or off (after you pan). */
     private fun setFollow(on: Boolean, quiet: Boolean = false) {
         following = on
         if (on) {
             userZoom = false
+            val freshest = MapGps.best(listOf(lastFix, ScanForegroundService.lastFix, org.tucsoncommunity.kokoho.nav.Navigator.lastFix, systemLastKnown()))
+                ?: lastFix
+                ?: knownFix()
+            if (freshest != null) {
+                lastFix = freshest
+                gpsFix = freshest
+                map?.takeIf { it.puckOn }?.pushFix(steady(onRoute(freshest)))
+            }
             if (map?.puckOn != true && !quiet) Toast.makeText(act, "Waiting for a GPS fix...", Toast.LENGTH_SHORT).show()
-            else if (lastFix == null && ScanForegroundService.lastFix == null && !quiet) Toast.makeText(act, "Waiting for a GPS fix...", Toast.LENGTH_SHORT).show()
+            else if (freshest == null && !quiet) Toast.makeText(act, "Waiting for a GPS fix...", Toast.LENGTH_SHORT).show()
         }
         applyMode(animate = true)
         styleFollowButton()
@@ -1939,11 +1920,9 @@ class MapFragment : Fragment() {
         }
         if (rf != null && rf?.isDark != darkTiles()) loadStyle()
         map?.setBuildings3d(Prefs.mapBuildings3d(act))
-        map?.setTerrain(Prefs.mapTerrain(act), animateCamera = false)
         styleOrientationButton()
         styleFollowButton()
         styleBuildings3dButton()
-        styleTerrainButton()
         applyMode(animate = false)
         hideLegacyMapChrome()
         if (tripId == null) {

@@ -206,18 +206,36 @@ class KokohoMapTerrainAndTracksTest {
     }
 
     @Test
-    fun mapBuildings3dAndTerrainPrefsPersistCleanly() {
+    fun mobileMapControlStackHasExact3ButtonsWithTerrainButtonRemoved() {
+        val act = org.robolectric.Robolectric.buildActivity(androidx.appcompat.app.AppCompatActivity::class.java).setup().get()
+        val binding = org.tucsoncommunity.kokoho.databinding.ActivityMapBinding.inflate(android.view.LayoutInflater.from(act))
+
+        // terrainButton and ic_map_terrain must be absent from the mobile layout and resources
+        val terrainResId = act.resources.getIdentifier("terrainButton", "id", act.packageName)
+        assertEquals("terrainButton must be removed from mobile map layout", 0, terrainResId)
+        val terrainDrawableId = act.resources.getIdentifier("ic_map_terrain", "drawable", act.packageName)
+        assertEquals("ic_map_terrain drawable must be removed", 0, terrainDrawableId)
+
+        // Visible stack children in sideButtons must be the exact 3-button stack: Compass, Location Reticle, 3D Buildings
+        val visibleStackIds = (0 until binding.sideButtons.childCount)
+            .map { binding.sideButtons.getChildAt(it) }
+            .filter { it.visibility == android.view.View.VISIBLE }
+            .map { it.id }
+        assertEquals(
+            listOf(
+                binding.orientationButton.id,
+                binding.centerButton.id,
+                binding.buildings3dButton.id
+            ),
+            visibleStackIds
+        )
+
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         assertFalse(Prefs.mapBuildings3d(ctx))
-        assertFalse(Prefs.mapTerrain(ctx))
         Prefs.setMapBuildings3d(ctx, true)
-        Prefs.setMapTerrain(ctx, true)
         assertTrue(Prefs.mapBuildings3d(ctx))
-        assertTrue(Prefs.mapTerrain(ctx))
         Prefs.setMapBuildings3d(ctx, false)
-        Prefs.setMapTerrain(ctx, false)
         assertFalse(Prefs.mapBuildings3d(ctx))
-        assertFalse(Prefs.mapTerrain(ctx))
     }
 
     @Test
@@ -483,5 +501,502 @@ class KokohoMapTerrainAndTracksTest {
         val det = selected as? org.tucsoncommunity.kokoho.ui.RfMap.MapSelection.Detection
         assertEquals("uas-oui-dome-1", det?.entityUuid)
         assertEquals("DRONE", det?.agencyCode)
+    }
+
+    @Test
+    fun operatorsNeverRenderBubblesAndRemoteIdDronesUpTo40mArePinpointed() {
+        val act = org.robolectric.Robolectric.buildActivity(androidx.appcompat.app.AppCompatActivity::class.java).setup().get()
+        val sourceData = mutableMapOf<String, String>()
+        val addedSources = mutableSetOf<String>()
+        var currentTilt = 0.0
+        val fakeEngine = object : org.tucsoncommunity.kokoho.ui.MapEngine {
+            override val provider = org.tucsoncommunity.kokoho.ui.MapEngine.Provider.OPENFREEMAP
+            override val view = android.view.View(act)
+            override val credit = ""
+            override val labelFont = listOf("Noto Sans Regular")
+            override fun onCreate(state: android.os.Bundle?) {}
+            override fun onStart() {}
+            override fun onResume() {}
+            override fun onPause() {}
+            override fun onStop() {}
+            override fun onLowMemory() {}
+            override fun onSaveInstanceState(out: android.os.Bundle) {}
+            override fun onDestroy() {}
+            override fun whenReady(ready: () -> Unit) { ready() }
+            override fun setStyle(dark: Boolean, loaded: (Boolean) -> Unit) { loaded(true) }
+            override val styleLoaded = true
+            override fun hasSource(id: String) = id in addedSources
+            override fun addImage(id: String, bitmap: android.graphics.Bitmap) {}
+            override fun addSource(id: String) { addedSources += id }
+            override fun setData(source: String, geoJson: String) { sourceData[source] = geoJson }
+            override fun addLayer(json: org.json.JSONObject) {}
+            override fun setPaint(layer: String, name: String, value: String) {}
+            override val camera get() = org.tucsoncommunity.kokoho.ui.MapEngine.Camera(32.2226, -110.9747, 15.0, 0.0, currentTilt)
+            override fun jumpTo(lat: Double, lon: Double, zoom: Double?) {}
+            override fun zoomTo(zoom: Double) {}
+            override fun easeTo(lat: Double?, lon: Double?, zoom: Double?, bearing: Double?, tilt: Double?, flat: Boolean, ms: Long) {}
+            override fun fit(points: List<Pair<Double, Double>>, paddingPx: Int, bottomPx: Int) {}
+            override fun visibleBox() = org.tucsoncommunity.kokoho.ui.MapEngine.Box(32.25, -110.94, 32.20, -111.00)
+            override fun toLatLon(x: Float, y: Float) = 32.2226 to -110.9747
+            override fun projectScreen(lat: Double, lon: Double): android.graphics.PointF {
+                val dx = ((lon - (-110.9747)) * 93000.0 / 2.5).toFloat()
+                val dy = -((lat - 32.2226) * 111000.0 / 2.5).toFloat()
+                return android.graphics.PointF(540f + dx, 960f + dy)
+            }
+            override fun metersPerPixelAtLat(lat: Double): Double = 2.5
+            override fun setMinZoom(zoom: Double) {}
+            override var onCameraMove: (() -> Unit)? = null
+            override var onIdle: (() -> Unit)? = null
+            override var onClick: ((Float, Float) -> Unit)? = null
+            override var onLongClick: ((Double, Double) -> Unit)? = null
+            override var onUserGesture: (() -> Unit)? = null
+            override fun query(box: android.graphics.RectF, layers: List<Pair<String, String>>, result: (List<List<String>>) -> Unit) {
+                result(layers.map { emptyList() })
+            }
+            override fun setMarker(bitmap: android.graphics.Bitmap?) {}
+            override val draws3dMarker = false
+            override fun setMarker3d(model: java.io.File?, size: Float) {}
+            override fun startPuck() = true
+            override val puckOn = true
+            override fun pushFix(fix: android.location.Location) {}
+            override fun follow(mode: org.tucsoncommunity.kokoho.ui.MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) {}
+            override var onFollowDismissed: (() -> Unit)? = null
+            override fun placeBranding(topPx: Int, atEnd: Boolean) {}
+        }
+
+        val nowMs = System.currentTimeMillis()
+        assertEquals(
+            "Tactical Drone",
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix("Tactical Drone + Operator")
+        )
+
+        val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
+        val overlay = Airborne3dOverlayView(act)
+        overlay.layout(0, 0, 1080, 1920)
+        rfMap.attachAirborneOverlay(overlay)
+        rfMap.loadStyle(dark = true) {}
+
+        // 1. Remote ID drone with uncertaintyRadiusM = 36 (<= 40) and uas:alt_ft_agl / uas:op evidence is treated as pinpointed!
+        val ridDrone36m = org.tucsoncommunity.kokoho.posture.EvaluatedThreat(
+            uuid = "rid-drone-36m",
+            trackUuid = "rid-drone-36m",
+            agency = org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE,
+            label = "Likely Tactical Drone + Operator",
+            posture = org.tucsoncommunity.kokoho.posture.PostureColor.RED,
+            overallConfidence = 94,
+            classificationConfidence = 95,
+            spatialConfidence = 92,
+            estimatedDistanceM = 140,
+            uncertaintyRadiusM = 36,
+            bearingDeg = null,
+            closingVelocityMps = null,
+            recurrenceSummary = "Airborne at 180 ft AGL + Operator",
+            evidenceSources = listOf(
+                org.tucsoncommunity.kokoho.posture.EvidenceBadge("REMOTE_ID_UAS", "uas:mac:60:60:1F:11:22:33", "DJI Mavic 3E", 0.92, nowMs),
+                org.tucsoncommunity.kokoho.posture.EvidenceBadge("REMOTE_ID_OP", "uas:op:32.22100,-110.97300", "Pilot GPS", 0.80, nowMs)
+            ),
+            updatedAtMs = nowMs,
+            lat = 32.2226,
+            lon = -110.9747,
+            isApproximatedPosition = true,
+            isPinpointed = false,
+            isDrone = true,
+            altitudeFtAgl = 180,
+            operatorLat = 32.2210,
+            operatorLon = -110.9730
+        )
+        assertTrue("Remote ID drone with uncertaintyRadiusM <= 40 must be pinpointed", rfMap.isPinpointedDrone(ridDrone36m))
+        assertFalse(rfMap.isUnpinpointedDrone(ridDrone36m))
+
+        // 2. Unpinpointed drone with operatorLat/operatorLon + standalone uas:op:* entity:
+        //    ONLY the flying unpinpointed drone gets a bubble; neither operator gets a 2D circle or 3D sphere!
+        val unpinpointedWithOp = org.tucsoncommunity.kokoho.posture.EvaluatedThreat(
+            uuid = "unpin-drone-with-op",
+            trackUuid = "unpin-drone-with-op",
+            agency = org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE,
+            label = "Suspected Tactical Drone + Operator",
+            posture = org.tucsoncommunity.kokoho.posture.PostureColor.ORANGE,
+            overallConfidence = 82,
+            classificationConfidence = 90,
+            spatialConfidence = 68,
+            estimatedDistanceM = 190,
+            uncertaintyRadiusM = 190,
+            bearingDeg = null,
+            closingVelocityMps = null,
+            recurrenceSummary = "DJI DroneID + Operator",
+            evidenceSources = listOf(
+                org.tucsoncommunity.kokoho.posture.EvidenceBadge("TACTICAL_DRONE_OUI", "uas:mac:60:60:1F:44:55:66", "DJI sUAS", 0.90, nowMs)
+            ),
+            updatedAtMs = nowMs,
+            lat = 32.2232,
+            lon = -110.9740,
+            isApproximatedPosition = false,
+            isPinpointed = false,
+            isDrone = true,
+            operatorLat = 32.2218,
+            operatorLon = -110.9752
+        )
+        val standaloneOp = org.tucsoncommunity.kokoho.posture.EvaluatedThreat(
+            uuid = "standalone-uas-op-1",
+            trackUuid = "standalone-uas-op-1",
+            agency = org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE,
+            label = "Drone + Operator",
+            posture = org.tucsoncommunity.kokoho.posture.PostureColor.YELLOW,
+            overallConfidence = 80,
+            classificationConfidence = 85,
+            spatialConfidence = 75,
+            estimatedDistanceM = 210,
+            uncertaintyRadiusM = 160,
+            bearingDeg = null,
+            closingVelocityMps = null,
+            recurrenceSummary = "Remote ID Pilot + Operator",
+            evidenceSources = listOf(
+                org.tucsoncommunity.kokoho.posture.EvidenceBadge("REMOTE_ID_OP", "uas:op:32.22050,-110.97600", "Pilot GPS", 0.85, nowMs)
+            ),
+            updatedAtMs = nowMs,
+            lat = 32.2205,
+            lon = -110.9760,
+            isApproximatedPosition = true,
+            isPinpointed = false,
+            isDrone = true,
+            operatorLat = 32.2205,
+            operatorLon = -110.9760,
+            hardwareIdentifier = "uas:op:32.22050,-110.97600"
+        )
+        assertTrue(rfMap.isStandaloneDroneOperator(standaloneOp))
+        assertFalse(rfMap.isDroneDetection(standaloneOp))
+
+        val snap = org.tucsoncommunity.kokoho.posture.PostureSnapshot(
+            color = org.tucsoncommunity.kokoho.posture.PostureColor.RED,
+            headline = "Drone",
+            subheadline = "",
+            distanceAndBearingText = "",
+            bottomConfidenceText = "",
+            primaryThreat = ridDrone36m,
+            activeThreats = listOf(ridDrone36m, unpinpointedWithOp, standaloneOp),
+            monitorGroups = emptyList(),
+            mapThreats = listOf(ridDrone36m, unpinpointedWithOp, standaloneOp),
+            enabledScopeText = ""
+        )
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, MapTimeWindow.MIN_30)
+        val pins = rfMap.drawLive(emptyList(), snap)
+
+        // Exactly ONE pin/bubble in PRECISION (for unpinpointedWithOp only; ridDrone36m and standaloneOp have ZERO bubbles!)
+        assertEquals(1, pins.size)
+        assertEquals("kokoho:unpin-drone-with-op", pins.single().mac)
+        assertFalse("Legacy '+ Operator' suffix must be stripped", pins.single().label.contains("+ Operator", ignoreCase = true))
+
+        val precisionFeatures = org.json.JSONObject(sourceData["rf-precision"]!!).getJSONArray("features")
+        assertEquals("Only the unpinpointed flying drone may have a radius polygon", 1, precisionFeatures.length())
+        assertEquals("kokoho:unpin-drone-with-op", precisionFeatures.getJSONObject(0).getJSONObject("properties").getString("mac"))
+
+        // All 3 operators render as crisp ground dots in rf-drone-ops, and both flying drones with operators render tethers
+        val opsFeatures = org.json.JSONObject(sourceData["rf-drone-ops"]!!).getJSONArray("features")
+        assertEquals("All 3 operators must render as crisp ground dots in rf-drone-ops", 3, opsFeatures.length())
+        val lineFeatures = org.json.JSONObject(sourceData["rf-drone-lines"]!!).getJSONArray("features")
+        assertEquals("Both flying drones with operator coordinates must render dashed tethers", 2, lineFeatures.length())
+
+        // Tilt to 3D (pitch = 45 deg) and verify 3D overlay draws cleanly with zero operator bubbles
+        currentTilt = 45.0
+        rfMap.syncAirbornePitchState(0.0)
+        val bmp = android.graphics.Bitmap.createBitmap(1080, 1920, android.graphics.Bitmap.Config.ARGB_8888)
+        overlay.draw(android.graphics.Canvas(bmp))
+    }
+
+    @Test
+    fun unpinpointedAircraft3dSpheresCapAt8000FtOrModeSAltitudeAndHitTestCleanly() {
+        // 1. Physics: unpinpointed aircraft ceiling defaults to 2,438.4 m (8,000 ft AGL) vs 121.92 m (400 ft AGL) for drones
+        assertEquals(1200.0, TerrainElevationSampler.aircraftDomeCeilingHeightM(1200.0), 0.001)
+        assertEquals(2438.4, TerrainElevationSampler.aircraftDomeCeilingHeightM(3500.0), 0.001)
+        val expectedAirCapR = kotlin.math.sqrt(3500.0 * 3500.0 - 2438.4 * 2438.4)
+        assertEquals(expectedAirCapR, TerrainElevationSampler.aircraftDomeSliceRadiusM(3500.0, 2438.4), 0.05)
+
+        // When Mode-S altitude is known (e.g. 4,500 ft MSL over ~742 m MSL Tucson -> ~629.6 m AGL), sphere caps at Mode-S AGL
+        val tucsonElevM = TerrainElevationSampler.estimateRegionalElevationM(32.2226, -110.9747)
+        val knownModeSAglM = TerrainElevationSampler.computeAirborneHeightAboveGroundM(true, 4500, tucsonElevM)
+        assertEquals(knownModeSAglM, TerrainElevationSampler.aircraftDomeCeilingHeightM(2400.0, knownModeSAglM), 0.01)
+        assertTrue(knownModeSAglM < TerrainElevationSampler.MAX_AIRCRAFT_AIRSPACE_M)
+        assertTrue(knownModeSAglM > TerrainElevationSampler.MAX_DRONE_AIRSPACE_M)
+
+        // 2. Mode-S heardNearby without CPR GPS produces isPinpointed = false in KokohoPostureEngine
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val nowMs = System.currentTimeMillis()
+        org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.clearLocalState()
+        org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(
+            android.location.Location("test").apply {
+                latitude = 32.2226
+                longitude = -110.9747
+                time = nowMs
+            }
+        )
+        PoliceAircraft.local = emptyList()
+        PoliceAircraft.localUnlocated = listOf(
+            PoliceAircraft.Seen(
+                plane = PoliceAircraft.Plane(
+                    hex = "a0aa61",
+                    callsign = "OMAHA1",
+                    registration = "N142CS",
+                    type = "P3",
+                    owner = "US CUSTOMS AND BORDER PROTECTION",
+                    lat = Double.NaN,
+                    lon = Double.NaN,
+                    altitudeFt = 5200,
+                    speedKt = null,
+                    trackDeg = null,
+                    military = false
+                ),
+                hit = org.tucsoncommunity.kokoho.detect.Hit(
+                    org.tucsoncommunity.kokoho.detect.Category.AIRCRAFT,
+                    "Police aircraft in radio range: US Customs And Border Protection",
+                    60,
+                    "Mode-S transponder heard without CPR GPS",
+                    PoliceAircraft.VIA_LOCAL
+                )
+            )
+        )
+        PoliceAircraft.localAt = nowMs
+        val evalSnap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(ctx, nowMs)
+        val modeSThreat = evalSnap.mapThreats.firstOrNull { it.aircraftHex == "A0AA61" }
+        org.junit.Assert.assertNotNull("Unlocated Mode-S CBP aircraft must appear in mapThreats", modeSThreat)
+        assertTrue(modeSThreat!!.isAircraft)
+        assertFalse("Unlocated Mode-S aircraft without CPR GPS must have isPinpointed = false", modeSThreat.isPinpointed)
+        assertTrue("Unlocated Mode-S aircraft must have wide uncertainty radius > 65m", modeSThreat.uncertaintyRadiusM > 65)
+
+        // 3. RfMap + Airborne3dOverlayView renders unpinpointed aircraft in DRONE_DOME_2D at pitch <= 4 deg and 3D sphere at pitch > 4 deg
+        val act = org.robolectric.Robolectric.buildActivity(androidx.appcompat.app.AppCompatActivity::class.java).setup().get()
+        val sourceData = mutableMapOf<String, String>()
+        val layerVisibility = mutableMapOf<String, Boolean>()
+        val addedSources = mutableSetOf<String>()
+        var currentTilt = 0.0
+        val fakeEngine = object : org.tucsoncommunity.kokoho.ui.MapEngine {
+            override val provider = org.tucsoncommunity.kokoho.ui.MapEngine.Provider.OPENFREEMAP
+            override val view = android.view.View(act)
+            override val credit = ""
+            override val labelFont = listOf("Noto Sans Regular")
+            override fun onCreate(state: android.os.Bundle?) {}
+            override fun onStart() {}
+            override fun onResume() {}
+            override fun onPause() {}
+            override fun onStop() {}
+            override fun onLowMemory() {}
+            override fun onSaveInstanceState(out: android.os.Bundle) {}
+            override fun onDestroy() {}
+            override fun whenReady(ready: () -> Unit) { ready() }
+            override fun setStyle(dark: Boolean, loaded: (Boolean) -> Unit) { loaded(true) }
+            override val styleLoaded = true
+            override fun hasSource(id: String) = id in addedSources
+            override fun addImage(id: String, bitmap: android.graphics.Bitmap) {}
+            override fun addSource(id: String) { addedSources += id }
+            override fun setData(source: String, geoJson: String) { sourceData[source] = geoJson }
+            override fun addLayer(json: org.json.JSONObject) {}
+            override fun setPaint(layer: String, name: String, value: String) {}
+            override fun setLayerVisible(layer: String, visible: Boolean) { layerVisibility[layer] = visible }
+            override val camera get() = org.tucsoncommunity.kokoho.ui.MapEngine.Camera(32.2226, -110.9747, 12.2, 0.0, currentTilt)
+            override fun jumpTo(lat: Double, lon: Double, zoom: Double?) {}
+            override fun zoomTo(zoom: Double) {}
+            override fun easeTo(lat: Double?, lon: Double?, zoom: Double?, bearing: Double?, tilt: Double?, flat: Boolean, ms: Long) {}
+            override fun fit(points: List<Pair<Double, Double>>, paddingPx: Int, bottomPx: Int) {}
+            override fun visibleBox() = org.tucsoncommunity.kokoho.ui.MapEngine.Box(32.35, -110.80, 32.10, -111.10)
+            override fun toLatLon(x: Float, y: Float) = 32.2226 to -110.9747
+            override fun projectScreen(lat: Double, lon: Double): android.graphics.PointF {
+                val dx = ((lon - (-110.9747)) * 93000.0 / 28.0).toFloat()
+                val dy = -((lat - 32.2226) * 111000.0 / 28.0).toFloat()
+                return android.graphics.PointF(540f + dx, 960f + dy)
+            }
+            override fun metersPerPixelAtLat(lat: Double): Double = 28.0
+            override fun setMinZoom(zoom: Double) {}
+            override var onCameraMove: (() -> Unit)? = null
+            override var onIdle: (() -> Unit)? = null
+            override var onClick: ((Float, Float) -> Unit)? = null
+            override var onLongClick: ((Double, Double) -> Unit)? = null
+            override var onUserGesture: (() -> Unit)? = null
+            override fun query(box: android.graphics.RectF, layers: List<Pair<String, String>>, result: (List<List<String>>) -> Unit) {
+                result(layers.map { emptyList() })
+            }
+            override fun setMarker(bitmap: android.graphics.Bitmap?) {}
+            override val draws3dMarker = false
+            override fun setMarker3d(model: java.io.File?, size: Float) {}
+            override fun startPuck() = true
+            override val puckOn = true
+            override fun pushFix(fix: android.location.Location) {}
+            override fun follow(mode: org.tucsoncommunity.kokoho.ui.MapEngine.Follow, topPaddingPx: Double?, tilt: Double, zoom: Double?, ms: Long) {}
+            override var onFollowDismissed: (() -> Unit)? = null
+            override fun placeBranding(topPx: Int, atEnd: Boolean) {}
+        }
+
+        val overlay = Airborne3dOverlayView(act)
+        overlay.layout(0, 0, 1080, 1920)
+        val rfMap = org.tucsoncommunity.kokoho.ui.RfMap(act, fakeEngine)
+        var selected: org.tucsoncommunity.kokoho.ui.RfMap.MapSelection? = null
+        rfMap.onSelectTarget = { selected = it }
+        rfMap.attachAirborneOverlay(overlay)
+        rfMap.loadStyle(dark = true) {}
+
+        currentTilt = 2.0
+        rfMap.drawLive(emptyList(), evalSnap)
+        assertEquals(android.view.View.GONE, overlay.visibility)
+        assertEquals(true, layerVisibility["rf-drone-dome-2d-fill"])
+        // Unpinpointed aircraft must NOT appear as a pinpoint icon in rf-aircraft
+        assertEquals(0, org.json.JSONObject(sourceData["rf-aircraft"]!!).getJSONArray("features").length())
+        assertTrue(sourceData["rf-precision"].orEmpty().contains(modeSThreat.uuid))
+
+        // Tilt to 46 deg (> 4 deg): 3D aircraft sphere renders and interior tap selects the aircraft
+        currentTilt = 46.0
+        rfMap.syncAirbornePitchState(0.0)
+        assertEquals(android.view.View.VISIBLE, overlay.visibility)
+        assertEquals(false, layerVisibility["rf-drone-dome-2d-fill"])
+        val canvasBmp = android.graphics.Bitmap.createBitmap(1080, 1920, android.graphics.Bitmap.Config.ARGB_8888)
+        overlay.draw(android.graphics.Canvas(canvasBmp))
+
+        rfMap.onTap(540f, 940f, null)
+        val det = selected as? org.tucsoncommunity.kokoho.ui.RfMap.MapSelection.Detection
+        assertEquals(modeSThreat.uuid, det?.entityUuid)
+    }
+
+    @Test
+    fun monitorCenterCentroidDistanceDrivesPostureAndFormatsDistanceWithParenthesizedAccuracy() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val nowMs = 1_775_000_000_000L
+        org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.clearLocalState()
+        KokohoHubClient.clearCachedObjects()
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.setImperialUnits(ctx, true)
+
+        val centroidLat = 32.2226
+        val centroidLon = -110.9747
+        // CBP centroid with uncertainty_radius_m = 450m (~0.3 mi), stationary (velocity_mps = 0)
+        KokohoHubClient.ingestThreatObjectJson(
+            """
+            {
+              "uuid": "cbp-tcr-centroid-0001",
+              "track_uuid": "cbp-tcr-track-0001",
+              "updated_at_ms": $nowMs,
+              "confidence": { "overall": 0.91, "classification": 0.95, "spatial": 0.82, "temporal_freshness": 1.0 },
+              "location": {
+                "lat": $centroidLat,
+                "lon": $centroidLon,
+                "uncertainty_radius_m": 450.0,
+                "h3_res8": 614259430555648010,
+                "bearing_deg": 0.0,
+                "velocity_mps": 0.0,
+                "propagation_class": "GROUND_DIRECT"
+              },
+              "classification": {
+                "master_group": "DHS",
+                "category": "DHS_CBP",
+                "label": "CBP Fleet Unit",
+                "recurrence_summary": "CBP Fleet Router",
+                "evidence_sources": [
+                  {
+                    "kind": "WIFI_BLE_OUI",
+                    "facet_key": "hw:mac:00:30:44:77:88:99",
+                    "detail": "CBP Fleet Router",
+                    "weight": 0.90,
+                    "last_seen_ms": $nowMs
+                  }
+                ]
+              }
+            }
+            """.trimIndent()
+        )
+
+        fun setUserMetersNorth(distM: Double, ts: Long) {
+            val (uLat, uLon) = org.tucsoncommunity.kokoho.ui.MapGeo.offset(centroidLat, centroidLon, distM, 0.0)
+            org.tucsoncommunity.kokoho.service.ScanForegroundService.setLastFixForTest(
+                android.location.Location("test").apply {
+                    latitude = uLat
+                    longitude = uLon
+                    time = ts
+                }
+            )
+        }
+
+        // 1. At 1,000 m (> 850 m) from center centroid -> YELLOW, subtext shows center distance + (±accuracy)
+        setUserMetersNorth(1_000.0, nowMs + 1_000L)
+        val snap1000 = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(ctx, nowMs + 1_000L)
+        assertEquals(org.tucsoncommunity.kokoho.posture.PostureColor.YELLOW, snap1000.color)
+        assertTrue("Expected ~0.6 mi (±0.3 mi) in subheadline, got '${snap1000.subheadline}'", snap1000.subheadline.contains("~0.6 mi (±0.3 mi)"))
+
+        // 2. Driving closer to 500 m (301..850 m) from center centroid -> ORANGE
+        setUserMetersNorth(500.0, nowMs + 5_000L)
+        val snap500 = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(ctx, nowMs + 5_000L)
+        assertEquals(org.tucsoncommunity.kokoho.posture.PostureColor.ORANGE, snap500.color)
+        assertTrue("Expected ~0.3 mi (±0.3 mi) in subheadline, got '${snap500.subheadline}'", snap500.subheadline.contains("~0.3 mi (±0.3 mi)"))
+
+        // 3. Driving right past at 120 m (<= 300 m, inside the 450 m circle!) -> RED (never stuck at ORANGE or bare ±0.3 mi!)
+        setUserMetersNorth(120.0, nowMs + 10_000L)
+        val snap120 = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(ctx, nowMs + 10_000L)
+        assertEquals(
+            "Driving 120 m from centroid must trigger RED even when uncertaintyRadiusM = 450 m",
+            org.tucsoncommunity.kokoho.posture.PostureColor.RED,
+            snap120.color
+        )
+        assertEquals(120.0, snap120.primaryThreat!!.estimatedDistanceM.toDouble(), 5.0)
+        assertTrue(
+            "Monitor subtext inside uncertainty circle must show center distance ~400 ft (±0.3 mi), never bare ±0.3 mi; got '${snap120.subheadline}'",
+            snap120.subheadline.contains("~400 ft (±0.3 mi)")
+        )
+
+        KokohoHubClient.clearCachedObjects()
+        org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.clearLocalState()
+    }
+
+    @Test
+    fun peplinkPosSuppressionDronePilotSeparationAndMonotonicGpsGuard() {
+        val sig = org.tucsoncommunity.kokoho.posture.KokohoSignatures
+        // 1. South-side TrakkaStream, RV/SOHO PEPLINK_<4hex>, municipal sc-RD*-Maint, and Aloha_POS are suppressed
+        assertEquals(null, sig.matchOuiOrSsid("D4:13:F8:18:DB:A9", "TrakkaStream", "Peplink"))
+        assertEquals(null, sig.matchOuiOrSsid("D4:13:F8:04:AB:CA", "PEPLINK_3BE0", "Peplink"))
+        assertEquals(null, sig.matchOuiOrSsid("10:56:CA:92:29:48", "sc-RD3147-Maint", "Peplink"))
+        assertFalse(sig.isCompanionKitDevice("00:01:21:1F:77:40", "Aloha_POS391944", "WatchGuard"))
+
+        // Hidden-SSID Peplink and field-attested subblocks remain active HSI signatures
+        assertEquals(
+            org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_HSI,
+            sig.matchOuiOrSsid("D4:13:F8:99:11:22", "", "Peplink")?.first
+        )
+        assertEquals(
+            org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_HSI,
+            sig.matchOuiOrSsid("D4:13:F8:0A:41:08", "PEPLINK_4594", "Peplink")?.first
+        )
+
+        // 2. Drone airframes never conflate "[Drone Operator]" capability or suffix
+        val droneCaps = sig.inferCapabilitiesFromEvidence(
+            listOf("uas:mac:60:60:1F:32:99:8B", "uas:op:32.14801,-110.91989"),
+            listOf("Tactical Drone")
+        )
+        assertFalse("Drone airframe must not infer Drone Operator capability", "Drone Operator" in droneCaps)
+        assertEquals(
+            "Tactical Drone",
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix("Tactical Drone [Drone Operator]")
+        )
+
+        // 3. Monotonic GPS guard rejects older or sudden coarse fused fixes after a precise GPS fix
+        val preciseRef = android.location.Location("gps").apply {
+            latitude = 32.2226
+            longitude = -110.9747
+            time = 1_000_000L
+            accuracy = 6f
+        }
+        val olderFix = android.location.Location("fused").apply {
+            latitude = 32.2100
+            longitude = -110.9800
+            time = 995_000L
+            accuracy = 8f
+        }
+        val coarseNetworkJump = android.location.Location("fused").apply {
+            latitude = 32.2150
+            longitude = -110.9820
+            time = 1_002_000L
+            accuracy = 120f
+        }
+        val newerPrecise = android.location.Location("gps").apply {
+            latitude = 32.2230
+            longitude = -110.9747
+            time = 1_001_000L
+            accuracy = 7f
+        }
+        assertFalse(org.tucsoncommunity.kokoho.ui.MapGps.shouldAcceptLiveFix(olderFix, preciseRef))
+        assertFalse(org.tucsoncommunity.kokoho.ui.MapGps.shouldAcceptLiveFix(coarseNetworkJump, preciseRef))
+        assertTrue(org.tucsoncommunity.kokoho.ui.MapGps.shouldAcceptLiveFix(newerPrecise, preciseRef))
     }
 }

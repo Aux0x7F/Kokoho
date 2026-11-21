@@ -134,6 +134,7 @@ object MapIcons {
         HELICOPTER("heli"),
         SMALL_PLANE("plane"),
         DRONE("drone"),
+        PILOT("pilot"),
         RADIO("radio")
     }
 
@@ -251,6 +252,37 @@ object MapIcons {
                 c.drawCircle(cx - off, cy + off, rotorR, stroke)
                 c.drawCircle(cx + off, cy + off, rotorR, stroke)
                 c.drawRoundRect(RectF(cx - r * 0.16f, cy - r * 0.22f, cx + r * 0.16f, cy + r * 0.22f), 2f * dp, 2f * dp, fill)
+            }
+            BadgeIconKind.PILOT -> {
+                // Ground operator silhouette + handheld RC controller + antenna whip
+                val personX = cx - r * 0.10f
+                c.drawCircle(personX, cy - r * 0.32f, r * 0.19f, fill)
+                val body = android.graphics.Path().apply {
+                    moveTo(personX - r * 0.38f, cy + r * 0.44f)
+                    quadTo(personX - r * 0.38f, cy - r * 0.04f, personX, cy - r * 0.04f)
+                    quadTo(personX + r * 0.38f, cy - r * 0.04f, personX + r * 0.38f, cy + r * 0.44f)
+                    close()
+                }
+                c.drawPath(body, fill)
+                val cutout = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = bgColorArgb
+                    style = Paint.Style.FILL
+                }
+                c.drawRoundRect(
+                    RectF(personX - r * 0.18f, cy + r * 0.12f, personX + r * 0.34f, cy + r * 0.38f),
+                    1.4f * dp,
+                    1.4f * dp,
+                    cutout
+                )
+                c.drawRoundRect(
+                    RectF(personX - r * 0.12f, cy + r * 0.17f, personX + r * 0.30f, cy + r * 0.34f),
+                    1.2f * dp,
+                    1.2f * dp,
+                    fill
+                )
+                // RC transmitter antenna whip + tip
+                c.drawLine(cx + r * 0.30f, cy + r * 0.14f, cx + r * 0.44f, cy - r * 0.40f, stroke)
+                c.drawCircle(cx + r * 0.44f, cy - r * 0.40f, r * 0.08f, fill)
             }
             BadgeIconKind.RADIO -> {
                 // Vertical mast + base dot + dual symmetrical RF wave arcs

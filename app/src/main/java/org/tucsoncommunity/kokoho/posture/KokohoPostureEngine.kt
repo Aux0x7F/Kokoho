@@ -94,16 +94,15 @@ data class EvaluatedThreat(
         }
 
     /**
-     * Effective proximity metric (meters) used for sorting and display:
-     *  - Pinpointed aircraft / drone: exact distance `estimatedDistanceM`
-     *  - Displaced circle outside user: nearest edge distance `nearestEdgeDistanceM` (or `uncertaintyRadiusM` if user is inside)
-     *  - User-centered circle: `uncertaintyRadiusM`
+     * Effective proximity metric (meters) used for Monitor sorting and headline distance:
+     *  - Known centroid (`lat != null && lon != null`): true distance to center centroid `estimatedDistanceM`
+     *  - Unlocated signal (`lat == null || lon == null`): `uncertaintyRadiusM`
      */
     val effectiveProximityM: Int
-        get() = when {
-            isPinpointed -> estimatedDistanceM.coerceAtLeast(10)
-            nearestEdgeDistanceM > 0 -> nearestEdgeDistanceM
-            else -> uncertaintyRadiusM.coerceAtLeast(20)
+        get() = if (lat != null && lon != null) {
+            estimatedDistanceM.coerceAtLeast(0)
+        } else {
+            uncertaintyRadiusM.coerceAtLeast(20)
         }
 
     /**
@@ -140,7 +139,7 @@ data class AgencyMonitorGroup(
 
     /**
      * Formats the inline subtext shown directly beneath the agency headline on the Monitor page:
-     * e.g. `x2 · ±650 ft · +1 (~0.5 mi) · 1m ago`
+     * e.g. `x2 · ~400 ft (±0.3 mi) · +1 (~1.1 mi) · 1m ago`
      */
     fun formatMonitorSubtext(context: Context, nowMs: Long = System.currentTimeMillis()): String {
         val countPrefix = "x$primaryCount"
@@ -151,11 +150,11 @@ data class AgencyMonitorGroup(
                 "$distStr · ${leadUnit.altitudeFtAgl} ft AGL"
             }
             leadUnit?.isAircraft == true -> {
-                val distStr = KokohoPostureEngine.formatShortDistance(context, leadUnit.estimatedDistanceM)
+                val distStr = KokohoPostureEngine.formatAccuracyOrEdge(context, leadUnit)
                 if (leadUnit.isCircling) "$distStr · Circling" else distStr
             }
-            primaryEdgeDistanceM > 0 -> {
-                "${KokohoPostureEngine.formatShortDistance(context, primaryEdgeDistanceM)} (${KokohoPostureEngine.formatAccuracyRadius(context, primaryRadiusM)})"
+            leadUnit != null -> {
+                KokohoPostureEngine.formatAccuracyOrEdge(context, leadUnit)
             }
             else -> KokohoPostureEngine.formatAccuracyRadius(context, primaryRadiusM)
         }
@@ -197,6 +196,26 @@ object KokohoPostureEngine {
     private const val MIN_2D_CROSS_TRACK_M = 25.0
     /** Maximum uncertainty radius (meters) at which an approximated circle is considered narrow enough to show a point dot. */
     const val PINPOINT_POINT_RADIUS_M = 25
+
+    /** Strips legacy `"+ Operator"` / `"[Drone Operator]"` suffixes from drone display titles and summaries. */
+    fun sanitizeDroneOperatorSuffix(raw: String): String =
+        raw.replace(Regex("""\s*\[Drone Operator\]""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*\+\s*Operators?\b""", RegexOption.IGNORE_CASE), "")
+            .trim()
+
+    /**
+     * True when an entity represents a standalone `uas:op:*` pilot/operator coordinate rather than
+     * a flying `uas:mac:*` / `DRONE:*` airframe. Operators never receive an uncertainty bubble.
+     */
+    fun isStandaloneDroneOperator(
+        badges: List<EvidenceBadge>,
+        hardwareIdentifier: String? = null
+    ): Boolean {
+        if (hardwareIdentifier?.trim()?.startsWith("uas:op:", ignoreCase = true) == true) return true
+        val primary = badges.firstOrNull()?.facetKey?.trim()
+        if (primary?.startsWith("uas:op:", ignoreCase = true) == true) return true
+        return badges.isNotEmpty() && badges.all { it.facetKey.trim().startsWith("uas:op:", ignoreCase = true) }
+    }
 
     data class SpatialSample(
         var lat: Double,
@@ -432,8 +451,15 @@ object KokohoPostureEngine {
     }
 
     private fun resolveUserLocation(context: Context): android.location.Location? {
-        ScanForegroundService.lastFix?.let { return it }
         val now = System.currentTimeMillis()
+        org.tucsoncommunity.kokoho.ui.MapGps.best(
+            listOf(
+                ScanForegroundService.lastFix,
+                org.tucsoncommunity.kokoho.nav.Navigator.lastFix
+            ),
+            now
+        )?.takeIf { abs(now - it.time) <= 15 * 60_000L }?.let { return it }
+        ScanForegroundService.lastFix?.let { return it }
         if (cachedFallbackLocation != null && now - cachedFallbackLocationAtMs < 10_000L) {
             return cachedFallbackLocation
         }
@@ -441,12 +467,16 @@ object KokohoPostureEngine {
         val lm = runCatching {
             context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
         }.getOrNull() ?: return null
-        val resolved = listOf(
-            android.location.LocationManager.GPS_PROVIDER,
-            android.location.LocationManager.NETWORK_PROVIDER
-        ).mapNotNull { provider -> runCatching { lm.getLastKnownLocation(provider) }.getOrNull() }
-            .filter { now - it.time <= 15 * 60_000L }
-            .maxByOrNull { it.time }
+        val providers = runCatching { lm.getProviders(true) }.getOrNull().orEmpty().ifEmpty {
+            listOf(
+                android.location.LocationManager.GPS_PROVIDER,
+                android.location.LocationManager.NETWORK_PROVIDER
+            )
+        }
+        val candidates = providers
+            .mapNotNull { provider -> runCatching { lm.getLastKnownLocation(provider) }.getOrNull() }
+            .filter { abs(now - it.time) <= 15 * 60_000L }
+        val resolved = org.tucsoncommunity.kokoho.ui.MapGps.pick(candidates, now)
         cachedFallbackLocation = resolved
         return resolved
     }
@@ -635,10 +665,10 @@ object KokohoPostureEngine {
                 val cLat = cached.result.centerLat ?: best.lat
                 val cLon = cached.result.centerLon ?: best.lon
                 val distFromUser = haversineMeters(curUserLat, curUserLon, cLat, cLon).roundToInt()
-                val effDist = if (obsIsFresh && distFromUser < cached.result.estimatedDistanceM) {
-                    cached.result.estimatedDistanceM
+                val effDist = if (obsIsFresh && !cached.result.isApproximatedPosition && list.size == 1 && distFromUser < 10) {
+                    latest.estDistanceM
                 } else {
-                    max(distFromUser, cached.result.uncertaintyRadiusM.coerceAtLeast(15))
+                    distFromUser
                 }
                 return cached.result.copy(
                     centerLat = cLat,
@@ -686,7 +716,8 @@ object KokohoPostureEngine {
                 val liveLat = if (wSum > 0.0) latWeighted / wSum else latest.lat
                 val liveLon = if (wSum > 0.0) lonWeighted / wSum else latest.lon
                 val liveRadiusM = latest.estDistanceM.coerceIn(20, 150)
-                val distFromUser = max(haversineMeters(curUserLat, curUserLon, liveLat, liveLon).roundToInt(), liveRadiusM)
+                val rawLiveDist = haversineMeters(curUserLat, curUserLon, liveLat, liveLon).roundToInt()
+                val distFromUser = if (list.size == 1 && rawLiveDist < 8) latest.estDistanceM else rawLiveDist
                 val res = TriangulationResult(
                     centerLat = liveLat,
                     centerLon = liveLon,
@@ -763,10 +794,10 @@ object KokohoPostureEngine {
                     Triple(anchorCandidateLat, anchorCandidateLon, convergedPeakRadiusM)
                 }
                 val distFromUserToAnchor = haversineMeters(curUserLat, curUserLon, anchorLat, anchorLon).roundToInt()
-                val effDistM = if (obsIsFresh && distFromUserToAnchor < latest.estDistanceM) {
+                val effDistM = if (obsIsFresh && localSamples.size == 1 && distFromUserToAnchor < 10) {
                     latest.estDistanceM
                 } else {
-                    max(distFromUserToAnchor, settledRadiusM)
+                    distFromUserToAnchor
                 }
                 val baseSpatialConf = (38 + min(26, (maxSpreadM / 3.0).toInt())).coerceIn(38, 64)
                 val res = TriangulationResult(
@@ -829,7 +860,7 @@ object KokohoPostureEngine {
             val approxLat = refLat + (bestY / mPerDegLat)
             val approxLon = refLon + (bestX / mPerDegLon)
             val rmsResidualM = sqrt(bestScore / totalWeight)
-            val distFromUserM = haversineMeters(curUserLat, curUserLon, approxLat, approxLon).roundToInt().coerceAtLeast(15)
+            val distFromUserM = haversineMeters(curUserLat, curUserLon, approxLat, approxLon).roundToInt()
 
             // Safe range bounds: prevent IllegalArgumentException when distFromUserM * 0.85 < 15.0
             val maxDilution = max(15.0, convergedPeakRadiusM * 0.85)
@@ -856,10 +887,7 @@ object KokohoPostureEngine {
                         haversineMeters(s.lat, s.lon, prevSettled.centerLat, prevSettled.centerLon) > shiftThresholdM
                 }
                 if (!sustainedDeparture) {
-                    val keptDistM = max(
-                        haversineMeters(curUserLat, curUserLon, prevSettled.centerLat, prevSettled.centerLon).roundToInt(),
-                        prevSettled.uncertaintyRadiusM.coerceAtLeast(15)
-                    )
+                    val keptDistM = haversineMeters(curUserLat, curUserLon, prevSettled.centerLat, prevSettled.centerLon).roundToInt()
                     val stableRes = prevSettled.copy(
                         estimatedDistanceM = keptDistM,
                         isClosing = isClosing,
@@ -1412,7 +1440,7 @@ object KokohoPostureEngine {
                 oui.locatedFit != null && (!rawTri.isApproximatedPosition || oui.locatedFit.radiusM <= rawTri.uncertaintyRadiusM) -> {
                     val fitRadM = oui.locatedFit.radiusM.roundToInt().coerceAtLeast(12)
                     val fitDist = if (userLoc != null) {
-                        max(haversineMeters(userLoc.latitude, userLoc.longitude, oui.locatedFit.lat, oui.locatedFit.lon).roundToInt(), fitRadM)
+                        haversineMeters(userLoc.latitude, userLoc.longitude, oui.locatedFit.lat, oui.locatedFit.lon).roundToInt()
                     } else rawTri.estimatedDistanceM
                     val fitConf = max(rawTri.spatialConfidence, (90 - oui.locatedFit.radiusM * 0.35).roundToInt().coerceIn(68, 92))
                     rawTri.copy(
@@ -1794,7 +1822,7 @@ object KokohoPostureEngine {
                     kitSnap.located != null && (!rawKitTri.isApproximatedPosition || kitSnap.located.radiusM <= rawKitTri.uncertaintyRadiusM) -> {
                         val fitRadM = kitSnap.located.radiusM.roundToInt().coerceAtLeast(12)
                         val fitDist = if (userLoc != null) {
-                            max(haversineMeters(userLoc.latitude, userLoc.longitude, kitSnap.located.lat, kitSnap.located.lon).roundToInt(), fitRadM)
+                            haversineMeters(userLoc.latitude, userLoc.longitude, kitSnap.located.lat, kitSnap.located.lon).roundToInt()
                         } else rawKitTri.estimatedDistanceM
                         val fitConf = max(rawKitTri.spatialConfidence, (90 - kitSnap.located.radiusM * 0.35).roundToInt().coerceIn(68, 92))
                         rawKitTri.copy(
@@ -1973,12 +2001,15 @@ object KokohoPostureEngine {
             ) {
                 continue
             }
-            val isAir = remote.location.propagationClass.equals("AIRBORNE", ignoreCase = true) ||
-                remote.classification.evidenceSources.any {
-                    it.kind.contains("ADSB", ignoreCase = true) ||
-                        it.facetKey.startsWith("adsb:", ignoreCase = true) ||
-                        it.facetKey.startsWith("ICAO:", ignoreCase = true)
-                }
+            val isAir = !remote.classification.category.equals("DRONE", ignoreCase = true) &&
+                remote.classification.evidenceSources.none { it.facetKey.startsWith("uas:", ignoreCase = true) } && (
+                    remote.location.propagationClass.equals("AIRBORNE", ignoreCase = true) ||
+                        remote.classification.evidenceSources.any {
+                            it.kind.contains("ADSB", ignoreCase = true) ||
+                                it.facetKey.startsWith("adsb:", ignoreCase = true) ||
+                                it.facetKey.startsWith("ICAO:", ignoreCase = true)
+                        }
+                    )
             if (isAir && KokohoSignatures.isAnomalousUnattributedAirRecord(
                     primaryKey = remote.classification.evidenceSources.firstOrNull()?.facetKey ?: "adsb:",
                     category = remote.classification.category,
@@ -2054,7 +2085,6 @@ object KokohoPostureEngine {
                     }
                 )
 
-            val effectiveDistM = if (hasUserLoc) max(edgeDistM, uncertM) else 9_999
             val posture = if (isAir) {
                 when {
                     !hasUserLoc -> PostureColor.YELLOW
@@ -2065,8 +2095,8 @@ object KokohoPostureEngine {
             } else {
                 when {
                     !hasUserLoc -> PostureColor.YELLOW
-                    effectiveDistM <= 300 -> PostureColor.RED
-                    headingTowardUser || effectiveDistM <= 850 -> PostureColor.ORANGE
+                    centerDistM <= 300 -> PostureColor.RED
+                    headingTowardUser || centerDistM <= 850 -> PostureColor.ORANGE
                     else -> PostureColor.YELLOW
                 }
             }
@@ -2103,20 +2133,48 @@ object KokohoPostureEngine {
                 }
             }
 
+            val isStandaloneOp = !isAir && isStandaloneDroneOperator(badges, badges.firstOrNull()?.facetKey)
+            val hasRemoteIdDroneEvidence = remoteIsDrone && !isStandaloneOp && (
+                remoteAltFt != null ||
+                    remoteOpLat != null ||
+                    badges.any {
+                        it.facetKey.startsWith("uas:alt_ft_agl:", ignoreCase = true) ||
+                            it.facetKey.startsWith("uas:op:", ignoreCase = true)
+                    }
+                )
+            val effectiveUncertM = if (isStandaloneOp) 15 else uncertM
+            val effectiveIsPinpointed = when {
+                isStandaloneOp -> true
+                isAir -> effectiveUncertM <= 65
+                hasRemoteIdDroneEvidence && effectiveUncertM <= 40 -> true
+                else -> effectiveUncertM <= PINPOINT_POINT_RADIUS_M
+            }
+            val cleanedRecurrence = if (remoteIsDrone || isStandaloneOp) {
+                sanitizeDroneOperatorSuffix(remote.classification.recurrenceSummary)
+            } else {
+                remote.classification.recurrenceSummary
+            }
+            val cleanedRemoteLabel = if (remoteIsDrone || isStandaloneOp) {
+                sanitizeDroneOperatorSuffix(remote.classification.label)
+            } else {
+                remote.classification.label
+            }
+
             val classConf = (remote.confidence.classification * 100).roundToInt().coerceIn(1, 99)
             val spatConf = (remote.confidence.spatial * 100).roundToInt().coerceIn(1, 99)
             val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
 
             val remoteSightings = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1)
-            val isRemoteDerived = isAir ||
+            val isRemoteDerived = isStandaloneOp ||
+                isAir ||
                 remote.corroborationCount >= 2 ||
                 remote.sightingCount >= 2 ||
-                uncertM <= WIDE_CIRCLE_JITTER_MIN_M
+                effectiveUncertM <= WIDE_CIRCLE_JITTER_MIN_M
 
             val remoteHeli = isAir && KokohoSignatures.isHelicopterAirframe(
                 null,
                 remote.classification.category,
-                "${remote.classification.label} ${badges.joinToString(" ") { it.detail }}",
+                "$cleanedRemoteLabel ${badges.joinToString(" ") { it.detail }}",
                 agency = agency,
                 hex = remoteHex
             )
@@ -2130,16 +2188,16 @@ object KokohoPostureEngine {
                 classificationConfidence = classConf,
                 spatialConfidence = spatConf,
                 estimatedDistanceM = centerDistM,
-                uncertaintyRadiusM = uncertM,
+                uncertaintyRadiusM = effectiveUncertM,
                 bearingDeg = bearingFromUser,
                 closingVelocityMps = remote.location.velocityMps,
-                recurrenceSummary = remote.classification.recurrenceSummary,
+                recurrenceSummary = cleanedRecurrence,
                 evidenceSources = badges,
                 updatedAtMs = remote.updatedAtMs,
                 lat = remote.location.lat,
                 lon = remote.location.lon,
                 isApproximatedPosition = isRemoteDerived,
-                isPinpointed = isAir || uncertM <= PINPOINT_POINT_RADIUS_M,
+                isPinpointed = effectiveIsPinpointed,
                 isAircraft = isAir,
                 isHelicopter = remoteHeli,
                 aircraftTrackDeg = remote.location.bearingDeg ?: remoteFacetHdgDeg,
@@ -2147,20 +2205,20 @@ object KokohoPostureEngine {
                 isCircling = remoteIsCircling,
                 isDrone = remoteIsDrone,
                 altitudeFtAgl = remoteAltFt,
-                operatorLat = remoteOpLat,
-                operatorLon = remoteOpLon,
+                operatorLat = if (isStandaloneOp) (remoteOpLat ?: remote.location.lat) else remoteOpLat,
+                operatorLon = if (isStandaloneOp) (remoteOpLon ?: remote.location.lon) else remoteOpLon,
                 hardwareIdentifier = badges.firstOrNull()?.facetKey,
                 sightingCount = remoteSightings,
                 capabilities = KokohoSignatures.inferCapabilitiesFromEvidence(
                     badges.map { it.facetKey },
-                    badges.map { it.detail } + remote.classification.label
+                    badges.map { it.detail } + cleanedRemoteLabel
                 )
             )
-            if (remoteIsDrone && uncertM <= PINPOINT_POINT_RADIUS_M) {
+            if (remoteIsDrone && !isStandaloneOp && effectiveIsPinpointed) {
                 org.tucsoncommunity.kokoho.online.PoliceAircraft.recordPinpointDroneFix(
                     entityUuid = remote.uuid,
                     agencyId = agency.id,
-                    label = remote.classification.label.ifBlank { agency.friendlyLabel },
+                    label = cleanedRemoteLabel.ifBlank { agency.friendlyLabel },
                     lat = remote.location.lat,
                     lon = remote.location.lon,
                     nowMs = remote.updatedAtMs
@@ -2788,12 +2846,19 @@ object KokohoPostureEngine {
         localRawObservations: MutableList<RawSensorReportCandidate>
     ) {
         val enabledAirAgencies = KokohoSignatures.getEnabledAircraftAgencies(context)
+        val locatedHexes = HashSet<String>()
         for (seen in PoliceAircraft.all(nowMs)) {
             val p = seen.plane
             val hit = seen.hit
             if (PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)) continue
-            val isCircling = hit?.label == PoliceAircraft.CIRCLING ||
-                hit?.evidence?.contains("circling", ignoreCase = true) == true
+            val hasExactGps = p.lat.isFinite() &&
+                p.lon.isFinite() &&
+                !(abs(p.lat) < 1e-4 && abs(p.lon) < 1e-4) &&
+                hit?.label?.startsWith("Police aircraft in radio range", ignoreCase = true) != true
+            val isCircling = hasExactGps && (
+                hit?.label == PoliceAircraft.CIRCLING ||
+                    hit?.evidence?.contains("circling", ignoreCase = true) == true
+                )
             val agency = KokohoSignatures.classifyAircraftAgency(
                 owner = p.owner,
                 registration = p.registration,
@@ -2807,18 +2872,22 @@ object KokohoPostureEngine {
             val allowed = isCircling ||
                 (if (agency.isDhs) enabledAirAgencies.any { it.isDhs } else agency in enabledAirAgencies)
             if (!allowed) continue
+            if (!hasExactGps && userLoc == null) continue
 
-            val facetKey = "adsb:icao:${p.hex.uppercase()}"
+            val hexUpper = p.hex.uppercase()
+            if (hasExactGps) locatedHexes += hexUpper
+            val facetKey = "adsb:icao:$hexUpper"
             val uuid = deterministicUuidV5(facetKey)
-            val distM = if (userLoc != null) {
-                haversineMeters(userLoc.latitude, userLoc.longitude, p.lat, p.lon).roundToInt()
-            } else {
-                9_999
+            val distM = when {
+                hasExactGps && userLoc != null -> haversineMeters(userLoc.latitude, userLoc.longitude, p.lat, p.lon).roundToInt()
+                !hasExactGps -> 2_400
+                else -> 9_999
             }
+            val uncertM = if (hasExactGps) 25 else 2_400
             val velMps = p.speedKt?.let { it * 0.514444 }
             val isUnattributedCircling = isCircling && hit?.label == PoliceAircraft.CIRCLING
             val posture = when {
-                userLoc == null -> PostureColor.YELLOW
+                !hasExactGps || userLoc == null -> PostureColor.YELLOW
                 isUnattributedCircling && distM <= AIRCRAFT_NEARBY_DIRECT_MAX_M -> PostureColor.RED
                 isUnattributedCircling && distM <= 3_219 -> PostureColor.ORANGE
                 isUnattributedCircling -> PostureColor.YELLOW
@@ -2832,22 +2901,28 @@ object KokohoPostureEngine {
             } else {
                 hit?.confidence?.coerceIn(80, 99) ?: 92
             }
-            val spatConf = if (isUnattributedCircling) 68 else 98
+            val spatConf = when {
+                !hasExactGps -> 42
+                isUnattributedCircling -> 68
+                else -> 98
+            }
             val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
             val identStr = listOfNotNull(
                 p.registration?.takeIf { it.isNotBlank() },
                 p.callsign?.takeIf { it.isNotBlank() },
-                "ICAO ${p.hex.uppercase()}"
+                "ICAO $hexUpper"
             ).distinct().joinToString(" · ")
             val seenAtMs = max(PoliceAircraft.localAt, PoliceAircraft.latestAt).takeIf { it > 0L } ?: nowMs
-            org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(
-                hex = p.hex,
-                lat = p.lat,
-                lon = p.lon,
-                nowMs = seenAtMs,
-                altM = p.altitudeFt?.let { it * 0.3048 },
-                entityUuid = uuid
-            )
+            if (hasExactGps) {
+                org.tucsoncommunity.kokoho.online.PoliceAircraft.recordAirborneFix(
+                    hex = p.hex,
+                    lat = p.lat,
+                    lon = p.lon,
+                    nowMs = seenAtMs,
+                    altM = p.altitudeFt?.let { it * 0.3048 },
+                    entityUuid = uuid
+                )
+            }
             val isHeli = KokohoSignatures.isHelicopterAirframe(
                 p.type,
                 p.category,
@@ -2857,6 +2932,7 @@ object KokohoPostureEngine {
             )
             val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()
             val airSummary = when {
+                !hasExactGps -> "Mode-S Transponder in Radio Range ($identStr)"
                 isUnattributedCircling -> "Unattributed Circling Aircraft: Verify ($identStr)"
                 isCircling -> "Spy Plane / Orbiting Overhead ($identStr)"
                 else -> "ADS-B Aircraft ($identStr)"
@@ -2872,53 +2948,137 @@ object KokohoPostureEngine {
                 classificationConfidence = classConf,
                 spatialConfidence = spatConf,
                 estimatedDistanceM = distM,
-                uncertaintyRadiusM = 25,
+                uncertaintyRadiusM = uncertM,
                 bearingDeg = null,
                 closingVelocityMps = velMps,
                 recurrenceSummary = airSummary,
                 evidenceSources = listOf(
                     EvidenceBadge(
-                        kind = "ADSB_AIR",
+                        kind = if (hasExactGps) "ADSB_AIR" else "MODE_S_AIR",
                         facetKey = facetKey,
                         detail = "${hit?.label ?: agency.friendlyLabel} ($identStr$altSuffix)",
-                        weight = if (isUnattributedCircling) 0.55 else 0.95,
+                        weight = if (isUnattributedCircling) 0.55 else if (hasExactGps) 0.95 else 0.78,
                         lastSeenMs = seenAtMs
                     )
                 ),
                 updatedAtMs = seenAtMs,
-                lat = p.lat,
-                lon = p.lon,
-                isApproximatedPosition = true,
-                isPinpointed = true,
+                lat = if (hasExactGps) p.lat else userLoc?.latitude,
+                lon = if (hasExactGps) p.lon else userLoc?.longitude,
+                isApproximatedPosition = hasExactGps,
+                isPinpointed = hasExactGps,
                 isAircraft = true,
                 isHelicopter = isHeli,
                 aircraftTrackDeg = p.trackDeg,
-                aircraftHex = p.hex.uppercase(),
+                aircraftHex = hexUpper,
                 isCircling = isCircling,
                 altitudeFtAgl = p.altitudeFt,
                 hardwareIdentifier = identStr
             )
             upsertAndFuseThreat(evaluated, threat)
-            localRawObservations += RawSensorReportCandidate(
-                facetKey = facetKey,
-                rawLat = p.lat,
-                rawLon = p.lon,
-                signalDb = 42.0,
-                modality = "ADSB",
-                additionalFacets = listOfNotNull(
-                    p.altitudeFt?.let { "air:alt_ft_msl:$it" },
-                    p.trackDeg?.roundToInt()?.let { "air:hdg:$it" }
-                ),
-                agency = agency,
-                label = agency.friendlyLabel,
-                propClass = "AIRBORNE",
-                uncertaintyRadiusM = 25.0,
-                isDerived = true,
-                localSightings = 1,
-                ssidHint = p.callsign ?: p.registration,
-                isFlagged = !isUnattributedCircling,
-                obsTimestampMs = seenAtMs
-            )
+            if (hasExactGps) {
+                localRawObservations += RawSensorReportCandidate(
+                    facetKey = facetKey,
+                    rawLat = p.lat,
+                    rawLon = p.lon,
+                    signalDb = 42.0,
+                    modality = "ADSB",
+                    additionalFacets = listOfNotNull(
+                        p.altitudeFt?.let { "air:alt_ft_msl:$it" },
+                        p.trackDeg?.roundToInt()?.let { "air:hdg:$it" }
+                    ),
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    propClass = "AIRBORNE",
+                    uncertaintyRadiusM = 25.0,
+                    isDerived = true,
+                    localSightings = 1,
+                    ssidHint = p.callsign ?: p.registration,
+                    isFlagged = !isUnattributedCircling,
+                    obsTimestampMs = seenAtMs
+                )
+            }
+        }
+
+        // Unlocated Mode-S transponders heard locally by RTL-SDR without CPR GPS (`heardNearby`)
+        if (userLoc != null && PoliceAircraft.localAt > 0L && nowMs - PoliceAircraft.localAt <= 30_000L) {
+            val grounded = PoliceAircraft.currentlyGroundedHexes(nowMs)
+            for (unloc in PoliceAircraft.localUnlocated) {
+                val p = unloc.plane
+                val hit = unloc.hit
+                val hexUpper = p.hex.uppercase()
+                if (hexUpper in locatedHexes || hexUpper in grounded) continue
+                if (PoliceAircraft.isGroundedOrParked(p) || PoliceAircraft.isGliderOrExcludedTrainer(p)) continue
+                val agency = KokohoSignatures.classifyAircraftAgency(
+                    owner = p.owner,
+                    registration = p.registration,
+                    callsign = p.callsign,
+                    hitLabel = hit?.label,
+                    type = p.type,
+                    hex = p.hex,
+                    speedKt = p.speedKt,
+                    isCircling = false
+                ) ?: continue
+                val allowed = if (agency.isDhs) enabledAirAgencies.any { it.isDhs } else agency in enabledAirAgencies
+                if (!allowed) continue
+
+                val facetKey = "adsb:icao:$hexUpper"
+                val uuid = deterministicUuidV5(facetKey)
+                if (uuid in evaluated) continue
+                val identStr = listOfNotNull(
+                    p.registration?.takeIf { it.isNotBlank() },
+                    p.callsign?.takeIf { it.isNotBlank() },
+                    "ICAO $hexUpper"
+                ).distinct().joinToString(" · ")
+                val isHeli = KokohoSignatures.isHelicopterAirframe(
+                    p.type,
+                    p.category,
+                    "${hit?.label.orEmpty()} ${p.owner.orEmpty()} ${p.registration.orEmpty()}",
+                    agency = agency,
+                    hex = p.hex
+                )
+                val altSuffix = p.altitudeFt?.let { " · $it ft" }.orEmpty()
+                val seenAtMs = PoliceAircraft.localAt
+                val classConf = hit?.confidence?.coerceIn(72, 92) ?: 82
+                val spatConf = 42
+                val combinedConf = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99)
+                val unlocThreat = EvaluatedThreat(
+                    uuid = uuid,
+                    trackUuid = uuid,
+                    agency = agency,
+                    label = agency.friendlyLabel,
+                    posture = PostureColor.YELLOW,
+                    overallConfidence = combinedConf,
+                    classificationConfidence = classConf,
+                    spatialConfidence = spatConf,
+                    estimatedDistanceM = 2_400,
+                    uncertaintyRadiusM = 2_400,
+                    bearingDeg = null,
+                    closingVelocityMps = p.speedKt?.let { it * 0.514444 },
+                    recurrenceSummary = "Mode-S Transponder in Radio Range ($identStr)",
+                    evidenceSources = listOf(
+                        EvidenceBadge(
+                            kind = "MODE_S_AIR",
+                            facetKey = facetKey,
+                            detail = "${hit?.label ?: agency.friendlyLabel} ($identStr$altSuffix)",
+                            weight = 0.78,
+                            lastSeenMs = seenAtMs
+                        )
+                    ),
+                    updatedAtMs = seenAtMs,
+                    lat = userLoc.latitude,
+                    lon = userLoc.longitude,
+                    isApproximatedPosition = false,
+                    isPinpointed = false,
+                    isAircraft = true,
+                    isHelicopter = isHeli,
+                    aircraftTrackDeg = p.trackDeg,
+                    aircraftHex = hexUpper,
+                    isCircling = false,
+                    altitudeFtAgl = p.altitudeFt,
+                    hardwareIdentifier = identStr
+                )
+                upsertAndFuseThreat(evaluated, unlocThreat)
+            }
         }
     }
 
@@ -3237,19 +3397,21 @@ object KokohoPostureEngine {
                         if (cached.isAircraft) {
                             cached.copy(estimatedDistanceM = rawLiveDistM)
                         } else {
-                            val uncertM = cached.uncertaintyRadiusM.coerceAtLeast(15)
-                            val edgeDistM = max(0, rawLiveDistM - uncertM)
-                            val effectiveDistM = max(edgeDistM, uncertM)
-                            val liveDistM = max(rawLiveDistM, uncertM)
+                            val liveDistM = rawLiveDistM
                             val ageMs = (nowMs - cached.updatedAtMs).coerceAtLeast(0L)
-                            val rawProximityPosture = if (ageMs > 20_000L) {
-                                when {
-                                    effectiveDistM <= 300 -> PostureColor.RED
-                                    effectiveDistM <= 850 -> PostureColor.ORANGE
-                                    else -> PostureColor.YELLOW
-                                }
-                            } else {
+                            val isSoftUncorroborated = cached.classificationConfidence <= 58 &&
+                                cached.evidenceSources.size == 1 &&
+                                cached.evidenceSources.first().kind == "WIFI_BLE_OUI"
+                            val centroidPosture = when {
+                                isSoftUncorroborated -> PostureColor.YELLOW
+                                rawLiveDistM <= 300 -> PostureColor.RED
+                                rawLiveDistM <= 850 -> PostureColor.ORANGE
+                                else -> PostureColor.YELLOW
+                            }
+                            val rawProximityPosture = if (ageMs <= 20_000L && cached.posture.ordinal > centroidPosture.ordinal) {
                                 cached.posture
+                            } else {
+                                centroidPosture
                             }
                             val refreshedPosture = if (ageMs <= monitorWindowMs) {
                                 KokohoSignatures.capMonitorPostureByAge(rawProximityPosture, ageMs)
@@ -3291,7 +3453,11 @@ object KokohoPostureEngine {
                     t.evidenceSources.map { it.facetKey },
                     t.evidenceSources.map { it.detail } + listOf(t.recurrenceSummary, t.label)
                 )).distinct()
-                val highestOrderTitle = KokohoSignatures.formatHighestOrderTitle(t.copy(agency = effectiveAgency, capabilities = inferredCaps), witness)
+                val rawHighestTitle = KokohoSignatures.formatHighestOrderTitle(t.copy(agency = effectiveAgency, capabilities = inferredCaps), witness)
+                val isStandaloneOp = !t.isAircraft && isStandaloneDroneOperator(t.evidenceSources, t.hardwareIdentifier)
+                val highestOrderTitle = if (t.isDrone || isStandaloneOp) sanitizeDroneOperatorSuffix(rawHighestTitle) else rawHighestTitle
+                val rawSummary = if (t.recurrenceSummary.isBlank()) highestOrderTitle else t.recurrenceSummary
+                val cleanedSummary = if (t.isDrone || isStandaloneOp) sanitizeDroneOperatorSuffix(rawSummary) else rawSummary
                 val ageMs = (nowMs - t.updatedAtMs).coerceAtLeast(0L)
                 val cappedPosture = if (ageMs <= monitorWindowMs) {
                     KokohoSignatures.capMonitorPostureByAge(t.posture, ageMs)
@@ -3302,7 +3468,9 @@ object KokohoPostureEngine {
                     agency = effectiveAgency,
                     label = highestOrderTitle,
                     posture = cappedPosture,
-                    recurrenceSummary = if (t.recurrenceSummary.isBlank()) highestOrderTitle else t.recurrenceSummary,
+                    recurrenceSummary = cleanedSummary,
+                    uncertaintyRadiusM = if (isStandaloneOp) 15 else t.uncertaintyRadiusM,
+                    isPinpointed = if (isStandaloneOp) true else t.isPinpointed,
                     capabilities = inferredCaps
                 )
                 if (localThreatCache.containsKey(t.uuid)) {
@@ -3474,10 +3642,10 @@ object KokohoPostureEngine {
             .map { (agency, units) ->
                 val ordered = units.sortedBy { it.effectiveProximityM }
                 val lead = ordered.first()
-                val baseRadius = lead.uncertaintyRadiusM.coerceAtLeast(25)
-                // Split units into primary accuracy cluster vs incrementally wider accuracy radii (> 1.8x wider and >= +300m)
+                // Split units into primary proximity cluster vs incrementally farther units by center-centroid distance
+                val clusterCutoffM = max((lead.estimatedDistanceM * 1.8).roundToInt(), lead.estimatedDistanceM + 400)
                 val primaryCluster = ordered.filter {
-                    it.uncertaintyRadiusM <= max(baseRadius * 1.8, (baseRadius + 300).toDouble()).roundToInt()
+                    it.estimatedDistanceM <= clusterCutoffM
                 }
                 val widerCluster = ordered.drop(primaryCluster.size)
                 val highestPosture = ordered.maxByOrNull { it.posture.ordinal }?.posture ?: lead.posture
@@ -3490,7 +3658,7 @@ object KokohoPostureEngine {
                     primaryRadiusM = lead.uncertaintyRadiusM,
                     primaryEdgeDistanceM = lead.nearestEdgeDistanceM,
                     widerCount = widerCluster.size,
-                    widerRadiusM = widerCluster.firstOrNull()?.uncertaintyRadiusM,
+                    widerRadiusM = widerCluster.firstOrNull()?.estimatedDistanceM,
                     lastSeenMs = newestMs
                 )
             }
@@ -3556,6 +3724,8 @@ object KokohoPostureEngine {
                     badges.map { it.facetKey },
                     badges.map { it.detail } + remote.classification.label
                 )
+                val isStandaloneOp = isStandaloneDroneOperator(badges, badges.firstOrNull()?.facetKey)
+                val isDroneObj = agency == KokohoAgency.DRONE || badges.any { it.facetKey.startsWith("uas:", true) }
                 val rawThreat = EvaluatedThreat(
                     uuid = remote.uuid,
                     trackUuid = remote.trackUuid,
@@ -3566,24 +3736,29 @@ object KokohoPostureEngine {
                     classificationConfidence = classConf,
                     spatialConfidence = spatConf,
                     estimatedDistanceM = centerDistM,
-                    uncertaintyRadiusM = uncertM,
+                    uncertaintyRadiusM = if (isStandaloneOp) 15 else uncertM,
                     bearingDeg = remote.location.bearingDeg?.roundToInt(),
                     closingVelocityMps = remote.location.velocityMps,
-                    recurrenceSummary = remote.classification.recurrenceSummary,
+                    recurrenceSummary = if (isDroneObj || isStandaloneOp) {
+                        sanitizeDroneOperatorSuffix(remote.classification.recurrenceSummary)
+                    } else {
+                        remote.classification.recurrenceSummary
+                    },
                     evidenceSources = badges,
                     updatedAtMs = remote.updatedAtMs,
                     lat = remote.location.lat,
                     lon = remote.location.lon,
                     isApproximatedPosition = true,
-                    isPinpointed = uncertM <= PINPOINT_POINT_RADIUS_M,
-                    isDrone = agency == KokohoAgency.DRONE || badges.any { it.facetKey.startsWith("uas:", true) },
+                    isPinpointed = isStandaloneOp || uncertM <= PINPOINT_POINT_RADIUS_M,
+                    isDrone = isDroneObj,
                     hardwareIdentifier = badges.firstOrNull()?.facetKey,
                     sightingCount = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1),
                     capabilities = caps
                 )
                 val witness = KokohoSignatures.getWitnessReport(context, rawThreat.uuid, approvedOnly = false)
                 val effectiveAgency = witness?.takeIf { it.reportKind == "LE" }?.agencyCode?.let { KokohoAgency.fromCode(it) } ?: rawThreat.agency
-                val highestTitle = KokohoSignatures.formatHighestOrderTitle(rawThreat.copy(agency = effectiveAgency), witness)
+                val rawHighestTitle = KokohoSignatures.formatHighestOrderTitle(rawThreat.copy(agency = effectiveAgency), witness)
+                val highestTitle = if (isDroneObj || isStandaloneOp) sanitizeDroneOperatorSuffix(rawHighestTitle) else rawHighestTitle
                 byUuid[rawThreat.uuid] = rawThreat.copy(agency = effectiveAgency, label = highestTitle)
             }
         }
@@ -3674,15 +3849,18 @@ object KokohoPostureEngine {
     fun formatStaleness(nowMs: Long, lastSeenMs: Long): String =
         formatStalenessAge(max(0L, nowMs - lastSeenMs))
 
-    /** Formats either nearest-edge distance + ±radius or ±radius when inside the confidence circle. */
+    /**
+     * Formats center-centroid distance + `(±accuracy)` in parentheses whenever a detection has
+     * a known centroid (`lat != null && lon != null`), or exact distance for pinpointed targets,
+     * falling back to bare `±accuracy` only when no GPS centroid exists.
+     */
     fun formatAccuracyOrEdge(context: Context, threat: EvaluatedThreat): String {
         if (threat.isPinpointed) {
             return formatShortDistance(context, threat.estimatedDistanceM)
         }
-        val edgeM = threat.nearestEdgeDistanceM
         val radStr = formatAccuracyRadius(context, threat.uncertaintyRadiusM)
-        return if (edgeM > 0) {
-            "${formatShortDistance(context, edgeM)} ($radStr)"
+        return if (threat.lat != null && threat.lon != null) {
+            "${formatShortDistance(context, threat.estimatedDistanceM)} ($radStr)"
         } else {
             radStr
         }

@@ -120,10 +120,15 @@ class OnlineWatch(
      */
     fun localAircraft(planes: List<PoliceAircraft.Plane>, unlocated: List<String>) {
         val now = System.currentTimeMillis()
-        if (!airOn()) { PoliceAircraft.local = emptyList(); return }
+        if (!airOn()) {
+            PoliceAircraft.local = emptyList()
+            PoliceAircraft.localUnlocated = emptyList()
+            return
+        }
         val registry = PoliceAircraft.load(context)
         val me = location()
         val seen = ArrayList<PoliceAircraft.Seen>(planes.size)
+        val unlocatedSeen = ArrayList<PoliceAircraft.Seen>()
         var best: Hit? = null
         synchronized(loiter) {
             for (rawP in planes) {
@@ -140,12 +145,33 @@ class OnlineWatch(
                 reportAircraft(hit, p.hex, p.lat, p.lon, loud, now, said(hit, distanceM, me, p))
             }
             // No position: logged where you are, which is where it was heard; its distance is unknown, so no alert.
-            if (me != null) for (hex in unlocated) PoliceAircraft.heardNearby(hex, registry)?.let {
-                reportAircraft(it, hex, me.latitude, me.longitude, false, now)
+            for (hex in unlocated) {
+                val normHex = hex.lowercase()
+                val rawUnloc = PoliceAircraft.localUnlocatedFrames[normHex] ?: PoliceAircraft.Plane(
+                    hex = normHex,
+                    callsign = null,
+                    registration = null,
+                    type = null,
+                    owner = null,
+                    lat = Double.NaN,
+                    lon = Double.NaN,
+                    altitudeFt = null,
+                    speedKt = null,
+                    trackDeg = null,
+                    military = false
+                )
+                val enrichedUnloc = PoliceAircraft.enrichPlane(rawUnloc)
+                if (PoliceAircraft.isGroundedOrParked(enrichedUnloc) || PoliceAircraft.isGliderOrExcludedTrainer(enrichedUnloc)) continue
+                val hit = PoliceAircraft.heardNearby(normHex, registry)
+                unlocatedSeen += PoliceAircraft.Seen(enrichedUnloc, hit)
+                if (me != null && hit != null) {
+                    reportAircraft(hit, normHex, me.latitude, me.longitude, false, now)
+                }
             }
             loiter.prune(now)
         }
         PoliceAircraft.local = seen
+        PoliceAircraft.localUnlocated = unlocatedSeen
         PoliceAircraft.localAt = now
         best?.let { best ->
             val cur = AmbientThreats.aircraft

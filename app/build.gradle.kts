@@ -7,9 +7,9 @@ plugins {
 }
 
 // Bump both for every release or staged next build. versionName ends up in the APK file name.
-val baseVersionCode = 1428
+val baseVersionCode = 1430
 val baseVersionName = "1.3.15"
-val nextIteration = 6
+val nextIteration = 7
 val releaseChannel = "public"
 val appVersionCode = baseVersionCode
 val appVersionName = baseVersionName

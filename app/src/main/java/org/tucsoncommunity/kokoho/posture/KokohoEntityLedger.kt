@@ -118,7 +118,7 @@ object KokohoEntityLedger {
         "${t.updatedAtMs}|${t.agency.id}|${t.label}|${t.sightingCount}|${t.uncertaintyRadiusM}|${t.lat}|${t.lon}|${t.evidenceSources.size}|${t.capabilities.size}"
 
     private val suppressedLedgerTextRegex = Regex(
-        "(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b|\\bCrystalMT\\b|\\bMcDonalds|\\bMcD[-_]|\\beBOS\\b)"
+        "(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b|\\bCrystalMT\\b|\\bMcDonalds|\\bMcD[-_]|\\beBOS\\b|\\bAloha_POS|\\bToast_POS|\\bTrakkaStream\\b|\\bsc-RD\\w*-Maint\\b)"
     )
 
     internal fun isSuppressedFalsePositiveRow(
@@ -129,7 +129,12 @@ object KokohoEntityLedger {
     ): Boolean {
         if (uuid.startsWith("3f7147ac", ignoreCase = true) ||
             uuid.startsWith("4fcf52c4", ignoreCase = true) ||
-            uuid.startsWith("ce0f80f6", ignoreCase = true)
+            uuid.startsWith("ce0f80f6", ignoreCase = true) ||
+            uuid.startsWith("1a7a8657", ignoreCase = true) ||
+            uuid.startsWith("5d65017b", ignoreCase = true) ||
+            uuid.startsWith("bbce355c", ignoreCase = true) ||
+            uuid.startsWith("cc61c676", ignoreCase = true) ||
+            uuid.startsWith("0ca0f217", ignoreCase = true)
         ) {
             return true
         }
@@ -142,6 +147,11 @@ object KokohoEntityLedger {
             hwClean.startsWith("D8:12:65:") ||
             hwClean.startsWith("60:E3:27:") ||
             hwClean.startsWith("18:EE:86:41:88:") ||
+            hwClean.startsWith("00:01:21:1F:77:") ||
+            hwClean.startsWith("D4:13:F8:18:DB:") ||
+            hwClean.startsWith("D4:13:F8:04:AB:") ||
+            hwClean.startsWith("D4:13:F8:05:F8:") ||
+            hwClean.startsWith("10:56:CA:92:29:") ||
             hwClean.startsWith("RF:CHAN:167862500") ||
             hwClean.startsWith("FREQ:167862500")
         ) {
@@ -151,6 +161,11 @@ object KokohoEntityLedger {
         if (combined.contains("167.8625", ignoreCase = true) ||
             combined.contains("167862500", ignoreCase = true) ||
             combined.contains("18:EE:86:41:88:", ignoreCase = true)
+        ) {
+            return true
+        }
+        if (Regex("(?i)\\bPEPLINK_[0-9A-F]{4}\\b").containsMatchIn(combined) &&
+            !KokohoSignatures.isAttestedAgencySubblock(hwClean)
         ) {
             return true
         }
@@ -195,13 +210,18 @@ object KokohoEntityLedger {
                     val posture = runCatching { PostureColor.valueOf(c.getString(3)) }.getOrDefault(PostureColor.YELLOW)
                     val classConf = c.getInt(4)
                     val spatConf = c.getInt(5)
-                    val caps = parseStringList(c.getString(21))
+                    val isDroneRow = c.getInt(17) != 0 || agency == KokohoAgency.DRONE
+                    val capsRaw = parseStringList(c.getString(21))
+                    val caps = if (isDroneRow) capsRaw.filterNot { it.equals("Drone Operator", ignoreCase = true) } else capsRaw
                     val badges = parseBadges(c.getString(22))
+                    val rawLbl = c.getString(2) ?: agency.friendlyLabel
+                    val cleanLbl = if (isDroneRow) KokohoPostureEngine.sanitizeDroneOperatorSuffix(rawLbl) else rawLbl
+                    val cleanSum = if (isDroneRow) KokohoPostureEngine.sanitizeDroneOperatorSuffix(c.getString(8) ?: "") else (c.getString(8) ?: "")
                     val threat = EvaluatedThreat(
                         uuid = uuid,
                         trackUuid = uuid,
                         agency = agency,
-                        label = c.getString(2) ?: agency.friendlyLabel,
+                        label = cleanLbl,
                         posture = posture,
                         overallConfidence = ((classConf + spatConf) / 2.0).roundToInt().coerceIn(1, 99),
                         classificationConfidence = classConf,
@@ -210,7 +230,7 @@ object KokohoEntityLedger {
                         uncertaintyRadiusM = c.getInt(7),
                         bearingDeg = null,
                         closingVelocityMps = null,
-                        recurrenceSummary = c.getString(8) ?: "",
+                        recurrenceSummary = cleanSum,
                         evidenceSources = badges,
                         updatedAtMs = c.getLong(9),
                         lat = if (c.isNull(10)) null else c.getDouble(10),

@@ -582,6 +582,8 @@ object PoliceAircraft {
         droneTrails.clear()
         trailAliases.clear()
         groundedAtByHex.clear()
+        localUnlocated = emptyList()
+        localUnlocatedFrames = emptyMap()
     }
 
     fun recentFlightFixes4D(
@@ -732,6 +734,9 @@ object PoliceAircraft {
     /** Every aircraft the RTL-SDR's ADS-B receiver has a position for. */
     @Volatile var local: List<Seen> = emptyList()
     @Volatile var localAt = 0L
+    /** Mode-S / ADS-B aircraft heard locally by RTL-SDR without CPR GPS coordinates. */
+    @Volatile var localUnlocated: List<Seen> = emptyList()
+    @Volatile var localUnlocatedFrames: Map<String, Plane> = emptyMap()
 
     /** Aircraft the other Sentinels sent: ICAO address to (when it arrived, as checked here). */
     val shared = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Seen>>()

@@ -124,7 +124,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     private var drones: Map<String, DeviceRegistry.Snapshot> = emptyMap()
     private var airThreatsByUuid: Map<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyMap()
     private var droneThreatsByUuid: Map<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat> = emptyMap()
-    private var unpinpointedDroneUuids: Set<String> = emptySet()
+    private var unpinpointedAirspaceUuids: Set<String> = emptySet()
+    private var standaloneOperatorUuids: Set<String> = emptySet()
     private var flightTracksByEntityUuid: Map<String, org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack> = emptyMap()
     private var localDroneTrailsByUuid: Map<String, PoliceAircraft.LocalDroneTrail> = emptyMap()
     private var selectedFlightTrackEntityUuid: String? = null
@@ -265,6 +266,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         map.addImage("rf-plane-clear", MapIcons.planeIcon(dp, false, clear = true))
         map.addImage("rf-tower", MapIcons.towerIcon(dp))
         map.addImage("rf-drone", droneArrow(dp))
+        map.addImage("rf-pilot-badge", MapIcons.classificationBadgeIcon(dp, MapIcons.BadgeIconKind.PILOT, 0xFFD97706.toInt()))
         map.addImage("rf-dropped-pin", MapIcons.droppedPinIcon(dp))
         val ringBmp = MapIcons.selectionRingIcon(dp)
         selectionRingBmp = ringBmp
@@ -446,9 +448,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             // Waze reports: blue police, red accident, orange hazard, brown closure, purple jam.
             layer(WAZE, "circle", paint = o("circle-color" to color, "circle-radius" to 9.0,
                 "circle-stroke-color" to "#FFFFFF", "circle-stroke-width" to 2.0)),
-            // A drone's operator / take-off point, and the drone badge.
-            layer(DRONE_OPS, "circle", paint = o("circle-color" to "#F5E100", "circle-radius" to 7.0,
-                "circle-stroke-color" to DRONE_COLOR, "circle-stroke-width" to 2.0)),
+            // A drone's operator / ground controller position, and the airborne drone badge.
+            layer(DRONE_OPS, "symbol",
+                layout = o("icon-image" to "rf-pilot-badge", "icon-size" to 0.88,
+                    "icon-rotation-alignment" to "viewport", *overlap,
+                    "text-field" to get("label"), "text-font" to font, "text-size" to 11.5, "text-anchor" to "top",
+                    "text-offset" to a(0.0, 1.35), "text-optional" to true),
+                paint = o("text-color" to "#FDE68A", "text-halo-color" to halo, "text-halo-width" to 2.0)),
             layer(DRONES, "symbol",
                 layout = o("icon-image" to get("icon"), "icon-size" to 0.92,
                     "icon-rotation-alignment" to "viewport", *overlap,
@@ -576,12 +582,14 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             is MapSelection.Detection -> {
                 set(DROPPED_POINT, emptyList())
                 val is3dPointTarget = airborneOverlay?.is3dActive() == true &&
-                    (selection.entityUuid in airThreatsByUuid ||
-                        (selection.entityUuid in droneThreatsByUuid && selection.entityUuid !in unpinpointedDroneUuids))
+                    ((selection.entityUuid in airThreatsByUuid ||
+                        selection.entityUuid in droneThreatsByUuid ||
+                        selection.entityUuid in standaloneOperatorUuids) &&
+                        selection.entityUuid !in unpinpointedAirspaceUuids)
                 val is3dDomeTarget = airborneOverlay?.isDome3dActive() == true &&
-                    selection.entityUuid in unpinpointedDroneUuids
+                    selection.entityUuid in unpinpointedAirspaceUuids
                 if (is3dPointTarget || is3dDomeTarget) {
-                    // Selection halo is drawn around the elevated 3D puck or 3D airspace dome in Airborne3dOverlayView
+                    // Selection halo is drawn around the elevated 3D puck, crisp operator dot, or 3D airspace dome in Airborne3dOverlayView
                     set(SELECTED_PIN, emptyList())
                 } else {
                     set(SELECTED_PIN, listOf(GeoJson.feature(GeoJson.point(selection.lat, selection.lon))))
@@ -641,19 +649,51 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         )
     }
 
-    private fun isDroneDetection(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
-        t.isDrone ||
-            t.agency == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE ||
+    internal fun isStandaloneDroneOperator(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        !t.isAircraft &&
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.isStandaloneDroneOperator(
+                t.evidenceSources,
+                t.hardwareIdentifier
+            )
+
+    internal fun isDroneDetection(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        !t.isAircraft &&
+            !isStandaloneDroneOperator(t) && (
+                t.isDrone ||
+                    t.agency == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE ||
+                    t.evidenceSources.any {
+                        it.facetKey.startsWith("uas:", ignoreCase = true) ||
+                            it.facetKey.startsWith("DRONE:", ignoreCase = true)
+                    }
+                )
+
+    internal fun hasRemoteIdDroneEvidence(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        t.altitudeFtAgl != null ||
+            t.operatorLat != null ||
             t.evidenceSources.any {
-                it.facetKey.startsWith("uas:", ignoreCase = true) ||
-                    it.facetKey.startsWith("DRONE:", ignoreCase = true)
+                it.facetKey.startsWith("uas:alt_ft_agl:", ignoreCase = true) ||
+                    it.facetKey.startsWith("uas:op:", ignoreCase = true)
             }
 
-    private fun isPinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
-        !t.isAircraft && isDroneDetection(t) && t.isPinpointed && t.uncertaintyRadiusM <= 22
+    internal fun isPinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        isDroneDetection(t) && (
+            (t.isPinpointed && t.uncertaintyRadiusM <= 22) ||
+                (hasRemoteIdDroneEvidence(t) && t.uncertaintyRadiusM <= 40)
+            )
 
-    private fun isUnpinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
-        !t.isAircraft && isDroneDetection(t) && !isPinpointedDrone(t)
+    internal fun isUnpinpointedDrone(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        isDroneDetection(t) && !isPinpointedDrone(t)
+
+    internal fun isPinpointedAircraft(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean =
+        t.isAircraft && t.isPinpointed && t.uncertaintyRadiusM <= 65
+
+    internal fun isUnpinpointedAircraft(t: org.tucsoncommunity.kokoho.posture.EvaluatedThreat): Boolean {
+        if (isDroneDetection(t) || isStandaloneDroneOperator(t)) return false
+        if (t.isAircraft) return !isPinpointedAircraft(t)
+        return t.agency == org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO &&
+            (!t.isPinpointed || t.uncertaintyRadiusM > 65) &&
+            t.evidenceSources.none { it.kind.equals("WITNESS_REPORT", ignoreCase = true) }
+    }
 
     /**
      * Fast-changing live layers: draws ONLY Kokoho's active flagged agency detections
@@ -689,7 +729,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             set(WIGLE, emptyList())
             set(ASKED, emptyList())
             droneThreatsByUuid = emptyMap()
-            unpinpointedDroneUuids = emptySet()
+            unpinpointedAirspaceUuids = emptySet()
+            standaloneOperatorUuids = emptySet()
             drones = emptyMap()
             set(DRONES, emptyList())
             set(DRONE_OPS, emptyList())
@@ -707,11 +748,22 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
 
         val groundThreats = snap.mapThreats.filter {
             !it.isAircraft &&
+                !isUnpinpointedAircraft(it) &&
                 !isDroneDetection(it) &&
+                !isStandaloneDroneOperator(it) &&
+                !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
+        }
+        val standaloneOperators = snap.mapThreats.filter {
+            isStandaloneDroneOperator(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
         val unpinpointedDrones = snap.mapThreats.filter {
             isUnpinpointedDrone(it) &&
+                !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
+        }
+        val pinpointedAirThreats = snap.mapThreats.filter { isPinpointedAircraft(it) }
+        val unpinpointedAirThreats = snap.mapThreats.filter {
+            isUnpinpointedAircraft(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
         val zoom = map.camera.zoom
@@ -1019,7 +1071,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             ).toDouble()
             val accText = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, expandedR)}"
             val fullDist = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatUserDistance(activity, t.nearestEdgeDistanceM, t.uncertaintyRadiusM)
-            val titleInline = t.title.ifBlank { t.friendlyLabel }
+            val titleInline = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+                .sanitizeDroneOperatorSuffix(t.title.ifBlank { t.friendlyLabel })
             MapPin(
                 mac = "kokoho:${t.uuid}",
                 lat = lat,
@@ -1038,7 +1091,58 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 isDroneDome = true
             )
         }
-        val allShownPins = shown + droneDomePins
+        val aircraftDomePins = unpinpointedAirThreats.map { t ->
+            val lat = t.lat ?: fallbackLat
+            val lon = t.lon ?: fallbackLon
+            val ageMs = (nowMs - t.lastSeenMs).coerceAtLeast(0L)
+            val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+            val baseR = t.mapCircleRadiusM.coerceAtLeast(100)
+            val expandedR = org.tucsoncommunity.kokoho.posture.KokohoSignatures.projectRollingRadiusM(
+                timeWindow,
+                ageMs,
+                baseR,
+                isPinpointed = false
+            )
+            val opacity = org.tucsoncommunity.kokoho.posture.KokohoSignatures.mapCorroborationOpacity(
+                activity,
+                ageMs,
+                t.sightingCount.coerceAtLeast(1),
+                t.evidenceCount.coerceAtLeast(1),
+                baseR
+            ).toDouble()
+            val accText = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, expandedR)}"
+            val fullDist = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatUserDistance(activity, t.nearestEdgeDistanceM, t.uncertaintyRadiusM)
+            val isHeli = t.isHelicopter || org.tucsoncommunity.kokoho.posture.KokohoSignatures.isHelicopterAirframe(
+                null,
+                t.agency.id,
+                t.title,
+                t.agency,
+                t.aircraftHex
+            )
+            val kind = if (isHeli) MapIcons.BadgeIconKind.HELICOPTER else MapIcons.BadgeIconKind.SMALL_PLANE
+            val cirTag = if (t.isCircling) " · CIRCLING" else ""
+            val altTag = t.altitudeFtAgl?.takeIf { it > 0 }?.let { " · ${it} ft" }.orEmpty()
+            val titleInline = t.label.ifBlank { t.title.ifBlank { t.friendlyLabel } }
+            val ceilingDesc = t.altitudeFtAgl?.takeIf { it > 0 }?.let { "${it} ft MSL" } ?: "<=8,000 ft AGL"
+            MapPin(
+                mac = "kokoho:${t.uuid}",
+                lat = lat,
+                lon = lon,
+                label = "$titleInline$cirTag$altTag · $accText · $staleness",
+                flagged = true,
+                color = t.agency.mapColorArgb,
+                details = "${t.agency.friendlyLabel} · ${t.posture.badgeLabel}\n$fullDist · Last seen $staleness",
+                radiusM = expandedR.toDouble(),
+                whereNote = "Unpinpointed aircraft airspace volume ($accText, $ceilingDesc) · Last detected $staleness.",
+                showDot = true,
+                opacity = opacity,
+                iconKind = kind,
+                agencyId = t.agency.id,
+                groupMembers = listOf(t),
+                isDroneDome = true
+            )
+        }
+        val allShownPins = shown + droneDomePins + aircraftDomePins
         drawPins(allShownPins)
 
         wazeShown = emptyMap()
@@ -1048,29 +1152,44 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
 
         // Pinpointed Pro/Enterprise/RemoteID Drones with Altitude and Operator Tether
         val droneThreats = snap.mapThreats.filter { isPinpointedDrone(it) }
-        unpinpointedDroneUuids = unpinpointedDrones.map { it.uuid }.toSet()
-        droneThreatsByUuid = (droneThreats + unpinpointedDrones).associateBy { it.uuid }
+        unpinpointedAirspaceUuids = (unpinpointedDrones.map { it.uuid } + unpinpointedAirThreats.map { it.uuid }).toSet()
+        standaloneOperatorUuids = standaloneOperators.map { it.uuid }.toSet()
+        droneThreatsByUuid = (droneThreats + unpinpointedDrones + standaloneOperators).associateBy { it.uuid }
         drones = emptyMap()
-        set(DRONES, droneThreats.map { t ->
+        val droneFeatures = ArrayList<JSONObject>(droneThreats.size + 4)
+        for (t in droneThreats) {
             val lat = t.lat ?: fallbackLat
             val lon = t.lon ?: fallbackLon
             val altPart = t.altitudeFtAgl?.let { "${it} ft AGL" }
                 ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.nearestEdgeDistanceM)
             val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
-            GeoJson.feature(
+            val cleanLabel = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix(t.label)
+                .ifBlank { "Tactical Drone" }
+            val droneTitlePrefix = if (cleanLabel.contains("drone", ignoreCase = true)) cleanLabel else "Drone · $cleanLabel"
+            droneFeatures += GeoJson.feature(
                 GeoJson.point(lat, lon),
                 "mac" to t.uuid,
                 "icon" to "rf-badge-${MapIcons.BadgeIconKind.DRONE.id}-${t.agency.id}",
                 "dir" to (t.aircraftTrackDeg ?: 0.0),
-                "label" to "${t.label} · $altPart · $staleness"
+                "label" to "$droneTitlePrefix · $altPart · $staleness"
             )
-        })
-        set(DRONE_OPS, droneThreats.mapNotNull { t ->
-            val opLat = t.operatorLat ?: return@mapNotNull null
-            val opLon = t.operatorLon ?: return@mapNotNull null
-            GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to t.uuid)
-        })
-        set(DRONE_LINES, droneThreats.mapNotNull { t ->
+        }
+        // Operators NEVER have a bubble: render crisp pilot badges + dashed tethers for pinpointed drones,
+        // unpinpointed drones with pilot GPS, and standalone `uas:op:*` operator entities.
+        val operatorFeatures = buildList {
+            for (t in (droneThreats + unpinpointedDrones)) {
+                val opLat = t.operatorLat ?: continue
+                val opLon = t.operatorLon ?: continue
+                add(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to t.uuid, "label" to "Drone Pilot"))
+            }
+            for (op in standaloneOperators) {
+                val opLat = op.operatorLat ?: op.lat ?: continue
+                val opLon = op.operatorLon ?: op.lon ?: continue
+                add(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to op.uuid, "label" to "Drone Pilot"))
+            }
+        }
+        set(DRONE_OPS, operatorFeatures)
+        set(DRONE_LINES, (droneThreats + unpinpointedDrones).mapNotNull { t ->
             val lat = t.lat ?: return@mapNotNull null
             val lon = t.lon ?: return@mapNotNull null
             val opLat = t.operatorLat ?: return@mapNotNull null
@@ -1078,10 +1197,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             GeoJson.feature(GeoJson.line(listOf(opLat to opLon, lat to lon)), "mac" to t.uuid)
         })
 
-        // ADS-B & Circling Spy Planes (helicopters get rotorcraft badge; fixed-wing rotate along track)
-        val airThreats = snap.mapThreats.filter { it.isAircraft }
-        airThreatsByUuid = airThreats.associateBy { it.uuid }
-        set(AIRCRAFT, airThreats.map { t ->
+        // Pinpointed ADS-B & Circling Spy Planes (unpinpointed aircraft render in DRONE_DOME_2D / 3D spheres)
+        airThreatsByUuid = (pinpointedAirThreats + unpinpointedAirThreats).associateBy { it.uuid }
+        set(AIRCRAFT, pinpointedAirThreats.map { t ->
             val lat = t.lat ?: fallbackLat
             val lon = t.lon ?: fallbackLon
             val altOrDist = t.altitudeFtAgl?.let { "${it} ft" }
@@ -1100,9 +1218,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             )
         })
 
-        // Build 3D airborne overlay targets (ADS-B aircraft + pinpointed Remote ID drones + unpinpointed 3D drone domes)
-        val airborneTargets = ArrayList<Airborne3dOverlayView.AirborneTarget>(airThreats.size + droneThreats.size)
-        for (t in airThreats) {
+        // Build 3D airborne overlay scene (pinpointed aircraft/drone pucks + unpinpointed 3D drone & aircraft spheres)
+        val airborneTargets = ArrayList<Airborne3dOverlayView.AirborneTarget>(pinpointedAirThreats.size + droneThreats.size)
+        for (t in pinpointedAirThreats) {
             val lat = t.lat ?: fallbackLat
             val lon = t.lon ?: fallbackLon
             val altOrDist = t.altitudeFtAgl?.let { "${it} ft" }
@@ -1133,6 +1251,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             val altPart = t.altitudeFtAgl?.let { "${it} ft AGL" }
                 ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.nearestEdgeDistanceM)
             val staleness = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
+            val cleanLabel = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix(t.label)
             val iconId = ensureBadgeIcon(MapIcons.BadgeIconKind.DRONE, t.agency.mapColorArgb, t.agency.id)
             val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, MapIcons.BadgeIconKind.DRONE, t.agency.mapColorArgb).also {
                 badgeBitmapsById[iconId] = it
@@ -1148,13 +1267,15 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 altitudeFtRaw = t.altitudeFtAgl,
                 colorArgb = t.agency.mapColorArgb,
                 badgeBitmap = bmp,
-                label = "${t.label} · $altPart · $staleness",
+                label = "$cleanLabel · $altPart · $staleness",
                 operatorLat = t.operatorLat,
                 operatorLon = t.operatorLon
             )
         }
+        val unpinpointedDronesByUuid = unpinpointedDrones.associateBy { it.uuid }
         val droneDomes = droneDomePins.map { dpPin ->
             val rawUuid = dpPin.mac.removePrefix("kokoho:")
+            val srcDrone = unpinpointedDronesByUuid[rawUuid]
             val iconId = ensureBadgeIcon(MapIcons.BadgeIconKind.DRONE, dpPin.color, dpPin.agencyId)
             val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, MapIcons.BadgeIconKind.DRONE, dpPin.color).also {
                 badgeBitmapsById[iconId] = it
@@ -1167,11 +1288,57 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 colorArgb = dpPin.color,
                 opacity = dpPin.opacity.toFloat(),
                 badgeBitmap = bmp,
-                label = dpPin.label
+                label = dpPin.label,
+                maxCeilingM = TerrainElevationSampler.MAX_DRONE_AIRSPACE_M,
+                isAircraft = false,
+                operatorLat = srcDrone?.operatorLat,
+                operatorLon = srcDrone?.operatorLon
             )
         }
+        val unpinpointedAirByUuid = unpinpointedAirThreats.associateBy { it.uuid }
+        val aircraftDomes = aircraftDomePins.map { airPin ->
+            val rawUuid = airPin.mac.removePrefix("kokoho:")
+            val srcAir = unpinpointedAirByUuid[rawUuid]
+            val iconId = ensureBadgeIcon(airPin.iconKind, airPin.color, airPin.agencyId)
+            val bmp = badgeBitmapsById[iconId] ?: MapIcons.classificationBadgeIcon(dp, airPin.iconKind, airPin.color).also {
+                badgeBitmapsById[iconId] = it
+            }
+            val maxCeilingM = if (srcAir?.altitudeFtAgl != null && srcAir.altitudeFtAgl > 0) {
+                val groundElevM = TerrainElevationSampler.sampleElevationM(activity, airPin.lat, airPin.lon)
+                TerrainElevationSampler.computeAirborneHeightAboveGroundM(
+                    isAircraft = true,
+                    altitudeFtRaw = srcAir.altitudeFtAgl,
+                    groundElevM = groundElevM
+                )
+            } else {
+                TerrainElevationSampler.MAX_AIRCRAFT_AIRSPACE_M
+            }
+            Airborne3dOverlayView.DroneAirspaceDome(
+                entityUuid = rawUuid,
+                lat = airPin.lat,
+                lon = airPin.lon,
+                radiusM = (airPin.radiusM ?: 800.0).coerceAtLeast(65.0),
+                colorArgb = airPin.color,
+                opacity = airPin.opacity.toFloat(),
+                badgeBitmap = bmp,
+                label = airPin.label,
+                maxCeilingM = maxCeilingM,
+                isAircraft = true
+            )
+        }
+        val standaloneOpPins = standaloneOperators.mapNotNull { op ->
+            val opLat = op.operatorLat ?: op.lat ?: return@mapNotNull null
+            val opLon = op.operatorLon ?: op.lon ?: return@mapNotNull null
+            Airborne3dOverlayView.StandaloneOperatorPin(op.uuid, opLat, opLon)
+        }
         val selectedEntityId = (activeSelection as? MapSelection.Detection)?.entityUuid
-        airborneOverlay?.updateScene(airborneTargets, droneDomes, selectedEntityId, cameraTopPaddingPx)
+        airborneOverlay?.updateScene(
+            airborneTargets,
+            droneDomes + aircraftDomes,
+            selectedEntityId,
+            cameraTopPaddingPx,
+            standaloneOpPins
+        )
         syncAirbornePitchState(cameraTopPaddingPx)
 
         // Chaikin-smoothed aircraft & pinpoint drone flight tracks strictly filtered and vertex-clipped
@@ -1181,7 +1348,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val cachedTracks = org.tucsoncommunity.kokoho.posture.KokohoHubClient.cachedFlightTracks()
         val enabledAirAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAircraftAgencies(activity)
         val enabledGroundAgencies = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getEnabledAgencies(activity)
-        val liveAirAndDroneEntities = (airThreats.map { it.uuid } + droneThreats.map { it.uuid }).toSet()
+        val liveAirAndDroneEntities = (pinpointedAirThreats.map { it.uuid } + droneThreats.map { it.uuid }).toSet()
         val coveredEntities = HashSet<String>()
         val activeTracksByEntity = LinkedHashMap<String, org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack>()
 
@@ -1211,11 +1378,31 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 "color" to ag.mapColorHex,
                 "opacity" to if (isLive) 0.88 else 0.58
             )
+            // Always emit a Drone badge at the latest clipped vertex for historical drone tracks so drone vs. pilot is clear
+            if (ag == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE &&
+                tr.entityUuid.isNotBlank() &&
+                tr.entityUuid !in liveAirAndDroneEntities &&
+                tr.entityUuid !in unpinpointedAirspaceUuids
+            ) {
+                val endPt = clippedPts.last()
+                val cleanTrkLbl = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+                    .sanitizeDroneOperatorSuffix(tr.label)
+                    .ifBlank { "Tactical Drone" }
+                val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, tr.endedAtMs.takeIf { it > 0L } ?: nowMs)
+                val prefix = if (cleanTrkLbl.contains("drone", ignoreCase = true)) cleanTrkLbl else "Drone · $cleanTrkLbl"
+                droneFeatures += GeoJson.feature(
+                    GeoJson.point(endPt.first, endPt.second),
+                    "mac" to tr.entityUuid,
+                    "icon" to "rf-badge-${MapIcons.BadgeIconKind.DRONE.id}-${ag.id}",
+                    "dir" to 0.0,
+                    "label" to "$prefix · $ageStr"
+                )
+            }
         }
         flightTracksByEntityUuid = activeTracksByEntity
 
-        // Local ADS-B trails within `[nowMs - trackWindowMs, nowMs]` for aircraft not already covered by Hub tracks
-        for (t in airThreats) {
+        // Local ADS-B trails within `[nowMs - trackWindowMs, nowMs]` for pinpointed aircraft not already covered by Hub tracks
+        for (t in pinpointedAirThreats) {
             if (t.uuid in coveredEntities) continue
             val hexKey = t.aircraftHex ?: continue
             val localPts = PoliceAircraft.recentAirborneTrail(
@@ -1250,8 +1437,24 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                     "color" to org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE.mapColorHex,
                     "opacity" to if (isLive) 0.86 else 0.56
                 )
+                if (!isLive && dt.entityUuid !in unpinpointedAirspaceUuids && dt.points.isNotEmpty()) {
+                    val endPt = dt.points.last()
+                    val cleanDtLbl = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+                        .sanitizeDroneOperatorSuffix(dt.label)
+                        .ifBlank { "Tactical Drone" }
+                    val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, dt.endedAtMs)
+                    val prefix = if (cleanDtLbl.contains("drone", ignoreCase = true)) cleanDtLbl else "Drone · $cleanDtLbl"
+                    droneFeatures += GeoJson.feature(
+                        GeoJson.point(endPt.first, endPt.second),
+                        "mac" to dt.entityUuid,
+                        "icon" to "rf-badge-${MapIcons.BadgeIconKind.DRONE.id}-${org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE.id}",
+                        "dir" to 0.0,
+                        "label" to "$prefix · $ageStr"
+                    )
+                }
             }
         }
+        set(DRONES, droneFeatures)
         localDroneTrailsByUuid = localDroneMap
         set(FLIGHT_TRACKS, trackFeatures)
 
@@ -1296,11 +1499,24 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         if (curSel is MapSelection.Detection) {
             val updated = snap.mapThreats.firstOrNull { it.uuid.equals(curSel.entityUuid, ignoreCase = true) }
             if (updated?.lat != null && updated.lon != null) {
+                val isPilotSelection = isStandaloneDroneOperator(updated) || curSel.title.startsWith("Drone Pilot", ignoreCase = true)
+                val baseTitle = if (updated.isDrone || isPilotSelection) {
+                    org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix(
+                        updated.title.ifBlank { curSel.title }
+                    )
+                } else {
+                    updated.title.ifBlank { curSel.title }
+                }
+                val cleanTitle = if (curSel.title.startsWith("Drone Pilot ·", ignoreCase = true) && !baseTitle.startsWith("Drone Pilot", ignoreCase = true)) {
+                    "Drone Pilot · ${baseTitle.ifBlank { "Tactical Drone" }}"
+                } else {
+                    baseTitle
+                }
                 activeSelection = curSel.copy(
-                    title = updated.title.ifBlank { curSel.title },
-                    lat = updated.lat,
-                    lon = updated.lon,
-                    radiusM = updated.uncertaintyRadiusM
+                    title = cleanTitle,
+                    lat = (if (isPilotSelection) (updated.operatorLat ?: updated.lat) else updated.lat) ?: curSel.lat,
+                    lon = (if (isPilotSelection) (updated.operatorLon ?: updated.lon) else updated.lon) ?: curSel.lon,
+                    radiusM = if (isPilotSelection) null else updated.uncertaintyRadiusM
                 )
             }
         }
@@ -1420,7 +1636,13 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         // When 3D airborne projection is active (`pitch > 6 deg`), hit-test elevated 3D aircraft & drone pucks first!
         val hit3d = airborneOverlay?.hitTest(x, y, r)
         if (hit3d != null) {
-            safe("tap3d") { selectOrOpenAirborneUuid(hit3d.entityUuid, hit3d.lat, hit3d.lon, me) }
+            safe("tap3d") {
+                if (hit3d.isPilotHit) {
+                    selectOrOpenPilotUuid(hit3d.entityUuid, hit3d.lat, hit3d.lon)
+                } else {
+                    selectOrOpenAirborneUuid(hit3d.entityUuid, hit3d.lat, hit3d.lon, me)
+                }
+            }
             return
         }
         val tapCoord = map.toLatLon(x, y)
@@ -1499,6 +1721,50 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         }
     }
 
+    private fun selectOrOpenPilotUuid(
+        entityUuid: String,
+        tapLat: Double?,
+        tapLon: Double?
+    ): Boolean {
+        val selectCb = onSelectTarget
+        val t = droneThreatsByUuid[entityUuid]
+            ?: org.tucsoncommunity.kokoho.posture.KokohoEntityLedger.findByUuid(activity, entityUuid)
+        if (t != null) {
+            highlightTrackForEntity(t.uuid, t.uuid, t.agency.mapColorHex)
+            val opLat = t.operatorLat ?: tapLat ?: t.lat ?: map.camera.lat
+            val opLon = t.operatorLon ?: tapLon ?: t.lon ?: map.camera.lon
+            val droneLat = t.lat
+            val droneLon = t.lon
+            val distTxt = if (droneLat != null && droneLon != null && !isStandaloneDroneOperator(t)) {
+                val distM = DeviceRegistry.metersBetween(opLat, opLon, droneLat, droneLon).toInt()
+                " · ${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, distM)} from drone"
+            } else {
+                ""
+            }
+            val cleanDroneLbl = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+                .sanitizeDroneOperatorSuffix(t.title.ifBlank { t.label.ifBlank { "Tactical Drone" } })
+                .ifBlank { "Tactical Drone" }
+            val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(System.currentTimeMillis(), t.lastSeenMs)
+            if (selectCb != null) {
+                selectCb(
+                    MapSelection.Detection(
+                        entityUuid = t.uuid,
+                        title = "Drone Pilot · $cleanDroneLbl",
+                        subtitle = "Ground Controller$distTxt · $ageStr",
+                        agencyCode = t.agency.id,
+                        lat = opLat,
+                        lon = opLon,
+                        radiusM = null
+                    )
+                )
+            } else {
+                DeviceActions.openDetails(activity, "kokoho:${t.uuid}")
+            }
+            return true
+        }
+        return false
+    }
+
     private fun selectOrOpenAirborneUuid(
         entityUuid: String,
         tapLat: Double?,
@@ -1517,6 +1783,9 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             return true
         }
         droneThreatsByUuid[entityUuid]?.let { t ->
+            if (isStandaloneDroneOperator(t)) {
+                return selectOrOpenPilotUuid(entityUuid, tapLat, tapLon)
+            }
             highlightTrackForEntity(t.uuid, t.uuid, t.agency.mapColorHex)
             if (selectCb != null) {
                 selectCb(toDetectionSelection(t, tapLat ?: map.camera.lat, tapLon ?: map.camera.lon))
@@ -1547,13 +1816,25 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             val endRef = tr.endedAtMs.takeIf { it > 0L } ?: nowMs
             val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, endRef)
             val anchor = nearestPointOnTrack(tr.points, tapLat, tapLon)
-            val displayTitle = tr.label.ifBlank { "${ag.friendlyLabel} Aircraft" }
+            val cleanRawLbl = if (ag == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE) {
+                org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix(tr.label)
+            } else {
+                tr.label
+            }
+            val displayTitle = cleanRawLbl.ifBlank {
+                if (ag == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE) "Tactical Drone" else "${ag.friendlyLabel} Aircraft"
+            }
+            val pathSubtitle = if (ag == org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE) {
+                "Drone Flight Path · $ageStr"
+            } else {
+                "${ag.friendlyLabel} · Flight path · $ageStr"
+            }
             if (selectCb != null) {
                 selectCb(
                     MapSelection.Detection(
                         entityUuid = tr.entityUuid,
                         title = displayTitle,
-                        subtitle = "${ag.friendlyLabel} · Flight path · $ageStr",
+                        subtitle = pathSubtitle,
                         agencyCode = ag.id,
                         lat = anchor.first,
                         lon = anchor.second,
@@ -1576,12 +1857,15 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
             val anchor = nearestPointOnTrack(dt.points, tapLat, tapLon)
             val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(System.currentTimeMillis(), dt.endedAtMs)
+            val cleanDtTitle = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+                .sanitizeDroneOperatorSuffix(dt.label)
+                .ifBlank { "Tactical Drone" }
             if (selectCb != null) {
                 selectCb(
                     MapSelection.Detection(
                         entityUuid = dt.entityUuid,
-                        title = dt.label.ifBlank { ag.friendlyLabel },
-                        subtitle = "${ag.friendlyLabel} · Flight path · $ageStr",
+                        title = cleanDtTitle,
+                        subtitle = "Drone Flight Path · $ageStr",
                         agencyCode = ag.id,
                         lat = anchor.first,
                         lon = anchor.second,
@@ -1600,18 +1884,28 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val nowMs = System.currentTimeMillis()
         val ageStr = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatStaleness(nowMs, t.lastSeenMs)
         val extra = when {
-            t.isAircraft -> t.altitudeFtAgl?.let { "${it} ft" } ?: "ADS-B"
+            isPinpointedAircraft(t) -> t.altitudeFtAgl?.let { "${it} ft" } ?: "ADS-B"
+            isUnpinpointedAircraft(t) -> {
+                val rStr = "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.uncertaintyRadiusM)}"
+                t.altitudeFtAgl?.takeIf { it > 0 }?.let { "$rStr · ${it} ft" } ?: rStr
+            }
             isPinpointedDrone(t) -> t.altitudeFtAgl?.let { "${it} ft AGL" } ?: "Remote ID"
+            isStandaloneDroneOperator(t) -> "Pilot / Operator GPS"
             else -> "±${org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.formatShortDistance(activity, t.uncertaintyRadiusM)}"
+        }
+        val cleanTitle = if (t.isDrone || isStandaloneDroneOperator(t)) {
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.sanitizeDroneOperatorSuffix(t.title.ifBlank { t.friendlyLabel })
+        } else {
+            t.title.ifBlank { t.friendlyLabel }
         }
         return MapSelection.Detection(
             entityUuid = t.uuid,
-            title = t.title.ifBlank { t.friendlyLabel },
+            title = cleanTitle,
             subtitle = "${t.agency.friendlyLabel} · $extra · $ageStr",
             agencyCode = t.agency.id,
-            lat = t.lat ?: fallbackLat,
-            lon = t.lon ?: fallbackLon,
-            radiusM = t.uncertaintyRadiusM
+            lat = (if (isStandaloneDroneOperator(t)) (t.operatorLat ?: t.lat) else t.lat) ?: fallbackLat,
+            lon = (if (isStandaloneDroneOperator(t)) (t.operatorLon ?: t.lon) else t.lon) ?: fallbackLon,
+            radiusM = if (isStandaloneDroneOperator(t)) null else t.uncertaintyRadiusM
         )
     }
 
@@ -1647,8 +1941,11 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             MapDialogs.showAsked(activity, ssid, s, me) { ProbeLog.showOnMap(null); drawAsked() }
             return
         }
-        for (id in (drone + op)) {
+        for (id in drone) {
             if (selectOrOpenAirborneUuid(id, tapLat, tapLon, me)) return
+        }
+        for (id in op) {
+            if (selectOrOpenPilotUuid(id, tapLat, tapLon)) return
         }
         (drone + op).firstNotNullOfOrNull { drones[it] }?.let { s ->
             DeviceActions.openDetails(activity, s.mac)

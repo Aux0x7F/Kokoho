@@ -799,6 +799,7 @@ object SdrRadio {
             tracker.prune(now)
             val located = tracker.located(now)
             val unlocated = tracker.unlocated(now)
+            org.tucsoncommunity.kokoho.online.PoliceAircraft.localUnlocatedFrames = tracker.unlocatedPlanes(now).associateBy { it.hex.lowercase(java.util.Locale.US) }
             // Each aircraft once per turn; no position (it would be near you).
             if (logAll) {
                 for (p in located) if (loggedPlanes.add(p.hex)) logHeard("aircraft ${p.hex}" + (p.callsign?.let { " $it" } ?: "") + (p.altitudeFt?.let { " at $it ft" } ?: ""))

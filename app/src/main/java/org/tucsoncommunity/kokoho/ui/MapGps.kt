@@ -41,6 +41,8 @@ object MapGps {
 
     /** Any fix the app gets (main thread or not): kept for [best]. */
     @Synchronized fun offer(fix: Location) {
+        val currentBest = pick(recent.toList(), System.currentTimeMillis())
+        if (!shouldAcceptLiveFix(fix, currentBest)) return
         recent.addLast(Location(fix))
         while (recent.size > 8) recent.removeFirst()
     }
@@ -54,6 +56,28 @@ object MapGps {
     /** A precise fix may be this much older than a coarse one and still be preferred. */
     private const val PREFER_PRECISE_MS = 60_000L
 
+    /**
+     * Prevents a lagged or coarse FUSED_PROVIDER / NETWORK_PROVIDER fix from pulling the live puck or
+     * re-centered camera backwards to a past road coordinate when a fresher precise GPS fix is already known.
+     */
+    fun shouldAcceptLiveFix(candidate: Location, reference: Location?): Boolean {
+        if (reference == null) return true
+        val candElapsedNs = runCatching { candidate.elapsedRealtimeNanos }.getOrDefault(0L)
+        val refElapsedNs = runCatching { reference.elapsedRealtimeNanos }.getOrDefault(0L)
+        val ageDeltaMs = if (candElapsedNs > 0L && refElapsedNs > 0L) {
+            (candElapsedNs - refElapsedNs) / 1_000_000L
+        } else {
+            candidate.time - reference.time
+        }
+        // Reject out-of-order older fixes (> 250 ms behind current reference fix)
+        if (ageDeltaMs < -250L) return false
+        val refPrecise = reference.hasAccuracy() && reference.accuracy <= PRECISE_M
+        val candCoarse = !candidate.hasAccuracy() || candidate.accuracy > 45f
+        // Reject sudden coarse cell/Wi-Fi jump within 30s of a precise GPS fix
+        if (refPrecise && candCoarse && ageDeltaMs < 30_000L) return false
+        return true
+    }
+
     internal fun pick(all: List<Location>, now: Long): Location? {
         if (all.isEmpty()) return null
         val newest = all.maxBy { it.time }
@@ -64,6 +88,8 @@ object MapGps {
     // ---- the shared GPS --------------------------------------------------------------------------
 
     private val listener = LocationListenerCompat { fix ->
+        val prevBest = best()
+        if (!shouldAcceptLiveFix(fix, prevBest)) return@LocationListenerCompat
         offer(fix)
         adapt(fix)
         subscribers.forEach { runCatching { it(fix) } }
