@@ -773,7 +773,7 @@ object KokohoHubClient {
                                 val ag = KokohoAgency.fromCode(resolvedCategory)
                                 if (ag != null) {
                                     val cInt = (confVal * 100.0).toInt().coerceIn(50, 96)
-                                    val uncertM = e.uncertaintyRadiusM.toInt().coerceAtLeast(20)
+                                    val uncertM = kotlin.math.round(e.uncertaintyRadiusM).toInt().coerceAtLeast(15)
                                     val badges = evidenceList.map {
                                         EvidenceBadge(
                                             kind = it.kind,
@@ -782,6 +782,15 @@ object KokohoHubClient {
                                             weight = it.weight,
                                             lastSeenMs = it.lastSeenMs
                                         )
+                                    }
+                                    val droneMeta = KokohoPostureEngine.extractDroneTelemetryFromFacets(badges.map { it.facetKey })
+                                    val isDroneRow = ag == KokohoAgency.DRONE || droneMeta.isDroneFacet
+                                    val isStandaloneOp = KokohoPostureEngine.isStandaloneDroneOperator(badges, e.primaryFacetKey)
+                                    val hasRemoteIdMeta = isDroneRow && !isStandaloneOp && (droneMeta.altFtAgl != null || droneMeta.operatorLat != null)
+                                    val cleanTrendLabel = if (isDroneRow || isStandaloneOp) {
+                                        KokohoPostureEngine.sanitizeDroneOperatorSuffix(e.label)
+                                    } else {
+                                        e.label
                                     }
                                     ledgerHydrated += EvaluatedThreat(
                                         uuid = e.entityUuid,
@@ -793,22 +802,26 @@ object KokohoHubClient {
                                         classificationConfidence = cInt,
                                         spatialConfidence = cInt,
                                         estimatedDistanceM = 9_999,
-                                        uncertaintyRadiusM = uncertM,
+                                        uncertaintyRadiusM = if (isStandaloneOp) 15 else uncertM,
                                         bearingDeg = null,
                                         closingVelocityMps = null,
-                                        recurrenceSummary = e.label,
+                                        recurrenceSummary = cleanTrendLabel,
                                         evidenceSources = badges,
                                         updatedAtMs = e.lastSeenMs,
                                         lat = e.estimatedLat,
                                         lon = e.estimatedLon,
-                                        isApproximatedPosition = e.corroborationCount >= 2 || e.sightingCount >= 2 || uncertM <= 180,
-                                        isPinpointed = uncertM <= 15,
-                                        isDrone = ag == KokohoAgency.DRONE || e.primaryFacetKey.startsWith("uas:", ignoreCase = true),
+                                        isApproximatedPosition = isStandaloneOp || e.corroborationCount >= 2 || e.sightingCount >= 2 || uncertM <= 180,
+                                        isPinpointed = isStandaloneOp || uncertM <= KokohoPostureEngine.PINPOINT_POINT_RADIUS_M || (hasRemoteIdMeta && uncertM <= 40),
+                                        aircraftTrackDeg = droneMeta.headingDeg,
+                                        isDrone = isDroneRow,
+                                        altitudeFtAgl = droneMeta.altFtAgl,
+                                        operatorLat = if (isStandaloneOp) (droneMeta.operatorLat ?: e.estimatedLat) else droneMeta.operatorLat,
+                                        operatorLon = if (isStandaloneOp) (droneMeta.operatorLon ?: e.estimatedLon) else droneMeta.operatorLon,
                                         hardwareIdentifier = e.primaryFacetKey.ifBlank { null },
                                         sightingCount = maxOf(e.sightingCount, e.corroborationCount).coerceAtLeast(1),
                                         capabilities = KokohoSignatures.inferCapabilitiesFromEvidence(
                                             badges.map { it.facetKey },
-                                            badges.map { it.detail } + e.label
+                                            badges.map { it.detail } + cleanTrendLabel
                                         )
                                     )
                                 }

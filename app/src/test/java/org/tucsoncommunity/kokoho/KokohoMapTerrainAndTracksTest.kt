@@ -999,4 +999,100 @@ class KokohoMapTerrainAndTracksTest {
         assertFalse(org.tucsoncommunity.kokoho.ui.MapGps.shouldAcceptLiveFix(coarseNetworkJump, preciseRef))
         assertTrue(org.tucsoncommunity.kokoho.ui.MapGps.shouldAcceptLiveFix(newerPrecise, preciseRef))
     }
+
+    @Test
+    fun updateCheckerComparesNextSubversionsAndLedgerPreservesDronePilotTether() {
+        val uc = org.tucsoncommunity.kokoho.util.UpdateChecker
+        assertTrue(uc.isNewer("1.3.15-next.7", "1.3.15-next.6"))
+        assertFalse(uc.isNewer("1.3.15-next.6", "1.3.15-next.7"))
+        assertTrue(uc.isNewer("1.3.16", "1.3.16-next.7"))
+        assertFalse(uc.isNewer("1.3.16-next.7", "1.3.16"))
+        assertTrue(uc.isNewer("1.3.17-next.1", "1.3.16-next.9"))
+
+        // Legacy debug build with currentChannel="public" + "-next.6" must still accept "/v1/update/next" updates
+        val nextManifest = uc.parseLatest(
+            """
+            {
+              "channel": "next",
+              "version": "1.3.17-next.1",
+              "version_code": 1433,
+              "apk_url": "https://kokoho.tucsoncommunity.online/v1/update/next/kokoho-next-debug.apk"
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            uc.isUpdateAvailable(
+                latest = nextManifest,
+                currentChannel = "public",
+                currentVersionCode = 1428,
+                currentVersionName = "1.3.15-next.6",
+                currentManifestPath = "/v1/update/next"
+            )
+        )
+        assertFalse(
+            "Public release channel must never cross-contaminate next manifest",
+            uc.isUpdateAvailable(
+                latest = nextManifest,
+                currentChannel = "public",
+                currentVersionCode = 1432,
+                currentVersionName = "1.3.16",
+                currentManifestPath = "/v1/update/latest"
+            )
+        )
+
+        // Ledger round-trip preserves Remote ID operator GPS, AGL altitude, and pinpoint status for 18m drones
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val nowMs = System.currentTimeMillis()
+        val droneBadges = listOf(
+            org.tucsoncommunity.kokoho.posture.EvidenceBadge("DERIVED_ENTITY", "uas:mac:38:1D:14:10:51:57", "Skydio X2E", 0.9, nowMs),
+            org.tucsoncommunity.kokoho.posture.EvidenceBadge("DERIVED_ENTITY", "uas:alt_ft_agl:377", "Skydio X2E", 0.9, nowMs),
+            org.tucsoncommunity.kokoho.posture.EvidenceBadge("DERIVED_ENTITY", "uas:op:32.34023,-110.98364", "Skydio X2E", 0.9, nowMs)
+        )
+        val extracted = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.extractDroneTelemetryFromFacets(
+            droneBadges.map { it.facetKey }
+        )
+        assertEquals(32.34023, extracted.operatorLat!!, 1e-5)
+        assertEquals(-110.98364, extracted.operatorLon!!, 1e-5)
+        assertEquals(377, extracted.altFtAgl)
+        assertTrue(extracted.isDroneFacet)
+
+        // Stale (>15m) ground detections >450m down the street do not nag Monitor
+        val staleDownStreet = org.tucsoncommunity.kokoho.posture.EvaluatedThreat(
+            uuid = "stale-cbp-down-street",
+            trackUuid = "stale-cbp-down-street",
+            agency = org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_CBP,
+            label = "CBP",
+            posture = org.tucsoncommunity.kokoho.posture.PostureColor.YELLOW,
+            overallConfidence = 80,
+            classificationConfidence = 80,
+            spatialConfidence = 80,
+            estimatedDistanceM = 950,
+            uncertaintyRadiusM = 40,
+            bearingDeg = null,
+            closingVelocityMps = null,
+            recurrenceSummary = "CBP",
+            evidenceSources = emptyList(),
+            updatedAtMs = nowMs - 60 * 60_000L,
+            lat = 32.2300,
+            lon = -110.8100,
+            isApproximatedPosition = true,
+            isPinpointed = false
+        )
+        assertFalse(
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.isGroundOrDroneNearbyForMonitor(
+                threat = staleDownStreet,
+                hasUserLoc = true,
+                nowMs = nowMs,
+                heardLocallyLive = false
+            )
+        )
+        assertTrue(
+            org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.isGroundOrDroneNearbyForMonitor(
+                threat = staleDownStreet.copy(updatedAtMs = nowMs - 2 * 60_000L),
+                hasUserLoc = true,
+                nowMs = nowMs,
+                heardLocallyLive = false
+            )
+        )
+    }
 }

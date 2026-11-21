@@ -394,7 +394,8 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 paint = o("line-color" to color, "line-width" to 2.5, "line-opacity" to a("coalesce", get("opacity"), 0.84))),
             layer(TRACE, "line", layout = o("line-cap" to "round", "line-join" to "round"),
                 paint = o("line-color" to color, "line-width" to 5.0)),
-            layer(DRONE_LINES, "line", paint = o("line-color" to DRONE_COLOR, "line-width" to 2.5, "line-dasharray" to a(4.0, 2.5))),
+            layer(DRONE_LINES, "line", layout = o("line-cap" to "round"),
+                paint = o("line-color" to "#38BDF8", "line-width" to 2.5, "line-dasharray" to a(3.5, 2.2), "line-opacity" to 0.90)),
             layer(TOWERS, "symbol", layout = o("icon-image" to "rf-tower", *overlap)),
             layer(CCTV, "symbol", minzoom = CCTV_MIN_ZOOM, layout = o("icon-image" to get("icon"), *overlap)),
             // Plate, speed and red-light cameras; the ones whose alerts you turned off, faded.
@@ -534,7 +535,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             set(DRONE_LINES, emptyList())
             return
         }
-        set(DRONE_OPS, listOf(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to uuid)))
+        set(DRONE_OPS, listOf(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to uuid, "label" to "Drone Pilot")))
         set(DRONE_LINES, listOf(GeoJson.feature(GeoJson.line(listOf(opLat to opLon, droneLat to droneLon)), "mac" to uuid)))
     }
 
@@ -1154,7 +1155,10 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val droneThreats = snap.mapThreats.filter { isPinpointedDrone(it) }
         unpinpointedAirspaceUuids = (unpinpointedDrones.map { it.uuid } + unpinpointedAirThreats.map { it.uuid }).toSet()
         standaloneOperatorUuids = standaloneOperators.map { it.uuid }.toSet()
-        droneThreatsByUuid = (droneThreats + unpinpointedDrones + standaloneOperators).associateBy { it.uuid }
+        val droneThreatsMap = LinkedHashMap<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat>()
+        for (dtItem in (droneThreats + unpinpointedDrones + standaloneOperators)) {
+            droneThreatsMap[dtItem.uuid] = dtItem
+        }
         drones = emptyMap()
         val droneFeatures = ArrayList<JSONObject>(droneThreats.size + 4)
         for (t in droneThreats) {
@@ -1175,27 +1179,31 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             )
         }
         // Operators NEVER have a bubble: render crisp pilot badges + dashed tethers for pinpointed drones,
-        // unpinpointed drones with pilot GPS, and standalone `uas:op:*` operator entities.
-        val operatorFeatures = buildList {
-            for (t in (droneThreats + unpinpointedDrones)) {
-                val opLat = t.operatorLat ?: continue
-                val opLon = t.operatorLon ?: continue
-                add(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to t.uuid, "label" to "Drone Pilot"))
-            }
-            for (op in standaloneOperators) {
-                val opLat = op.operatorLat ?: op.lat ?: continue
-                val opLon = op.operatorLon ?: op.lon ?: continue
-                add(GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to op.uuid, "label" to "Drone Pilot"))
+        // unpinpointed drones with pilot GPS, standalone `uas:op:*` operator entities, and historical drone tracks.
+        val operatorFeatures = ArrayList<JSONObject>(droneThreats.size + standaloneOperators.size + 4)
+        val emittedOpUuids = HashSet<String>()
+        for (t in (droneThreats + unpinpointedDrones)) {
+            val opLat = t.operatorLat ?: continue
+            val opLon = t.operatorLon ?: continue
+            if (emittedOpUuids.add(t.uuid)) {
+                operatorFeatures += GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to t.uuid, "label" to "Drone Pilot")
             }
         }
-        set(DRONE_OPS, operatorFeatures)
-        set(DRONE_LINES, (droneThreats + unpinpointedDrones).mapNotNull { t ->
-            val lat = t.lat ?: return@mapNotNull null
-            val lon = t.lon ?: return@mapNotNull null
-            val opLat = t.operatorLat ?: return@mapNotNull null
-            val opLon = t.operatorLon ?: return@mapNotNull null
-            GeoJson.feature(GeoJson.line(listOf(opLat to opLon, lat to lon)), "mac" to t.uuid)
-        })
+        for (op in standaloneOperators) {
+            val opLat = op.operatorLat ?: op.lat ?: continue
+            val opLon = op.operatorLon ?: op.lon ?: continue
+            if (emittedOpUuids.add(op.uuid)) {
+                operatorFeatures += GeoJson.feature(GeoJson.point(opLat, opLon), "mac" to op.uuid, "label" to "Drone Pilot")
+            }
+        }
+        val droneLineFeatures = ArrayList<JSONObject>(droneThreats.size + 4)
+        for (t in (droneThreats + unpinpointedDrones)) {
+            val lat = t.lat ?: continue
+            val lon = t.lon ?: continue
+            val opLat = t.operatorLat ?: continue
+            val opLon = t.operatorLon ?: continue
+            droneLineFeatures += GeoJson.feature(GeoJson.line(listOf(opLat to opLon, lat to lon)), "mac" to t.uuid)
+        }
 
         // Pinpointed ADS-B & Circling Spy Planes (unpinpointed aircraft render in DRONE_DOME_2D / 3D spheres)
         airThreatsByUuid = (pinpointedAirThreats + unpinpointedAirThreats).associateBy { it.uuid }
@@ -1397,6 +1405,23 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                     "dir" to 0.0,
                     "label" to "$prefix · $ageStr"
                 )
+                val histLedgerDrone = org.tucsoncommunity.kokoho.posture.KokohoEntityLedger.findByUuid(activity, tr.entityUuid)
+                if (histLedgerDrone != null) {
+                    droneThreatsMap.putIfAbsent(tr.entityUuid, histLedgerDrone)
+                    val opLat = histLedgerDrone.operatorLat
+                    val opLon = histLedgerDrone.operatorLon
+                    if (opLat != null && opLon != null && emittedOpUuids.add(tr.entityUuid)) {
+                        operatorFeatures += GeoJson.feature(
+                            GeoJson.point(opLat, opLon),
+                            "mac" to tr.entityUuid,
+                            "label" to "Drone Pilot"
+                        )
+                        droneLineFeatures += GeoJson.feature(
+                            GeoJson.line(listOf(opLat to opLon, endPt.first to endPt.second)),
+                            "mac" to tr.entityUuid
+                        )
+                    }
+                }
             }
         }
         flightTracksByEntityUuid = activeTracksByEntity
@@ -1454,7 +1479,10 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 }
             }
         }
+        droneThreatsByUuid = droneThreatsMap
         set(DRONES, droneFeatures)
+        set(DRONE_OPS, operatorFeatures)
+        set(DRONE_LINES, droneLineFeatures)
         localDroneTrailsByUuid = localDroneMap
         set(FLIGHT_TRACKS, trackFeatures)
 

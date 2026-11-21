@@ -70,34 +70,60 @@ object UpdateChecker {
         }
     }
 
-    /** True when [a] is a newer dotted version than [b] ("2.42.0" > "2.41.0"). */
+    private fun parseNextIteration(ver: String): Int? {
+        val suffix = ver.trimStart('v', 'V').substringAfter('-', "")
+        if (suffix.isEmpty()) return null
+        val m = Regex("(?i)^next\\.(\\d+)$").find(suffix.trim()) ?: return 0
+        return m.groupValues[1].toIntOrNull() ?: 0
+    }
+
+    /**
+     * True when [a] is newer than [b], comparing dotted SemVer first ("1.3.16" > "1.3.15"),
+     * then treating final release ("1.3.16") as newer than pre-release ("1.3.16-next.7"),
+     * and comparing `-next.<N>` subversions numerically ("1.3.16-next.2" > "1.3.16-next.1").
+     */
     fun isNewer(a: String, b: String): Boolean {
-        val x = a.trimStart('v', 'V').substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
-        val y = b.trimStart('v', 'V').substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
+        val cleanA = a.trim().trimStart('v', 'V')
+        val cleanB = b.trim().trimStart('v', 'V')
+        if (cleanA.equals(cleanB, ignoreCase = true)) return false
+        val x = cleanA.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
+        val y = cleanB.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
         for (i in 0 until maxOf(x.size, y.size)) {
             val d = x.getOrElse(i) { 0 } - y.getOrElse(i) { 0 }
             if (d != 0) return d > 0
         }
-        return false
+        val nextA = parseNextIteration(cleanA)
+        val nextB = parseNextIteration(cleanB)
+        return when {
+            nextA == null && nextB != null -> true   // 1.3.16 final > 1.3.16-next.N
+            nextA != null && nextB == null -> false  // 1.3.16-next.N < 1.3.16 final
+            nextA != null && nextB != null -> nextA > nextB
+            else -> false
+        }
     }
 
     fun isUpdateAvailable(
         latest: Latest,
         currentChannel: String = BuildConfig.RELEASE_CHANNEL,
         currentVersionCode: Int = BuildConfig.VERSION_CODE,
-        currentVersionName: String = BuildConfig.VERSION_NAME
+        currentVersionName: String = BuildConfig.VERSION_NAME,
+        currentManifestPath: String = BuildConfig.UPDATE_MANIFEST_PATH
     ): Boolean {
         val remoteChan = latest.channel.trim().ifEmpty { "public" }
-        val localChan = currentChannel.trim().ifEmpty { "public" }
+        val rawLocalChan = currentChannel.trim().ifEmpty { "public" }
+        val localChan = if (rawLocalChan.equals("public", ignoreCase = true) &&
+            (currentManifestPath.endsWith("/next") || currentVersionName.contains("-next.", ignoreCase = true))
+        ) {
+            "next"
+        } else {
+            rawLocalChan
+        }
         // Strict channel isolation: a public release never prompts or overwrites a non-public channel install, and vice versa.
         if (!remoteChan.equals(localChan, ignoreCase = true)) return false
         if (latest.versionCode > 0 && latest.versionCode != currentVersionCode) {
             return latest.versionCode > currentVersionCode
         }
-        val currentVer = currentVersionName.substringBefore('-')
-        val remoteVer = latest.version.trimStart('v', 'V').substringBefore('-')
-        if (remoteVer == currentVer) return false
-        return isNewer(remoteVer, currentVer)
+        return isNewer(latest.version, currentVersionName)
     }
 
     internal fun parseLatest(text: String, foss: Boolean = BuildConfig.FLAVOR == "foss"): Latest =

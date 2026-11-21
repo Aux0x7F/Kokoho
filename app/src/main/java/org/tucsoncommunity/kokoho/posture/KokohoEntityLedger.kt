@@ -115,7 +115,7 @@ object KokohoEntityLedger {
     }
 
     private fun stampOf(t: EvaluatedThreat): String =
-        "${t.updatedAtMs}|${t.agency.id}|${t.label}|${t.sightingCount}|${t.uncertaintyRadiusM}|${t.lat}|${t.lon}|${t.evidenceSources.size}|${t.capabilities.size}"
+        "${t.updatedAtMs}|${t.agency.id}|${t.label}|${t.sightingCount}|${t.uncertaintyRadiusM}|${t.isPinpointed}|${t.lat}|${t.lon}|${t.operatorLat}|${t.operatorLon}|${t.altitudeFtAgl}|${t.evidenceSources.size}|${t.capabilities.size}"
 
     private val suppressedLedgerTextRegex = Regex(
         "(?i)(?:\\b(?:QT|DR)[_\\s]+[0-9A-F]{8}\\b|\\bIDW\\d+\\b|\\bVeh\\s+\\d{2,4}(?:[-_ ]?(?:2\\.?4|5)g?)?\\b|\\bCrystalMT\\b|\\bMcDonalds|\\bMcD[-_]|\\beBOS\\b|\\bAloha_POS|\\bToast_POS|\\bTrakkaStream\\b|\\bsc-RD\\w*-Maint\\b)"
@@ -214,9 +214,20 @@ object KokohoEntityLedger {
                     val capsRaw = parseStringList(c.getString(21))
                     val caps = if (isDroneRow) capsRaw.filterNot { it.equals("Drone Operator", ignoreCase = true) } else capsRaw
                     val badges = parseBadges(c.getString(22))
+                    val droneMeta = KokohoPostureEngine.extractDroneTelemetryFromFacets(badges.map { it.facetKey })
+                    val isDroneFinal = isDroneRow || droneMeta.isDroneFacet
+                    val isStandaloneOp = KokohoPostureEngine.isStandaloneDroneOperator(badges, hwRaw)
+                    val baseRadM = c.getInt(7)
+                    val storedLat = if (c.isNull(10)) null else c.getDouble(10)
+                    val storedLon = if (c.isNull(11)) null else c.getDouble(11)
+                    val hasRemoteIdMeta = isDroneFinal && !isStandaloneOp && (droneMeta.altFtAgl != null || droneMeta.operatorLat != null)
+                    val isPinpointedFinal = (c.getInt(13) != 0) ||
+                        isStandaloneOp ||
+                        baseRadM <= KokohoPostureEngine.PINPOINT_POINT_RADIUS_M ||
+                        (hasRemoteIdMeta && baseRadM <= 40)
                     val rawLbl = c.getString(2) ?: agency.friendlyLabel
-                    val cleanLbl = if (isDroneRow) KokohoPostureEngine.sanitizeDroneOperatorSuffix(rawLbl) else rawLbl
-                    val cleanSum = if (isDroneRow) KokohoPostureEngine.sanitizeDroneOperatorSuffix(c.getString(8) ?: "") else (c.getString(8) ?: "")
+                    val cleanLbl = if (isDroneFinal) KokohoPostureEngine.sanitizeDroneOperatorSuffix(rawLbl) else rawLbl
+                    val cleanSum = if (isDroneFinal) KokohoPostureEngine.sanitizeDroneOperatorSuffix(c.getString(8) ?: "") else (c.getString(8) ?: "")
                     val threat = EvaluatedThreat(
                         uuid = uuid,
                         trackUuid = uuid,
@@ -227,22 +238,25 @@ object KokohoEntityLedger {
                         classificationConfidence = classConf,
                         spatialConfidence = spatConf,
                         estimatedDistanceM = c.getInt(6),
-                        uncertaintyRadiusM = c.getInt(7),
+                        uncertaintyRadiusM = if (isStandaloneOp) 15 else baseRadM,
                         bearingDeg = null,
                         closingVelocityMps = null,
                         recurrenceSummary = cleanSum,
                         evidenceSources = badges,
                         updatedAtMs = c.getLong(9),
-                        lat = if (c.isNull(10)) null else c.getDouble(10),
-                        lon = if (c.isNull(11)) null else c.getDouble(11),
+                        lat = storedLat,
+                        lon = storedLon,
                         isApproximatedPosition = c.getInt(12) != 0,
-                        isPinpointed = c.getInt(13) != 0,
+                        isPinpointed = isPinpointedFinal,
                         isAircraft = c.getInt(14) != 0,
                         isHelicopter = c.getInt(15) != 0,
+                        aircraftTrackDeg = droneMeta.headingDeg,
                         aircraftHex = if (c.getInt(14) != 0) badges.firstOrNull()?.facetKey?.substringAfterLast(':') else null,
                         isCircling = c.getInt(16) != 0,
-                        isDrone = c.getInt(17) != 0,
-                        altitudeFtAgl = if (c.isNull(18)) null else c.getInt(18),
+                        isDrone = isDroneFinal,
+                        altitudeFtAgl = if (!c.isNull(18)) c.getInt(18) else droneMeta.altFtAgl,
+                        operatorLat = if (isStandaloneOp) (droneMeta.operatorLat ?: storedLat) else droneMeta.operatorLat,
+                        operatorLon = if (isStandaloneOp) (droneMeta.operatorLon ?: storedLon) else droneMeta.operatorLon,
                         hardwareIdentifier = if (c.isNull(19)) null else c.getString(19),
                         sightingCount = c.getInt(20).coerceAtLeast(1),
                         capabilities = caps

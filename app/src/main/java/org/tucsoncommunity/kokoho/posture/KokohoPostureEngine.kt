@@ -203,6 +203,46 @@ object KokohoPostureEngine {
             .replace(Regex("""\s*\+\s*Operators?\b""", RegexOption.IGNORE_CASE), "")
             .trim()
 
+    data class ExtractedDroneTelemetry(
+        val operatorLat: Double?,
+        val operatorLon: Double?,
+        val altFtAgl: Int?,
+        val headingDeg: Double?,
+        val isDroneFacet: Boolean
+    )
+
+    fun extractDroneTelemetryFromFacets(facets: Iterable<String>): ExtractedDroneTelemetry {
+        var opLat: Double? = null
+        var opLon: Double? = null
+        var altFt: Int? = null
+        var hdgDeg: Double? = null
+        var isDrn = false
+        for (raw in facets) {
+            val fk = raw.trim()
+            if (fk.startsWith("uas:", ignoreCase = true) || fk.startsWith("drone:", ignoreCase = true)) {
+                isDrn = true
+            }
+            if (fk.startsWith("uas:op:", ignoreCase = true)) {
+                val parts = fk.substringAfter("uas:op:", fk.substringAfter("UAS:OP:")).split(',')
+                if (parts.size == 2) {
+                    val olat = parts[0].trim().toDoubleOrNull()
+                    val olon = parts[1].trim().toDoubleOrNull()
+                    if (olat != null && olon != null && olat in -90.0..90.0 && olon in -180.0..180.0 &&
+                        (abs(olat) > 0.01 || abs(olon) > 0.01)
+                    ) {
+                        opLat = olat
+                        opLon = olon
+                    }
+                }
+            } else if (altFt == null && fk.startsWith("uas:alt_ft_agl:", ignoreCase = true)) {
+                altFt = fk.substringAfterLast(':').trim().toIntOrNull()
+            } else if (hdgDeg == null && fk.startsWith("uas:hdg:", ignoreCase = true)) {
+                hdgDeg = fk.substringAfterLast(':').trim().toDoubleOrNull()
+            }
+        }
+        return ExtractedDroneTelemetry(opLat, opLon, altFt, hdgDeg, isDrn)
+    }
+
     /**
      * True when an entity represents a standalone `uas:op:*` pilot/operator coordinate rather than
      * a flying `uas:mac:*` / `DRONE:*` airframe. Operators never receive an uncertainty bubble.
@@ -947,9 +987,11 @@ object KokohoPostureEngine {
             (isCircling && distM <= AIRCRAFT_NEARBY_CIRCLING_MAX_M)
     }
 
-    /** Ground and drone detections only alert Monitor and Notifications within 1.0 mi (1,609 m) nearest edge and 1.5 mi (2,414 m) center. */
-    const val MONITOR_GROUND_NEARBY_MAX_EDGE_M = 1_609.0
-    const val MONITOR_GROUND_NEARBY_MAX_CENTER_M = 2_414
+    /** Ground and drone detections alert Monitor within ~0.75 mi (1,200 m) when fresh (<= 15m), and <= 450 m (~0.28 mi) once > 15m old. */
+    const val MONITOR_GROUND_NEARBY_MAX_EDGE_M = 1_050.0
+    const val MONITOR_GROUND_NEARBY_MAX_CENTER_M = 1_200
+    const val MONITOR_STALE_GROUND_NEARBY_MAX_CENTER_M = 450
+    private const val MONITOR_LIVE_LOCAL_HARDWARE_MAX_CENTER_M = 2_414
 
     /** Wide-area air-to-ground RF detections alert Monitor and Notifications within 1.5 mi (2,414 m) nearest edge and 2.5 mi (4,023 m) center. */
     const val MONITOR_AIR_RF_NEARBY_MAX_EDGE_M = 2_414.0
@@ -961,16 +1003,26 @@ object KokohoPostureEngine {
         nowMs: Long,
         heardLocallyLive: Boolean
     ): Boolean {
+        val ageMs = (nowMs - threat.updatedAtMs).coerceAtLeast(0L)
         if (!hasUserLoc || threat.lat == null || threat.lon == null) {
             // Without user GPS (or when unlocated), only live signals physically heard by this phone's own radios
             // within the last 90 seconds can alert Monitor/Notifications - never remote Hub or historical entities.
             return heardLocallyLive &&
-                (nowMs - threat.updatedAtMs) <= 90_000L &&
+                ageMs <= 90_000L &&
                 threat.estimatedDistanceM <= MONITOR_GROUND_NEARBY_MAX_CENTER_M
         }
         val isAirRf = threat.agency == KokohoAgency.DHS_AMO
-        val maxEdge = if (isAirRf) MONITOR_AIR_RF_NEARBY_MAX_EDGE_M else MONITOR_GROUND_NEARBY_MAX_EDGE_M
-        val maxCenter = if (isAirRf) MONITOR_AIR_RF_NEARBY_MAX_CENTER_M else MONITOR_GROUND_NEARBY_MAX_CENTER_M
+        val isLiveLocalDirect = heardLocallyLive && ageMs <= 90_000L && threat.uncertaintyRadiusM <= 600
+        val maxEdge = when {
+            isAirRf || isLiveLocalDirect -> MONITOR_AIR_RF_NEARBY_MAX_EDGE_M
+            else -> MONITOR_GROUND_NEARBY_MAX_EDGE_M
+        }
+        val maxCenter = when {
+            isAirRf -> MONITOR_AIR_RF_NEARBY_MAX_CENTER_M
+            isLiveLocalDirect -> MONITOR_LIVE_LOCAL_HARDWARE_MAX_CENTER_M
+            !heardLocallyLive && ageMs > 15 * 60_000L -> MONITOR_STALE_GROUND_NEARBY_MAX_CENTER_M
+            else -> MONITOR_GROUND_NEARBY_MAX_CENTER_M
+        }
         return threat.nearestEdgeDistanceM <= maxEdge && threat.estimatedDistanceM <= maxCenter
     }
 
@@ -3725,6 +3777,8 @@ object KokohoPostureEngine {
                     badges.map { it.detail } + remote.classification.label
                 )
                 val isStandaloneOp = isStandaloneDroneOperator(badges, badges.firstOrNull()?.facetKey)
+                val droneMeta = extractDroneTelemetryFromFacets(badges.map { it.facetKey })
+                val hasRemoteIdMeta = droneMeta.operatorLat != null || droneMeta.altFtAgl != null
                 val isDroneObj = agency == KokohoAgency.DRONE || badges.any { it.facetKey.startsWith("uas:", true) }
                 val rawThreat = EvaluatedThreat(
                     uuid = remote.uuid,
@@ -3749,8 +3803,12 @@ object KokohoPostureEngine {
                     lat = remote.location.lat,
                     lon = remote.location.lon,
                     isApproximatedPosition = true,
-                    isPinpointed = isStandaloneOp || uncertM <= PINPOINT_POINT_RADIUS_M,
+                    isPinpointed = isStandaloneOp || uncertM <= PINPOINT_POINT_RADIUS_M || (isDroneObj && hasRemoteIdMeta && uncertM <= 40),
                     isDrone = isDroneObj,
+                    altitudeFtAgl = droneMeta.altFtAgl,
+                    operatorLat = droneMeta.operatorLat,
+                    operatorLon = droneMeta.operatorLon,
+                    aircraftTrackDeg = droneMeta.headingDeg,
                     hardwareIdentifier = badges.firstOrNull()?.facetKey,
                     sightingCount = max(remote.sightingCount, remote.corroborationCount).coerceAtLeast(1),
                     capabilities = caps
