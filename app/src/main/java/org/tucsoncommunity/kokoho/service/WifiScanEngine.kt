@@ -44,7 +44,11 @@ class WifiScanEngine(
                 // Every band, always: the WiFi bands setting is for external adapters only.
                 // And only once each: a broadcast without a new scan carries the same results again.
                 val fresh = wifiManager.scanResults.filter { nowUs - it.timestamp <= MAX_RESULT_AGE_US && it.timestamp > newestUs }
-                if (fresh.isNotEmpty()) { newestUs = fresh.maxOf { it.timestamp }; onResults(fresh) }
+                if (fresh.isNotEmpty()) {
+                    newestUs = fresh.maxOf { it.timestamp }
+                    PassByWifiScanScheduler.onPassiveBroadcastIngested(fresh.size)
+                    onResults(fresh)
+                }
             } catch (e: SecurityException) {
                 // Missing location permission - caller should have requested it already.
             }
@@ -80,13 +84,16 @@ class WifiScanEngine(
      * outside a small allowance (varies by OEM/API level). A foreground service
      * with a visible notification improves - but doesn't eliminate - this.
      */
-    fun requestScan() {
-        try {
+    fun requestScan(): Boolean {
+        return try {
             @Suppress("DEPRECATION") // no replacement API; still the only way to request a scan
-            if (wifiManager.startScan()) refused = 0 else refused++
+            val started = wifiManager.startScan()
+            if (started) refused = 0 else refused++
             org.tucsoncommunity.kokoho.util.HwLogs.phone.logStatus("WiFi", if (refused >= 3) "WiFi: Android is refusing scan requests (its limit, or WiFi scanning is off)" else "WiFi: scanning")
+            started
         } catch (e: Exception) {
             // Throttled or disabled - safe to ignore, next cycle will retry.
+            false
         }
     }
 }

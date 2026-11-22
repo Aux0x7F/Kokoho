@@ -42,6 +42,72 @@ object Tpms {
 
     const val RATE = 256_000
     val CHANNELS = listOf(315_000_000L, 433_920_000L)
+    private const val BLE_TPMS_SERVICE_UUID16 = 0xFBB0
+    private const val BLE_TPMS_COMPANY_SYSGRATION = 0x0100
+    private val BLE_TPMS_NAME_REGEX = Regex("(?i)^(?:TPMS[1-4]?_[0-9A-F]{4,12}|BLE[_-]?TPMS[_-]?[0-9A-F]{4,12}|BR[0-9A-F]{6})$")
+
+    /**
+     * Decodes aftermarket and OEM BLE TPMS sensor advertisements (`0xFBB0` service UUID/data,
+     * Sysgration `0x0100` 16-byte tire telemetry frames, or explicit `TPMS*` sensor names).
+     * Never matches generic consumer phones, wearables, or audio devices.
+     */
+    fun decodeBle(advert: org.tucsoncommunity.kokoho.detect.Advert?): Reading? {
+        if (advert == null || !advert.isBle) return null
+        val shorts = (advert.serviceUuids + advert.serviceData.keys)
+            .mapNotNull { org.tucsoncommunity.kokoho.detect.Advert.shortOf(it) }
+        val hasTpmsUuid = BLE_TPMS_SERVICE_UUID16 in shorts
+        val cleanName = advert.name?.trim().orEmpty()
+        val hasTpmsName = cleanName.isNotEmpty() && BLE_TPMS_NAME_REGEX.matches(cleanName)
+        val mfgFrame = advert.manufacturerData[BLE_TPMS_COMPANY_SYSGRATION]
+        val svcFrame = advert.serviceData[org.tucsoncommunity.kokoho.detect.Advert.uuid16(BLE_TPMS_SERVICE_UUID16)]
+        val payload = when {
+            svcFrame != null && svcFrame.size >= 6 -> svcFrame
+            hasTpmsUuid && mfgFrame != null && mfgFrame.size >= 6 -> mfgFrame
+            mfgFrame != null && mfgFrame.size == 16 -> mfgFrame
+            else -> null
+        }
+        if (!hasTpmsUuid && !hasTpmsName && payload == null) return null
+
+        var kpa: Double? = null
+        var tempC: Double? = null
+        var sensorHexId: String? = null
+
+        if (payload != null && payload.size >= 12) {
+            // Standard 16-byte Sysgration BLE TPMS layout:
+            // [0..5] 6-byte sensor address/ID, [6..9] pressure Pa LE uint32, [10..13] temp 0.01 C LE int32
+            val idBytes = payload.sliceArray(0 until 6)
+            sensorHexId = idBytes.joinToString("") { "%02X".format(Locale.US, it.toInt() and 0xFF) }
+            val rawPa = (payload[6].toLong() and 0xFFL) or
+                ((payload[7].toLong() and 0xFFL) shl 8) or
+                ((payload[8].toLong() and 0xFFL) shl 16) or
+                ((payload[9].toLong() and 0xFFL) shl 24)
+            val candKpa = rawPa / 1000.0
+            if (candKpa in 50.0..950.0) {
+                kpa = candKpa
+            }
+            if (payload.size >= 14) {
+                val rawTemp = (payload[10].toInt() and 0xFF) or
+                    ((payload[11].toInt() and 0xFF) shl 8) or
+                    ((payload[12].toInt() and 0xFF) shl 16) or
+                    (payload[13].toInt() shl 24)
+                val candTemp = rawTemp / 100.0
+                if (candTemp in -45.0..125.0) {
+                    tempC = candTemp
+                }
+            }
+        }
+        if (sensorHexId == null) {
+            val fromName = cleanName.substringAfterLast('_').substringAfterLast('-')
+                .uppercase(Locale.US).filter { it in '0'..'9' || it in 'A'..'F' }
+            val fromMac = advert.mac.uppercase(Locale.US).filter { it in '0'..'9' || it in 'A'..'F' }
+            sensorHexId = when {
+                fromName.length >= 6 -> fromName.takeLast(8)
+                fromMac.length >= 8 -> fromMac.takeLast(8)
+                else -> return null
+            }
+        }
+        return Reading(protocol = "BLE", id = sensorHexId, kpa = kpa, tempC = tempC)
+    }
     private const val BURST_DB = 10.0
     private const val GAP_S = 1e-3
     private const val MIN_BURST_S = 2e-3

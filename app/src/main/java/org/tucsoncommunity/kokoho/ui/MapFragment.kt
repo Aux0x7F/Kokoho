@@ -189,6 +189,8 @@ class MapFragment : Fragment() {
     private var lastFix: Location? = null
     private var smoothKmh = -1f
     private var stopObservingBulk: (() -> Unit)? = null
+    private var stopTrustStateListener: (() -> Unit)? = null
+    private var syncMilPillState: (() -> Unit)? = null
     private val dateFmt = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
 
     // Contextual map selection & bottom footer popup state
@@ -765,10 +767,74 @@ class MapFragment : Fragment() {
             val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act)
             org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapHeatOverlayEnabled(act, next)
             styleHeatPill(next)
+            map?.setBuildings3d(Prefs.mapBuildings3d(act) && !next)
+            styleBuildings3dButton()
             renderLive()
         }
         styleHeatPill(org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act))
         heatPillWrap.addView(heatToggleTv)
+
+        val milPillWrap = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val hPad = (4 * density).toInt()
+            val vPad = (3 * density).toInt()
+            setPadding(hPad, vPad, hPad, vPad)
+            background = capsuleBackground()
+            elevation = 6f * density
+        }
+
+        val milToggleTv = android.widget.TextView(act).apply {
+            text = "Mil"
+            textSize = 11.5f
+            isSingleLine = true
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            contentDescription = "Toggle military airspace"
+            val ph = (10 * density).toInt()
+            val pv = (4 * density).toInt()
+            setPadding(ph, pv, ph, pv)
+        }
+
+        fun styleMilPill(enabled: Boolean) {
+            milToggleTv.isSelected = enabled
+            milToggleTv.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
+            milToggleTv.background = pillHighlightDrawable(enabled)
+        }
+
+        val refreshMilVisibility = {
+            val hasIntel = org.tucsoncommunity.kokoho.posture.DeviceTrustManager.hasIntelligenceAccess(act)
+            milPillWrap.visibility = if (hasIntel) View.VISIBLE else View.GONE
+            val active = hasIntel && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapMilitaryEnabled(act)
+            styleMilPill(active)
+        }
+        syncMilPillState = refreshMilVisibility
+
+        milToggleTv.setOnClickListener {
+            if (!org.tucsoncommunity.kokoho.posture.DeviceTrustManager.hasIntelligenceAccess(act)) {
+                refreshMilVisibility()
+                return@setOnClickListener
+            }
+            val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapMilitaryEnabled(act)
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapMilitaryEnabled(act, next)
+            styleMilPill(next)
+            val curWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(act)
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = curWin.windowMs) {
+                if (alive) renderLive()
+            }
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
+                if (alive) renderLive()
+            }
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchStateSnapshot(act) {
+                if (alive) renderLive()
+            }
+            renderLive()
+        }
+        milPillWrap.addView(milToggleTv)
+        refreshMilVisibility()
+        stopTrustStateListener?.invoke()
+        stopTrustStateListener = org.tucsoncommunity.kokoho.posture.DeviceTrustManager.addTrustStateListener {
+            if (alive) syncMilPillState?.invoke()
+        }
 
         val confirmBar = android.widget.LinearLayout(act).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
@@ -820,6 +886,12 @@ class MapFragment : Fragment() {
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ))
+        secondaryRow.addView(milPillWrap, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginStart = (6 * density).toInt()
+        })
         secondaryRow.addView(confirmBar, android.widget.LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1921,8 +1993,9 @@ class MapFragment : Fragment() {
         binding.buildings3dButton.setOnClickListener {
             val next = !Prefs.mapBuildings3d(act)
             Prefs.setMapBuildings3d(act, next)
-            map?.setBuildings3d(next)
-            if (next) {
+            val heatOn = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act)
+            map?.setBuildings3d(next && !heatOn)
+            if (next && !heatOn) {
                 val m = map
                 if (m != null && m.camera.tilt < 15.0) {
                     if (following && m.puckOn && tripId == null) {
@@ -1941,7 +2014,7 @@ class MapFragment : Fragment() {
 
     private fun styleBuildings3dButton() {
         val b = _binding ?: return
-        val on = Prefs.mapBuildings3d(act)
+        val on = Prefs.mapBuildings3d(act) && !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act)
         b.buildings3dButton.setImageResource(org.tucsoncommunity.kokoho.R.drawable.ic_map_buildings_3d)
         b.buildings3dButton.background = circularControlBg(active = on)
         b.buildings3dButton.imageTintList = android.content.res.ColorStateList.valueOf(
@@ -2040,7 +2113,8 @@ class MapFragment : Fragment() {
             rf?.safe("static") { rf?.maybeRedrawStatic(force = true) }
         }
         if (rf != null && rf?.isDark != darkTiles()) loadStyle()
-        map?.setBuildings3d(Prefs.mapBuildings3d(act))
+        syncMilPillState?.invoke()
+        map?.setBuildings3d(Prefs.mapBuildings3d(act) && !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act))
         styleOrientationButton()
         styleFollowButton()
         styleBuildings3dButton()
@@ -2082,6 +2156,8 @@ class MapFragment : Fragment() {
         alertCards?.hide(); alertCards = null
         nav?.destroy(); nav = null
         stopObservingBulk?.invoke()
+        stopTrustStateListener?.invoke(); stopTrustStateListener = null
+        syncMilPillState = null
         org.tucsoncommunity.kokoho.alpr.CctvStore.onChanged = null
         stopGps()
         rf = null

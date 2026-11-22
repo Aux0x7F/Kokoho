@@ -722,6 +722,56 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
                 org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchesMapConfirmationFilter(activity, t, confirmFilter)
         }
 
+        if (heatOverlayEnabled) {
+            val heatFeatures = windowFilteredThreats.mapNotNull { t ->
+                if (t.isAircraft) return@mapNotNull null
+                if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(t.hardwareIdentifier, t.title)) return@mapNotNull null
+                val lat = t.lat ?: return@mapNotNull null
+                val lon = t.lon ?: return@mapNotNull null
+                val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
+                val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
+                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight, "agency" to t.agency.id)
+            }
+            set(HEAT, heatFeatures)
+            // Exclusive Heat mode: heatmap + facility locations ONLY; hide all detection centroids/points/circles/icons,
+            // flight tracks, airborne 3D overlay, and 3D building extrusions.
+            drawLocations(excludedIds = emptySet())
+            drawPins(emptyList())
+            wazeShown = emptyMap()
+            set(WAZE, emptyList())
+            set(WIGLE, emptyList())
+            set(ASKED, emptyList())
+            airThreatsByUuid = emptyMap()
+            droneThreatsByUuid = emptyMap()
+            drones = emptyMap()
+            unpinpointedAirspaceUuids = emptySet()
+            standaloneOperatorUuids = emptySet()
+            flightTracksByEntityUuid = emptyMap()
+            localDroneTrailsByUuid = emptyMap()
+            set(AIRCRAFT, emptyList())
+            set(DRONES, emptyList())
+            set(DRONE_OPS, emptyList())
+            set(DRONE_LINES, emptyList())
+            set(FLIGHT_TRACKS, emptyList())
+            drawTrace(emptyList(), TRACE_COLOR)
+            airborneOverlay?.updateScene(emptyList(), emptyList(), null, cameraTopPaddingPx, emptyList())
+            airborneOverlay?.visibility = android.view.View.GONE
+            map.setBuildings3d(false)
+            if (activeSelection is MapSelection.Detection) {
+                set(DROPPED_POINT, emptyList())
+                set(SELECTED_PIN, emptyList())
+            } else {
+                drawSelection(activeSelection)
+            }
+            return emptyList()
+        }
+
+        set(HEAT, emptyList())
+        airborneOverlay?.visibility = android.view.View.VISIBLE
+        if (!tripMode) {
+            map.setBuildings3d(Prefs.mapBuildings3d(activity))
+        }
+
         val groundThreats = windowFilteredThreats.filter {
             !it.isAircraft &&
                 !isUnpinpointedAircraft(it) &&
@@ -884,20 +934,6 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
         }
 
-        if (heatOverlayEnabled) {
-            val heatFeatures = windowFilteredThreats.mapNotNull { t ->
-                if (t.isAircraft) return@mapNotNull null
-                if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(t.hardwareIdentifier, t.title)) return@mapNotNull null
-                val lat = t.lat ?: return@mapNotNull null
-                val lon = t.lon ?: return@mapNotNull null
-                val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
-                val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
-                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight, "agency" to t.agency.id)
-            }
-            set(HEAT, heatFeatures)
-        } else {
-            set(HEAT, emptyList())
-        }
         drawLocations(excludedIds = mergedStationIds)
 
         val shown = clusters.map { c ->

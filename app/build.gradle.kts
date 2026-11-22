@@ -7,9 +7,9 @@ plugins {
 }
 
 // Bump both for every release or staged next build. versionName ends up in the APK file name.
-val baseVersionCode = 1435
-val baseVersionName = "1.3.17"
-val nextIteration = 3
+val baseVersionCode = 1436
+val baseVersionName = "1.3.18"
+val nextIteration = 1
 val releaseChannel = "public"
 val appVersionCode = baseVersionCode
 val appVersionName = baseVersionName
@@ -38,6 +38,7 @@ android {
 
         buildConfigField("String", "RELEASE_CHANNEL", "\"$releaseChannel\"")
         buildConfigField("String", "UPDATE_MANIFEST_PATH", "\"$updateManifestPath\"")
+        buildConfigField("String", "DEFAULT_HUB_URL", "\"https://kokoho.tucsoncommunity.online\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -69,6 +70,7 @@ android {
             versionNameSuffix = "-next.$nextIteration"
             buildConfigField("String", "RELEASE_CHANNEL", "\"next\"")
             buildConfigField("String", "UPDATE_MANIFEST_PATH", "\"/v1/update/next\"")
+            buildConfigField("String", "DEFAULT_HUB_URL", "\"https://kokoho-next.tucsoncommunity.online\"")
         }
         release {
             isDebuggable = false

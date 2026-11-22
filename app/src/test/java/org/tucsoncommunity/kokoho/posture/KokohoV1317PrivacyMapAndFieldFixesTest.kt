@@ -641,34 +641,43 @@ class KokohoV1317PrivacyMapAndFieldFixesTest {
         assertEquals(5, pinsAllInf.size)
         assertEquals(0, JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
 
-        // B) ∞ window + ALL + Heat ON -> all 5 normal pins AND 5 heat features
+        // B) ∞ window + ALL + Heat ON -> exclusive heatmap mode (0 pins, 5 heat features)
         KokohoSignatures.setMapHeatOverlayEnabled(act, true)
         val pinsAllInfHeat = rfMap.drawLive(emptyList(), snap)
-        assertEquals(5, pinsAllInfHeat.size)
+        assertTrue(pinsAllInfHeat.isEmpty())
         assertEquals(5, JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
 
-        // C) ∞ window + CONFIRMED + Heat ON -> ONLY confirmedWirelessUuid + confirmedPointUuid (2 pins, 2 heat features)
+        // C) ∞ window + CONFIRMED -> 2 pins when Heat OFF, 0 pins & 2 heat features when Heat ON
         KokohoSignatures.setMapConfirmationFilter(act, KokohoSignatures.MapConfirmationFilter.CONFIRMED)
+        KokohoSignatures.setMapHeatOverlayEnabled(act, false)
         val pinsConfirmed = rfMap.drawLive(emptyList(), snap)
         assertEquals(
             setOf("kokoho:$confirmedWirelessUuid", "kokoho:$confirmedPointUuid"),
             pinsConfirmed.map { it.mac }.toSet()
         )
+        KokohoSignatures.setMapHeatOverlayEnabled(act, true)
+        assertTrue(rfMap.drawLive(emptyList(), snap).isEmpty())
         assertEquals(2, JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
 
-        // D) ∞ window + UNCONFIRMED + Heat ON -> ONLY passive unconfirmed detections (unconfirmedWirelessUuid + hist65dUuid)
+        // D) ∞ window + UNCONFIRMED -> 2 pins when Heat OFF, 0 pins & 2 heat features when Heat ON
         KokohoSignatures.setMapConfirmationFilter(act, KokohoSignatures.MapConfirmationFilter.UNCONFIRMED)
+        KokohoSignatures.setMapHeatOverlayEnabled(act, false)
         val pinsUnconfirmedInf = rfMap.drawLive(emptyList(), snap)
         assertEquals(
             setOf("kokoho:$unconfirmedWirelessUuid", "kokoho:$hist65dUuid"),
             pinsUnconfirmedInf.map { it.mac }.toSet()
         )
+        KokohoSignatures.setMapHeatOverlayEnabled(act, true)
+        assertTrue(rfMap.drawLive(emptyList(), snap).isEmpty())
         assertEquals(2, JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
 
-        // E) 30m window + UNCONFIRMED + Heat ON -> hist65dUuid filtered out of both pins and heat!
+        // E) 30m window + UNCONFIRMED -> hist65dUuid filtered out of both pins (Heat OFF) and heat (Heat ON)!
         KokohoSignatures.setMapTimeWindow(act, KokohoSignatures.MapTimeWindow.MIN_30)
+        KokohoSignatures.setMapHeatOverlayEnabled(act, false)
         val pinsUnconfirmed30m = rfMap.drawLive(emptyList(), snap)
         assertEquals(setOf("kokoho:$unconfirmedWirelessUuid"), pinsUnconfirmed30m.map { it.mac }.toSet())
+        KokohoSignatures.setMapHeatOverlayEnabled(act, true)
+        assertTrue(rfMap.drawLive(emptyList(), snap).isEmpty())
         assertEquals(1, JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
     }
 
@@ -868,8 +877,8 @@ class KokohoV1317PrivacyMapAndFieldFixesTest {
 
         for (loc in KokohoDirectory.allLocations(ctx)) {
             val hay = "${loc.title}\n${loc.address}\n${loc.description}"
-            assertFalse("Location ${loc.id} contains em-dash", hay.contains('\u2014'))
-            assertFalse("Location ${loc.id} contains en-dash", hay.contains('\u2013'))
+            assertFalse("Location ${loc.id} contains em-dash", hay.contains(Char(0x2014)))
+            assertFalse("Location ${loc.id} contains en-dash", hay.contains(Char(0x2013)))
         }
     }
 

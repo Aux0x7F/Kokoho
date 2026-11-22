@@ -1508,5 +1508,94 @@
       "label": "3SI Security Law Enforcement GPS / RF Bait Tracker",
       "confidence": 90
     }
-  ]
+  ],
+  "investigative_watchlists": {
+    "include_all_tpms": true,
+    "exclude_own_vehicle_tpms": true,
+    "facet_prefixes": [
+      "hw:kit:tpms:",
+      "tpms:"
+    ],
+    "mac_prefixes": [
+      {
+        "prefix": "00:18:0A",
+        "vendor": "Cisco Meraki",
+        "rationale": "Enterprise/facility AP candidate requiring hotspot corroboration"
+      },
+      {
+        "prefix": "00:1E:42",
+        "vendor": "Teltonika Networks",
+        "rationale": "RUT955/RUTX mobile LTE router candidate"
+      },
+      {
+        "prefix": "E4:3E:D7",
+        "vendor": "Digi / Ventus",
+        "rationale": "Mobile cellular backhaul router candidate"
+      },
+      {
+        "prefix": "00:0C:42",
+        "vendor": "MikroTik RouterBOARD",
+        "rationale": "Field directional bridge / mobile AP candidate"
+      },
+      {
+        "prefix": "74:AC:B9",
+        "vendor": "Ubiquiti airMAX / UniFi",
+        "rationale": "Tactical point-to-point link candidate"
+      },
+      {
+        "prefix": "B4:FB:E4",
+        "vendor": "Ubiquiti Networks",
+        "rationale": "Mobile mesh / staging perimeter AP candidate"
+      },
+      {
+        "prefix": "DC:A6:32",
+        "vendor": "Raspberry Pi Trading",
+        "rationale": "Custom field sensor / SDR appliance candidate"
+      }
+    ],
+    "rf_ranges_hz": [
+      {
+        "min_hz": 162000000,
+        "max_hz": 174000000,
+        "mode": "VHF_NTIA_FED",
+        "rationale": "Unlisted federal VHF tactical simplex / mobile input sweep"
+      },
+      {
+        "min_hz": 225000000,
+        "max_hz": 399900000,
+        "mode": "UHF_MIL_AIR",
+        "rationale": "225-399.9 MHz joint air-to-ground tactical band"
+      },
+      {
+        "min_hz": 314850000,
+        "max_hz": 315150000,
+        "mode": "ISM_TPMS_315",
+        "rationale": "315 MHz vehicle TPMS wheel sensor frames for fleet chassis learning"
+      },
+      {
+        "min_hz": 406100000,
+        "max_hz": 420000000,
+        "mode": "UHF_NTIA_FED",
+        "rationale": "Unlisted federal UHF tactical simplex / link band"
+      },
+      {
+        "min_hz": 433750000,
+        "max_hz": 434100000,
+        "mode": "ISM_TPMS_433",
+        "rationale": "433.92 MHz vehicle TPMS wheel sensor frames for fleet chassis learning"
+      },
+      {
+        "min_hz": 769000000,
+        "max_hz": 775000000,
+        "mode": "P25_700_TAC",
+        "rationale": "700 MHz narrowband federal/state interop simplex channels"
+      },
+      {
+        "min_hz": 799000000,
+        "max_hz": 806000000,
+        "mode": "P25_700_800_INPUT",
+        "rationale": "700/800 MHz mobile unit uplink channels indicating nearby handheld or vehicle radio"
+      }
+    ]
+  }
 }

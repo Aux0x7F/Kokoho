@@ -24,6 +24,7 @@ import org.tucsoncommunity.kokoho.posture.KokohoAgency
 import org.tucsoncommunity.kokoho.posture.KokohoDirectory
 import org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
 import org.tucsoncommunity.kokoho.posture.KokohoSignatures
+import org.tucsoncommunity.kokoho.posture.RecentSignalRingBuffer
 import org.tucsoncommunity.kokoho.posture.WitnessReportRecord
 import java.util.UUID
 
@@ -166,6 +167,31 @@ object KokohoReportWizard {
             setPadding(dp(activity, 2), dp(activity, 10), 0, dp(activity, 4))
         }
 
+        fun buildNearbySignalsOptInSection(): Pair<LinearLayout, CheckBox> {
+            val windowMin = RecentSignalRingBuffer.observedSpanMinutes(System.currentTimeMillis())
+            val wrap = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(activity, 8), 0, dp(activity, 2))
+            }
+            val shareAllCheck = CheckBox(activity).apply {
+                text = "Share all nearby signals from the last $windowMin min"
+                textSize = 13.5f
+                setTextColor(KokohoJourneyUi.INK_PRIMARY)
+                buttonTintList = ColorStateList.valueOf(KokohoJourneyUi.HIGHLIGHT_AMBER)
+                isChecked = false
+                setPadding(dp(activity, 6), dp(activity, 4), 0, dp(activity, 2))
+            }
+            val disclosureTv = TextView(activity).apply {
+                text = "Flagged and candidate vehicle signals from the last 10 min are attached automatically. Checking this box also includes ordinary nearby Wi-Fi and Bluetooth signals heard along your path over the last $windowMin min, which may reveal the blocks you traveled."
+                textSize = 12f
+                setTextColor(KokohoJourneyUi.INK_MUTED)
+                setPadding(dp(activity, 8), 0, dp(activity, 4), dp(activity, 4))
+            }
+            wrap.addView(shareAllCheck)
+            wrap.addView(disclosureTv)
+            return wrap to shareAllCheck
+        }
+
         // ---- Mode-Specific Form Construction ----
         if (mode == Mode.FALSE_POSITIVE) {
             val infoTv = TextView(activity).apply {
@@ -186,9 +212,11 @@ object KokohoReportWizard {
                 isChecked = false
                 setPadding(dp(activity, 6), dp(activity, 10), 0, dp(activity, 6))
             }
+            val (fpSignalsWrap, fpShareAllCheck) = buildNearbySignalsOptInSection()
             form.addView(infoTv)
             form.addView(verifiedDetailsInput)
             form.addView(suppressCheckbox)
+            form.addView(fpSignalsWrap)
 
             val submitBtn = KokohoJourneyUi.primaryActionButton(activity, "Submit False Positive") {
                 val detail = verifiedDetailsInput.text?.toString()?.trim().orEmpty()
@@ -196,6 +224,12 @@ object KokohoReportWizard {
                     Toast.makeText(activity, "Please enter verified device details", Toast.LENGTH_SHORT).show()
                     return@primaryActionButton
                 }
+                val submitNowMs = System.currentTimeMillis()
+                val attachedSignals = RecentSignalRingBuffer.snapshotDtosForReport(
+                    context = activity,
+                    nowMs = submitNowMs,
+                    includeAmbient = fpShareAllCheck.isChecked
+                )
                 val rec = WitnessReportRecord(
                     targetKey = targetUuid,
                     entityUuid = targetUuid,
@@ -204,7 +238,8 @@ object KokohoReportWizard {
                     reportKind = "FALSE_POSITIVE",
                     subjectKind = "DEVICE",
                     lat = droppedLat,
-                    lon = droppedLon
+                    lon = droppedLon,
+                    nearbySignals = attachedSignals
                 )
                 KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
                 if (suppressCheckbox.isChecked) {
@@ -639,6 +674,9 @@ object KokohoReportWizard {
             form.addView(photosScroll)
         }
 
+        val (nearbySignalsWrap, shareAllNearbyCheck) = buildNearbySignalsOptInSection()
+        form.addView(nearbySignalsWrap)
+
         syncSubjectTabs()
 
         // Action Footer
@@ -732,7 +770,12 @@ object KokohoReportWizard {
                 accessoryKind = accVal,
                 photoDataUrls = attachedPhotos.toList(),
                 lat = droppedLat ?: existing?.lat,
-                lon = droppedLon ?: existing?.lon
+                lon = droppedLon ?: existing?.lon,
+                nearbySignals = RecentSignalRingBuffer.snapshotDtosForReport(
+                    context = activity,
+                    nowMs = System.currentTimeMillis(),
+                    includeAmbient = shareAllNearbyCheck.isChecked
+                )
             )
             KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
             org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordUserInteraction(

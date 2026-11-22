@@ -28,9 +28,12 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object KokohoHubClient {
 
-    const val DEFAULT_HUB_URL = "https://kokoho.tucsoncommunity.online"
+    const val PROD_HUB_URL = "https://kokoho.tucsoncommunity.online"
+    const val NEXT_HUB_URL = "https://kokoho-next.tucsoncommunity.online"
+    val DEFAULT_HUB_URL: String = org.tucsoncommunity.kokoho.BuildConfig.DEFAULT_HUB_URL
     private const val PREFS = "kokoho_hub_prefs"
     private const val KEY_HUB_URL = "hub_url"
+    private const val KEY_HUB_URL_CUSTOM = "hub_url_custom"
     private const val KEY_SENSOR_CONTRIBUTE = "sensor_contribute"
     private const val KEY_ROOM_ID = "room_id"
     private const val KEY_ROOM_KEY = "room_key"
@@ -191,7 +194,8 @@ object KokohoHubClient {
         @SerializedName("vehicle_model") val vehicleModel: String = "",
         @SerializedName("accessory_kind") val accessoryKind: String = "",
         val lat: Double? = null,
-        val lon: Double? = null
+        val lon: Double? = null,
+        @SerializedName("nearby_signals") val nearbySignals: List<RecentSignalRingBuffer.NearbySignalDto>? = null
     )
 
     data class SyncedPlateRecord(
@@ -292,7 +296,8 @@ object KokohoHubClient {
         val location: RemoteLocation = RemoteLocation(),
         val classification: RemoteClassification = RemoteClassification(),
         val sightingCount: Int = 1,
-        val corroborationCount: Int = 1
+        val corroborationCount: Int = 1,
+        @SerializedName("collect_investigative_context") val collectInvestigativeContext: Boolean = false
     )
 
     private data class RemoteTrendEntity(
@@ -386,13 +391,38 @@ object KokohoHubClient {
 
     private var streamJob: Job? = null
 
-    fun hubUrl(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_HUB_URL, DEFAULT_HUB_URL)?.trim()?.trimEnd('/') ?: DEFAULT_HUB_URL
+    internal fun resolveHubUrl(
+        savedUrl: String?,
+        hasCustomOverride: Boolean,
+        isDebugBuild: Boolean = org.tucsoncommunity.kokoho.BuildConfig.DEBUG
+    ): String {
+        val defaultForBuild = if (isDebugBuild) NEXT_HUB_URL else PROD_HUB_URL
+        val cleaned = savedUrl?.trim()?.trimEnd('/').orEmpty()
+        if (cleaned.isEmpty()) return defaultForBuild
+        if (!hasCustomOverride) {
+            if (isDebugBuild && cleaned.equals(PROD_HUB_URL, ignoreCase = true)) return NEXT_HUB_URL
+            if (!isDebugBuild && cleaned.equals(NEXT_HUB_URL, ignoreCase = true)) return PROD_HUB_URL
+        }
+        return cleaned
+    }
+
+    fun hubUrl(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getString(KEY_HUB_URL, null)
+        val hasCustom = prefs.getBoolean(KEY_HUB_URL_CUSTOM, false)
+        return resolveHubUrl(saved, hasCustom, org.tucsoncommunity.kokoho.BuildConfig.DEBUG)
+    }
 
     fun setHubUrl(context: Context, url: String) {
+        val cleaned = url.trim().trimEnd('/')
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-            putString(KEY_HUB_URL, url.trim().trimEnd('/').ifEmpty { DEFAULT_HUB_URL })
+            if (cleaned.isEmpty() || cleaned.equals(DEFAULT_HUB_URL, ignoreCase = true)) {
+                remove(KEY_HUB_URL)
+                putBoolean(KEY_HUB_URL_CUSTOM, false)
+            } else {
+                putString(KEY_HUB_URL, cleaned)
+                putBoolean(KEY_HUB_URL_CUSTOM, true)
+            }
         }
     }
 
@@ -461,7 +491,11 @@ object KokohoHubClient {
         lastSeq = 0L
         latestTrendsTracks = emptyList()
         latestHeatmapCells = emptyList()
+        RecentSignalRingBuffer.clear()
+        CoMovingTpmsTracker.clear()
+        KinematicPrivacyGate.reset()
         val app = context.applicationContext ?: context
+        KokohoSignatures.clearMilitaryOnRevocation(app)
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             remove(KEY_SYNCED_PLATES)
             remove("synced_plates_json")
@@ -501,7 +535,8 @@ object KokohoHubClient {
                         syncWitnessReports(app)
                     }
                     val base = hubUrl(app)
-                    val url = URL("$base/v1/stream?since=$lastSeq&wait_ms=20000")
+                    val milQuery = if (KokohoSignatures.isMapMilitaryEnabled(app)) "&include_military=1" else ""
+                    val url = URL("$base/v1/stream?since=$lastSeq&wait_ms=20000$milQuery")
                     var streamTag: DeviceTrustManager.SignedRequestTag? = null
                     val conn = (url.openConnection() as HttpURLConnection).apply {
                         requestMethod = "GET"
@@ -580,7 +615,8 @@ object KokohoHubClient {
         }
         scope.launch {
             runCatching {
-                val resp = DeviceTrustManager.executeEnvelopedPost(app, "/v1/checkin?since=$lastSeq", "{}")
+                val milQuery = if (KokohoSignatures.isMapMilitaryEnabled(app)) "&include_military=1" else ""
+                val resp = DeviceTrustManager.executeEnvelopedPost(app, "/v1/checkin?since=$lastSeq$milQuery", "{}")
                 if (resp != null && resp.code in 200..299 && !resp.body.isNullOrBlank()) {
                     val snap = gson.fromJson(resp.body, StateSnapshot::class.java)
                     if (snap != null) {
@@ -606,7 +642,8 @@ object KokohoHubClient {
         val app = context.applicationContext ?: context
         scope.launch {
             val parsed = runCatching {
-                val resp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/state")
+                val statePath = if (KokohoSignatures.isMapMilitaryEnabled(app)) "/v1/state?include_military=1" else "/v1/state"
+                val resp = DeviceTrustManager.executeEnvelopedGet(app, statePath)
                 if (resp != null && resp.code in 200..299 && !resp.body.isNullOrBlank()) {
                     gson.fromJson(resp.body, StateSnapshot::class.java)?.also { snap ->
                         if (snap.seq > lastSeq) lastSeq = snap.seq
@@ -628,7 +665,12 @@ object KokohoHubClient {
         scope.launch {
             val ok = runCatching {
                 val resp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/signatures")
-                resp != null && resp.code in 200..299 && !resp.body.isNullOrBlank()
+                if (resp != null && resp.code in 200..299 && !resp.body.isNullOrBlank()) {
+                    KokohoSignatures.applyRemoteSignaturesJson(resp.body)
+                    true
+                } else {
+                    false
+                }
             }.getOrDefault(false)
             if (onComplete != null) {
                 kotlinx.coroutines.withContext(Dispatchers.Main) { onComplete(ok) }
@@ -645,7 +687,8 @@ object KokohoHubClient {
         }
         scope.launch {
             runCatching {
-                val envResp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/trends?since_ms=0&limit=2500")
+                val milParam = if (KokohoSignatures.isMapMilitaryEnabled(app)) "&include_military=1" else ""
+                val envResp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/trends?since_ms=0&limit=2500$milParam")
                 if (envResp != null && envResp.code in 200..299 && !envResp.body.isNullOrBlank()) {
                     val body = envResp.body
                     val snap = gson.fromJson(body, TrendsSnapshot::class.java)
@@ -852,6 +895,27 @@ object KokohoHubClient {
         }
     }
 
+    internal fun buildFlightsRequestPath(
+        context: Context,
+        target: String? = null,
+        windowMs: Long? = null,
+        nowMs: Long = System.currentTimeMillis()
+    ): String {
+        val params = ArrayList<String>(3)
+        if (!target.isNullOrBlank()) {
+            params += "target=" + java.net.URLEncoder.encode(target.trim(), "UTF-8")
+        }
+        if (windowMs != null && windowMs > 0L) {
+            val sinceMs = (nowMs - windowMs).coerceAtLeast(0L)
+            params += "since_ms=$sinceMs"
+        }
+        if (KokohoSignatures.isMapMilitaryEnabled(context)) {
+            params += "include_military=1"
+        }
+        val q = if (params.isNotEmpty()) "?" + params.joinToString("&") else ""
+        return "/v1/flights$q"
+    }
+
     /** Fetches recent aircraft/drone flight tracks from `/v1/flights`. */
     fun fetchFlightTracks(
         context: Context,
@@ -863,16 +927,8 @@ object KokohoHubClient {
         scope.launch {
             val nowMs = System.currentTimeMillis()
             val tracks = runCatching {
-                val params = ArrayList<String>(2)
-                if (!target.isNullOrBlank()) {
-                    params += "target=" + java.net.URLEncoder.encode(target.trim(), "UTF-8")
-                }
-                if (windowMs != null && windowMs > 0L) {
-                    val sinceMs = (nowMs - windowMs).coerceAtLeast(0L)
-                    params += "since_ms=$sinceMs"
-                }
-                val q = if (params.isNotEmpty()) "?" + params.joinToString("&") else ""
-                val envResp = DeviceTrustManager.executeEnvelopedGet(app, "/v1/flights$q")
+                val flightsPath = buildFlightsRequestPath(app, target, windowMs, nowMs)
+                val envResp = DeviceTrustManager.executeEnvelopedGet(app, flightsPath)
                 if (envResp != null && envResp.code in 200..299 && !envResp.body.isNullOrBlank()) {
                     val type = object : com.google.gson.reflect.TypeToken<List<RemoteFlightTrack>>() {}.type
                     val parsed = (gson.fromJson<List<RemoteFlightTrack>>(envResp.body, type) ?: emptyList()).filterNot { tr ->
@@ -935,42 +991,51 @@ object KokohoHubClient {
         }.getOrDefault(false)
     }
 
+    @Volatile
+    internal var lastSubmittedWitnessJsonForTest: String? = null
+
+    internal fun serializeWitnessReportJson(report: WitnessReportRecord): String {
+        val allPhotos = report.allPhotos()
+        val dto = RemoteWitnessDto(
+            targetKey = report.targetKey,
+            entityUuid = report.entityUuid,
+            agencyCode = report.agencyCode,
+            department = report.department,
+            badgeNumber = report.badgeNumber,
+            agentName = report.agentName,
+            vehicleNumber = report.vehicleNumber,
+            notes = report.notes,
+            photoDataUrl = allPhotos.firstOrNull(),
+            photoDataUrls = allPhotos.takeIf { it.isNotEmpty() },
+            updatedAtMs = report.updatedAtMs,
+            status = "PENDING",
+            reportKind = report.reportKind.ifBlank { "LE" },
+            confidencePct = report.confidencePct,
+            subjectKind = report.subjectKind,
+            plateNumber = report.plateNumber,
+            plateState = report.plateState,
+            partialPlate = report.partialPlate,
+            vehicleColor = report.vehicleColor,
+            vehicleBodyType = report.vehicleBodyType,
+            vehicleMake = report.vehicleMake,
+            vehicleModel = report.vehicleModel,
+            accessoryKind = report.accessoryKind,
+            lat = report.lat,
+            lon = report.lon,
+            nearbySignals = report.nearbySignals?.takeIf { it.isNotEmpty() }
+        )
+        return gson.toJson(dto)
+    }
+
     /** Submits a Witness Report (LE sighting, Confirm/Refine, or False Positive) to `/v1/witness`. */
     fun submitWitnessReport(report: WitnessReportRecord, context: Context? = null, onComplete: ((Boolean) -> Unit)? = null) {
+        val serializedNow = serializeWitnessReportJson(report)
+        lastSubmittedWitnessJsonForTest = serializedNow
         scope.launch {
             val ok = runCatching {
                 val appCtx = context?.applicationContext ?: context ?: org.tucsoncommunity.kokoho.KokohoApp.appContext
                     ?: return@runCatching false
-                val allPhotos = report.allPhotos()
-                val dto = RemoteWitnessDto(
-                    targetKey = report.targetKey,
-                    entityUuid = report.entityUuid,
-                    agencyCode = report.agencyCode,
-                    department = report.department,
-                    badgeNumber = report.badgeNumber,
-                    agentName = report.agentName,
-                    vehicleNumber = report.vehicleNumber,
-                    notes = report.notes,
-                    photoDataUrl = allPhotos.firstOrNull(),
-                    photoDataUrls = allPhotos.takeIf { it.isNotEmpty() },
-                    updatedAtMs = report.updatedAtMs,
-                    status = "PENDING",
-                    reportKind = report.reportKind.ifBlank { "LE" },
-                    confidencePct = report.confidencePct,
-                    subjectKind = report.subjectKind,
-                    plateNumber = report.plateNumber,
-                    plateState = report.plateState,
-                    partialPlate = report.partialPlate,
-                    vehicleColor = report.vehicleColor,
-                    vehicleBodyType = report.vehicleBodyType,
-                    vehicleMake = report.vehicleMake,
-                    vehicleModel = report.vehicleModel,
-                    accessoryKind = report.accessoryKind,
-                    lat = report.lat,
-                    lon = report.lon
-                )
-                val json = gson.toJson(dto)
-                postPublicOrSeatedJsonBlocking(appCtx, "/v1/witness", json)
+                postPublicOrSeatedJsonBlocking(appCtx, "/v1/witness", serializedNow)
             }.getOrDefault(false)
             if (onComplete != null) {
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -1295,6 +1360,82 @@ object KokohoHubClient {
         }
     }
 
+    @Volatile
+    internal var lastSilentTierBFlushForTest: List<RecentSignalRingBuffer.Entry> = emptyList()
+
+    /**
+     * Processes a `/v1/room/ingest` response JSON payload. When `"collect_investigative_context": true`
+     * is present, silently flushes the last 90 seconds of `TIER_B` signals from [RecentSignalRingBuffer]
+     * with zero UI indicator (no status change, Toast, or posture banner).
+     */
+    fun handleRoomIngestResponse(
+        context: Context,
+        responseJson: String,
+        primaryFacet: String = "",
+        nowMs: Long = System.currentTimeMillis(),
+        allowInvestigativeFlush: Boolean = true
+    ): List<RecentSignalRingBuffer.Entry> {
+        if (responseJson.isBlank()) return emptyList()
+        val obj = runCatching { gson.fromJson(responseJson, RemoteThreatObject::class.java) }.getOrNull()
+        val isDerivedResponse = obj != null && (
+            obj.location.uncertaintyRadiusM <= 160.0 ||
+                obj.confidence.spatial >= 0.80 ||
+                obj.classification.evidenceSources.size >= 2 ||
+                obj.location.propagationClass.equals("AIRBORNE", ignoreCase = true)
+            )
+        val isSinglePeerRfSelfEcho = primaryFacet.startsWith("rf:chan:") &&
+            obj != null &&
+            obj.corroborationCount <= 1 &&
+            obj.classification.evidenceSources.size <= 1
+        if (isDerivedResponse && !isSinglePeerRfSelfEcho && obj != null && obj.uuid.isNotBlank()) {
+            objects[obj.uuid] = obj
+        }
+
+        val wantsInvestigative = obj?.collectInvestigativeContext == true ||
+            runCatching {
+                org.json.JSONObject(responseJson).optBoolean("collect_investigative_context", false)
+            }.getOrDefault(false)
+        if (!allowInvestigativeFlush || !wantsInvestigative) {
+            return emptyList()
+        }
+
+        val app = context.applicationContext ?: context
+        KinematicPrivacyGate.recordSilentHotspotAck(nowMs)
+        val flushed = RecentSignalRingBuffer.snapshotRecentTierB(app, nowMs, RecentSignalRingBuffer.SILENT_HOTSPOT_FLUSH_WINDOW_MS)
+        lastSilentTierBFlushForTest = flushed
+        if (flushed.isNotEmpty() && KokohoSignatures.isAuxnetEnabled(app) && isSensorContributor(app)) {
+            val distinctByFacet = LinkedHashMap<String, RecentSignalRingBuffer.Entry>()
+            for (e in flushed) {
+                val prev = distinctByFacet[e.facetKey]
+                if (prev == null || e.signalDb >= prev.signalDb) {
+                    distinctByFacet[e.facetKey] = e
+                }
+            }
+            for (entry in distinctByFacet.values.take(32)) {
+                val lat = entry.lat ?: continue
+                val lon = entry.lon ?: continue
+                publishSensorReportInternal(
+                    app = app,
+                    lat = lat,
+                    lon = lon,
+                    snrDb = entry.signalDb,
+                    modality = entry.modality,
+                    primaryFacet = entry.facetKey,
+                    additionalFacets = emptyList(),
+                    agency = KokohoAgency.DHS_INTEROP,
+                    label = entry.label ?: "Investigative Context",
+                    propagationClass = "GROUND_DIRECT",
+                    uncertaintyRadiusM = 250.0,
+                    isDerived = false,
+                    localSightings = 1,
+                    ssidHint = entry.label,
+                    allowInvestigativeFlush = false
+                )
+            }
+        }
+        return flushed
+    }
+
     /**
      * Publishes a sensor observation to the trusted Detection Room (`/v1/room/ingest`)
      * when the user has opted into Sensor Room Contribution.
@@ -1317,6 +1458,42 @@ object KokohoHubClient {
     ) {
         val app = context.applicationContext ?: context
         if (!KokohoSignatures.isAuxnetEnabled(app) || !isSensorContributor(app)) return
+        publishSensorReportInternal(
+            app = app,
+            lat = lat,
+            lon = lon,
+            snrDb = snrDb,
+            modality = modality,
+            primaryFacet = primaryFacet,
+            additionalFacets = additionalFacets,
+            agency = agency,
+            label = label,
+            propagationClass = propagationClass,
+            uncertaintyRadiusM = uncertaintyRadiusM,
+            isDerived = isDerived,
+            localSightings = localSightings,
+            ssidHint = ssidHint,
+            allowInvestigativeFlush = true
+        )
+    }
+
+    private fun publishSensorReportInternal(
+        app: Context,
+        lat: Double,
+        lon: Double,
+        snrDb: Double,
+        modality: String,
+        primaryFacet: String,
+        additionalFacets: List<String>,
+        agency: KokohoAgency,
+        label: String,
+        propagationClass: String,
+        uncertaintyRadiusM: Double?,
+        isDerived: Boolean,
+        localSightings: Int,
+        ssidHint: String?,
+        allowInvestigativeFlush: Boolean
+    ) {
         val rId = roomId(app)
         val rKey = roomKey(app)
         val slot = sensorSlot(app)
@@ -1348,20 +1525,13 @@ object KokohoHubClient {
                 val headers = if (rKey.isNotEmpty()) mapOf("x-kokoho-room-key" to rKey) else emptyMap()
                 val envResp = DeviceTrustManager.executeEnvelopedPost(app, "/v1/room/ingest", json, extraHeaders = headers)
                 if (envResp != null && envResp.code in 200..299 && !envResp.body.isNullOrBlank()) {
-                    val obj = gson.fromJson(envResp.body, RemoteThreatObject::class.java)
-                    val isDerivedResponse = obj != null && (
-                        obj.location.uncertaintyRadiusM <= 160.0 ||
-                            obj.confidence.spatial >= 0.80 ||
-                            obj.classification.evidenceSources.size >= 2 ||
-                            obj.location.propagationClass.equals("AIRBORNE", ignoreCase = true)
-                        )
-                    val isSinglePeerRfSelfEcho = primaryFacet.startsWith("rf:chan:") &&
-                        obj != null &&
-                        obj.corroborationCount <= 1 &&
-                        obj.classification.evidenceSources.size <= 1
-                    if (isDerivedResponse && !isSinglePeerRfSelfEcho && obj.uuid.isNotBlank()) {
-                        objects[obj.uuid] = obj
-                    }
+                    handleRoomIngestResponse(
+                        context = app,
+                        responseJson = envResp.body,
+                        primaryFacet = primaryFacet,
+                        nowMs = System.currentTimeMillis(),
+                        allowInvestigativeFlush = allowInvestigativeFlush
+                    )
                 }
             }
         }

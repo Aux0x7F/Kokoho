@@ -302,7 +302,10 @@ object KokohoPostureEngine {
         val localSightings: Int,
         val ssidHint: String?,
         val isFlagged: Boolean = true,
-        val obsTimestampMs: Long = 0L
+        val obsTimestampMs: Long = 0L,
+        val tier: KokohoSignatures.WatchlistTier = KokohoSignatures.WatchlistTier.TIER_A,
+        val rssiCorr: Double? = null,
+        val tpmsDisambig: String? = null
     )
 
     private data class LastRawReportState(
@@ -395,6 +398,9 @@ object KokohoPostureEngine {
         lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
         org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+        CoMovingTpmsTracker.clear()
+        RecentSignalRingBuffer.clear()
+        KinematicPrivacyGate.reset()
         KokohoEntityLedger.clearAll()
         KokohoSignatures.clearWitnessAndConfirmedCacheInMemory()
         lastSharedAtByUuid.clear()
@@ -440,6 +446,9 @@ object KokohoPostureEngine {
         lastHeardByLocalHardwareAtMs.clear()
         lrrpRadioFixes.clear()
         org.tucsoncommunity.kokoho.sdr.TpmsLog.clear()
+        CoMovingTpmsTracker.clear()
+        RecentSignalRingBuffer.clear()
+        KinematicPrivacyGate.reset()
         lastEvaluateNowMs = 0L
         latestSnapshot = null
         latestRawObservationsSnapshot = emptyList()
@@ -477,6 +486,50 @@ object KokohoPostureEngine {
             return snap
         }
         return evaluate(context, now)
+    }
+
+    /**
+     * Returns true whenever ANY possible ground or vehicle detection is active locally
+     * (any active Tier A or candidate ground OUI / P25 / VHF-UHF / fleet router / camera emitter),
+     * enabling always-on non-own TPMS collection & co-moving RSSI narrowing even while stationary.
+     */
+    fun hasActiveGroundOrVehicleDetection(
+        context: Context? = null,
+        nowMs: Long = System.currentTimeMillis()
+    ): Boolean {
+        val activeCachedGround = localThreatCache.values.any { t ->
+            !t.isAircraft &&
+                !t.isDrone &&
+                t.agency != KokohoAgency.DRONE &&
+                nowMs - t.updatedAtMs <= 45_000L
+        }
+        if (activeCachedGround) return true
+
+        val liveRf = RadioLog.current(nowMs).any { nowMs - it.lastSeen <= 30_000L }
+        if (liveRf) return true
+
+        val liveP25Input = SdrRadio.p25Log.rows().any { it.inputAt > 0L && nowMs - it.inputAt <= 30_000L }
+        if (liveP25Input) return true
+
+        val liveDevs = DeviceRegistry.snapshot(nowMs).filter { nowMs - it.lastSeen <= 30_000L }
+        for (snap in liveDevs) {
+            if (snap.remoteId != null || KokohoSignatures.isTacticalOrRemoteIdDrone(snap.mac, snap.name, snap.vendor, false)) {
+                continue
+            }
+            if (KokohoSignatures.isFlockCamera(snap.mac, snap.name)) return true
+            val tier = KokohoSignatures.classifySignalTier(
+                context = context,
+                macOrFacet = snap.mac,
+                ssidOrName = snap.name,
+                vendor = snap.vendor,
+                advert = snap.advert,
+                hasRemoteId = false
+            )
+            if (tier == KokohoSignatures.WatchlistTier.TIER_A || tier == KokohoSignatures.WatchlistTier.TIER_B) {
+                return true
+            }
+        }
+        return false
     }
 
     /** Clears transient local RF/P25 threats when the RTL-SDR hardware stops or is unplugged. */
@@ -1662,6 +1715,13 @@ object KokohoPostureEngine {
             )
             upsertAndFuseThreat(evaluated, threat)
             ouiThreatUuids += uuid
+            CoMovingTpmsTracker.recordEmitterSample(
+                emitterKey = uuid,
+                timestampMs = oui.lastSeen,
+                signalDb = oui.rssi.toDouble(),
+                obsLat = obsLat,
+                obsLon = obsLon
+            )
             if (obsLat != null && obsLon != null) {
                 ouiLatestObsCoords[uuid] = obsLat to obsLon
             }
@@ -1691,6 +1751,47 @@ object KokohoPostureEngine {
                     ssidHint = oui.ssid,
                     isFlagged = isFlaggedOui,
                     obsTimestampMs = oui.lastSeen
+                )
+            }
+        }
+
+        // 2c-bis. Non-alerting Tier B investigative MAC candidates (`investigative_watchlists.mac_prefixes`):
+        // Never emit Monitor/Map alerts on their own; feed CoMovingTpmsTracker and queue as TIER_B observations.
+        for (snap in localDevices) {
+            if (snap.remoteId != null || KokohoSignatures.isTacticalOrRemoteIdDrone(snap.mac, snap.name, snap.vendor, false)) continue
+            val normMac = KokohoSignatures.normalizeMac(snap.mac)
+            val groupKey = KokohoSignatures.routerRadioGroupKey(normMac)
+            if (groupKey in emittedOuiGroupKeys) continue
+            if (!KokohoSignatures.isTierBInvestigativeCandidate(context, normMac, snap.name, snap.vendor, snap.advert)) continue
+            val facetKey = "hw:mac:$groupKey"
+            val tierBUuid = deterministicUuidV5(facetKey)
+            val (sLat, sLon) = snapshotObsCoords(snap)
+            CoMovingTpmsTracker.recordEmitterSample(
+                emitterKey = tierBUuid,
+                timestampMs = snap.lastSeen,
+                signalDb = snap.rssi.toDouble(),
+                obsLat = sLat,
+                obsLon = sLon
+            )
+            if (sLat != null && sLon != null) {
+                val invPrefix = KokohoSignatures.matchInvestigativeMac(context, normMac, snap.name)
+                localRawObservations += RawSensorReportCandidate(
+                    facetKey = facetKey,
+                    rawLat = sLat,
+                    rawLon = sLon,
+                    signalDb = snap.rssi.toDouble(),
+                    modality = "WIFI_BLE_TIER_B",
+                    additionalFacets = emptyList(),
+                    agency = KokohoAgency.DHS_INTEROP,
+                    label = invPrefix?.vendor ?: "Investigative Candidate",
+                    propClass = "GROUND_DIRECT",
+                    uncertaintyRadiusM = estimateRssiDistanceMeters(snap.rssi).toDouble(),
+                    isDerived = false,
+                    localSightings = snap.sightings.coerceAtLeast(1),
+                    ssidHint = snap.name,
+                    isFlagged = false,
+                    obsTimestampMs = snap.lastSeen,
+                    tier = KokohoSignatures.WatchlistTier.TIER_B
                 )
             }
         }
@@ -2032,6 +2133,13 @@ object KokohoPostureEngine {
                     capabilities = listOf(entry.capLabel)
                 )
                 upsertAndFuseThreat(evaluated, kitThreat)
+                CoMovingTpmsTracker.recordEmitterSample(
+                    emitterKey = kitUuid,
+                    timestampMs = kitSnap.lastSeen,
+                    signalDb = kitSnap.rssi.toDouble(),
+                    obsLat = obsLat,
+                    obsLon = obsLon
+                )
                 if (entry.isBodycam) standaloneBodycamUuids += kitUuid
                 if (obsLat != null && obsLon != null) {
                     localRawObservations += RawSensorReportCandidate(
@@ -2561,7 +2669,42 @@ object KokohoPostureEngine {
                     primaryPresenceAgency = primaryRfPresence
                 )
                 ?: (if (!isDodTrunkFreq) KokohoSignatures.matchCloseRangeFederalBand(rf.freqHz, rf.peakSnrDb, enabledAgencies = enabled) else null)
-                ?: continue
+            if (sig == null) {
+                val invRf = KokohoSignatures.matchInvestigativeRfRange(context, rf.freqHz)
+                if (invRf != null) {
+                    val (invLat, invLon) = resolveRfCoords(rf, userLoc, nowMs)
+                    val invFacet = "rf:inv:${rf.freqHz}:${invRf.mode}"
+                    val invUuid = deterministicUuidV5(invFacet)
+                    CoMovingTpmsTracker.recordEmitterSample(
+                        emitterKey = invUuid,
+                        timestampMs = rf.lastSeen,
+                        signalDb = rf.peakSnrDb.toDouble(),
+                        obsLat = invLat,
+                        obsLon = invLon
+                    )
+                    if (invLat != null && invLon != null) {
+                        localRawObservations += RawSensorReportCandidate(
+                            facetKey = invFacet,
+                            rawLat = invLat,
+                            rawLon = invLon,
+                            signalDb = rf.peakSnrDb.toDouble(),
+                            modality = "RF_TIER_B",
+                            additionalFacets = emptyList(),
+                            agency = KokohoAgency.DHS_INTEROP,
+                            label = invRf.mode,
+                            propClass = "GROUND_DIRECT",
+                            uncertaintyRadiusM = estimateRfDistanceMeters(rf.peakSnrDb, "DIRECT_TACTICAL").toDouble(),
+                            isDerived = false,
+                            localSightings = 1,
+                            ssidHint = invRf.mode,
+                            isFlagged = false,
+                            obsTimestampMs = rf.lastSeen,
+                            tier = KokohoSignatures.WatchlistTier.TIER_B
+                        )
+                    }
+                }
+                continue
+            }
             if (!sig.isAlertableDirectOrMobile) continue
 
             val (rfObsLat, rfObsLon) = resolveRfCoords(rf, userLoc, nowMs)
@@ -2734,6 +2877,13 @@ object KokohoPostureEngine {
             upsertAndFuseThreat(evaluated, threat)
             if (!isAirAssetRf) {
                 localThreatCache[uuid] = evaluated[uuid] ?: threat
+                CoMovingTpmsTracker.recordEmitterSample(
+                    emitterKey = uuid,
+                    timestampMs = rf.lastSeen,
+                    signalDb = rf.peakSnrDb.toDouble(),
+                    obsLat = rfObsLat,
+                    obsLon = rfObsLon
+                )
             }
             deduplicateRemoteRfEchoes(evaluated, uuid, rf.freqHz, rfAnchorLat, rfAnchorLon, rf.lastSeen)
             if (rfObsLat != null && rfObsLon != null) {
@@ -3253,21 +3403,37 @@ object KokohoPostureEngine {
         evaluated: MutableMap<String, EvaluatedThreat>,
         localRawObservations: MutableList<RawSensorReportCandidate>
     ) {
-        val closeGroundAgents = evaluated.values.filter { t ->
+        val allGroundThreats = evaluated.values.filter { t ->
             !t.isAircraft &&
                 !t.isDrone &&
-                t.agency != KokohoAgency.DRONE &&
-                t.agency != KokohoAgency.DHS_INTEROP &&
+                t.agency != KokohoAgency.DRONE
+        }
+        val activeLocalGroundEmitters = allGroundThreats.filter { t ->
+            (lastHeardByLocalHardwareAtMs[t.uuid] ?: 0L).let { it > 0L && (nowMs - it) <= 45_000L } &&
+                t.estimatedDistanceM <= 350
+        }
+        val hasAnyPossibleVehicleOrGroundDetection = activeLocalGroundEmitters.isNotEmpty() ||
+            localRawObservations.any {
+                it.propClass == "GROUND_DIRECT" &&
+                    !it.facetKey.startsWith("uas:", ignoreCase = true) &&
+                    !it.facetKey.startsWith("adsb:", ignoreCase = true) &&
+                    (nowMs - it.obsTimestampMs) <= 45_000L
+            }
+        val closeGroundAgents = activeLocalGroundEmitters.filter { t ->
+            t.agency != KokohoAgency.DHS_INTEROP &&
                 (lastHeardByLocalHardwareAtMs[t.uuid] ?: 0L).let { it > 0L && (nowMs - it) <= 25_000L } &&
                 t.estimatedDistanceM <= 180
         }
-        if (closeGroundAgents.isNotEmpty()) {
+        if (hasAnyPossibleVehicleOrGroundDetection) {
             org.tucsoncommunity.kokoho.sdr.SdrRadio.requestTpmsHarvest(nowMs)
         }
 
         val liveTpms = org.tucsoncommunity.kokoho.sdr.TpmsLog.current(nowMs)
             .filter { nowMs - it.lastSeen <= 45_000L }
-        if (liveTpms.isEmpty()) return
+        val collectNonOwnTpmsNow = KinematicPrivacyGate.shouldCollectNonOwnTpms(
+            hasActiveGroundOrVehicleDetection = hasAnyPossibleVehicleOrGroundDetection,
+            nowMs = nowMs
+        )
 
         val standaloneVerifiedByEntity = LinkedHashMap<String, MutableList<Pair<org.tucsoncommunity.kokoho.sdr.TpmsLog.Entry, KokohoSignatures.LearnedTpmsIntel>>>()
 
@@ -3281,10 +3447,51 @@ object KokohoPostureEngine {
                 rawFacetKey = entry.facetKey,
                 lat = obsLat,
                 lon = obsLon,
-                hasNearbyAgent = closeGroundAgents.isNotEmpty(),
+                hasNearbyAgent = hasAnyPossibleVehicleOrGroundDetection,
                 nowMs = entry.lastSeen
             )
-            if (KokohoSignatures.isOwnOrAmbientTpms(context, entry.facetKey)) continue
+            if (KokohoSignatures.isOwnVehicleTpms(context, entry.facetKey)) continue
+
+            if (collectNonOwnTpmsNow) {
+                CoMovingTpmsTracker.recordTpmsSample(
+                    context = context,
+                    rawTpmsFacetKey = entry.facetKey,
+                    timestampMs = entry.lastSeen,
+                    rssiDb = entry.peakSnrDb.toDouble()
+                )
+                val tpmsTier = KokohoSignatures.classifySignalTier(context, entry.facetKey)
+                RecentSignalRingBuffer.record(
+                    context = context,
+                    facetKey = entry.facetKey,
+                    tier = tpmsTier,
+                    modality = "TPMS",
+                    signalDb = entry.peakSnrDb.toDouble(),
+                    label = "${entry.reading.protocol} ${entry.reading.id}",
+                    lat = obsLat,
+                    lon = obsLon,
+                    timestampMs = entry.lastSeen
+                )
+                if (tpmsTier == KokohoSignatures.WatchlistTier.TIER_B && obsLat != null && obsLon != null) {
+                    localRawObservations += RawSensorReportCandidate(
+                        facetKey = entry.facetKey,
+                        rawLat = obsLat,
+                        rawLon = obsLon,
+                        signalDb = entry.peakSnrDb.toDouble(),
+                        modality = "TPMS_CANDIDATE",
+                        additionalFacets = emptyList(),
+                        agency = KokohoAgency.DHS_INTEROP,
+                        label = "Vehicle TPMS (${entry.reading.protocol})",
+                        propClass = "GROUND_DIRECT",
+                        uncertaintyRadiusM = 65.0,
+                        isDerived = false,
+                        localSightings = entry.sightings.coerceAtLeast(1),
+                        ssidHint = "${entry.reading.protocol} ${entry.reading.id}",
+                        isFlagged = false,
+                        obsTimestampMs = entry.lastSeen,
+                        tier = KokohoSignatures.WatchlistTier.TIER_B
+                    )
+                }
+            }
 
             val colocatedCandidates = if (nowMs - entry.lastSeen <= 30_000L) {
                 closeGroundAgents.filter { t ->
@@ -3347,11 +3554,99 @@ object KokohoPostureEngine {
                 continue
             }
 
-            // No unambiguous active router/kit/RF signal right now: ONLY surface if this TPMS sensor has
-            // already graduated to verified agent chassis status (e.g. a radio-silent agent pass).
+            // No unambiguous active router/kit/RF signal right now: ONLY surface standalone alert if this TPMS sensor
+            // has already graduated to verified agent chassis status (`learned_tpms_v1` Tier A).
             val verified = KokohoSignatures.lookupVerifiedAgentTpms(context, entry.facetKey) ?: continue
             if (verified.agencyEnum !in enabled) continue
             standaloneVerifiedByEntity.getOrPut(verified.boundEntityUuid) { mutableListOf() }.add(entry to verified)
+        }
+
+        // Apply Co-Moving TPMS RSSI narrowing & Mobile Vehicle vs Fixed Infrastructure disambiguation
+        for (groundUuid in evaluated.keys.toList()) {
+            val target = evaluated[groundUuid] ?: continue
+            if (target.isAircraft || target.isDrone || target.agency == KokohoAgency.DRONE) continue
+            val disambig = CoMovingTpmsTracker.evaluateEmitter(
+                context = context,
+                emitterKey = target.uuid,
+                nowMs = nowMs,
+                stationaryCentroidLocked = target.isApproximatedPosition && target.uncertaintyRadiusM <= 120
+            )
+            when (disambig.posture) {
+                CoMovingTpmsTracker.ChassisPosture.MOBILE_VEHICLE -> {
+                    val tpmsBadges = disambig.coMovingMatches.take(4).map { m ->
+                        EvidenceBadge(
+                            kind = "TPMS_CHASSIS",
+                            facetKey = m.tpmsFacetKey,
+                            detail = String.format(
+                                Locale.US,
+                                "Co-Moving TPMS %s (score=%.2f · r=%.2f)",
+                                m.tpmsFacetKey.removePrefix("hw:kit:tpms:"),
+                                m.coMovingScore,
+                                m.rssiCorrelation
+                            ),
+                            weight = 0.80,
+                            lastSeenMs = target.updatedAtMs
+                        )
+                    }
+                    val mergedBadges = (target.evidenceSources + tpmsBadges).distinctBy { it.facetKey }
+                    val cleanedCaps = target.capabilities.filterNot { it == CoMovingTpmsTracker.ChassisPosture.FIXED_INFRA.label }
+                    val mergedCaps = (cleanedCaps + listOf("Vehicle TPMS", CoMovingTpmsTracker.ChassisPosture.MOBILE_VEHICLE.label)).distinct()
+                    val bumpedClass = min(99, max(target.classificationConfidence + 6, 86))
+                    val updated = target.copy(
+                        classificationConfidence = bumpedClass,
+                        overallConfidence = ((bumpedClass + target.spatialConfidence) / 2.0).roundToInt().coerceIn(1, 99),
+                        evidenceSources = mergedBadges,
+                        capabilities = mergedCaps
+                    )
+                    evaluated[target.uuid] = updated
+                    localThreatCache[target.uuid] = updated
+                }
+                CoMovingTpmsTracker.ChassisPosture.FIXED_INFRA -> {
+                    if (CoMovingTpmsTracker.ChassisPosture.MOBILE_VEHICLE.label !in target.capabilities &&
+                        "Vehicle TPMS" !in target.capabilities
+                    ) {
+                        val mergedCaps = (target.capabilities + CoMovingTpmsTracker.ChassisPosture.FIXED_INFRA.label).distinct()
+                        val updated = target.copy(capabilities = mergedCaps)
+                        evaluated[target.uuid] = updated
+                        localThreatCache[target.uuid] = updated
+                    }
+                }
+                CoMovingTpmsTracker.ChassisPosture.UNKNOWN -> Unit
+            }
+
+            if (disambig.posture != CoMovingTpmsTracker.ChassisPosture.UNKNOWN) {
+                val extraFacets = disambig.toAdditionalFacets()
+                val topCorr = disambig.bestRssiCorrelation
+                val targetFacetSet = buildSet {
+                    target.hardwareIdentifier?.let { add("hw:mac:$it") }
+                    target.evidenceSources.forEach { add(it.facetKey) }
+                }
+                for (idx in localRawObservations.indices) {
+                    val obs = localRawObservations[idx]
+                    if (obs.facetKey in targetFacetSet || deterministicUuidV5(obs.facetKey) == target.uuid) {
+                        localRawObservations[idx] = obs.copy(
+                            additionalFacets = (obs.additionalFacets + extraFacets).distinct(),
+                            rssiCorr = topCorr ?: obs.rssiCorr,
+                            tpmsDisambig = disambig.posture.code
+                        )
+                    }
+                }
+            }
+        }
+
+        // Also enrich non-alerting Tier B ground observations with any co-moving TPMS or fixed-infra disambiguation
+        for (idx in localRawObservations.indices) {
+            val obs = localRawObservations[idx]
+            if (obs.tier != KokohoSignatures.WatchlistTier.TIER_B || obs.facetKey.startsWith("hw:kit:tpms:")) continue
+            val obsUuid = deterministicUuidV5(obs.facetKey)
+            val disambig = CoMovingTpmsTracker.evaluateEmitter(context, obsUuid, nowMs)
+            if (disambig.posture != CoMovingTpmsTracker.ChassisPosture.UNKNOWN) {
+                localRawObservations[idx] = obs.copy(
+                    additionalFacets = (obs.additionalFacets + disambig.toAdditionalFacets()).distinct(),
+                    rssiCorr = disambig.bestRssiCorrelation ?: obs.rssiCorr,
+                    tpmsDisambig = disambig.posture.code
+                )
+            }
         }
 
         for ((entityUuid, wheelItems) in standaloneVerifiedByEntity) {
@@ -3715,9 +4010,27 @@ object KokohoPostureEngine {
         }
 
         if (ScanForegroundService.isRunning && KokohoSignatures.isSharingActive(context) && localRawObservations.isNotEmpty()) {
+            val continuousDebugShare = KinematicPrivacyGate.shouldShareAllSignalsContinuously(context)
+            val shareNonTpmsTierB = KinematicPrivacyGate.shouldShareNonTpmsTierB(context, nowMs)
+            val hasActiveGroundDetection = evaluated.values.any {
+                !it.isAircraft && !it.isDrone && it.agency != KokohoAgency.DRONE && (nowMs - it.updatedAtMs) <= 45_000L
+            } || localRawObservations.any {
+                it.propClass == "GROUND_DIRECT" && !it.facetKey.startsWith("uas:", ignoreCase = true) && !it.facetKey.startsWith("hw:kit:tpms:", ignoreCase = true)
+            }
+            val collectNonOwnTpms = KinematicPrivacyGate.shouldCollectNonOwnTpms(hasActiveGroundDetection, nowMs)
+
             val bestByFacet = linkedMapOf<String, RawSensorReportCandidate>()
             for (cand in localRawObservations) {
-                if (!cand.isFlagged) continue
+                val isTpmsCand = KokohoSignatures.canonicalTpmsFacetKey(cand.facetKey) != null
+                val allowedToShare = when {
+                    isTpmsCand && KokohoSignatures.isOwnVehicleTpms(context, cand.facetKey) -> false
+                    cand.isFlagged && cand.tier == KokohoSignatures.WatchlistTier.TIER_A -> true
+                    continuousDebugShare -> true
+                    isTpmsCand -> collectNonOwnTpms
+                    cand.tier == KokohoSignatures.WatchlistTier.TIER_B -> shareNonTpmsTierB
+                    else -> false
+                }
+                if (!allowedToShare) continue
                 val existing = bestByFacet[cand.facetKey]
                 if (existing == null || cand.signalDb > existing.signalDb) {
                     bestByFacet[cand.facetKey] = cand

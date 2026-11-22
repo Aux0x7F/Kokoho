@@ -329,6 +329,30 @@ class ScanForegroundService : Service() {
             if (!isRunning) return
             runCatching { context.startService(Intent(context, ScanForegroundService::class.java).setAction(ACTION_REFRESH_LINK)) }
         }
+
+        /**
+         * Applies the Pedestrian+ kinematic gate to local history persistence:
+         * on `!isDebug` while `STATIONARY` (`!allowUnflaggedHistory`), unflagged ambient `KnownDeviceEntity`
+         * and `DeviceDetailsEntity` rows are skipped so stationary home/work dwell never logs ambient devices.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal fun filterHistoryForKinematicGate(
+            seen: List<DeviceRegistry.Snapshot>,
+            details: List<DeviceDetailsEntity>,
+            allowUnflaggedHistory: Boolean
+        ): Pair<List<DeviceRegistry.Snapshot>, List<DeviceDetailsEntity>> {
+            if (allowUnflaggedHistory) return seen to details
+            val keptSeen = seen.filter { s ->
+                s.hits.isNotEmpty() ||
+                    s.remoteId != null ||
+                    s.known?.favorite == true ||
+                    !s.known?.alias.isNullOrBlank() ||
+                    !s.known?.note.isNullOrBlank()
+            }
+            val keptMacs = keptSeen.map { it.mac }.toHashSet()
+            val keptDetails = details.filter { it.mac in keptMacs }
+            return keptSeen to keptDetails
+        }
     }
 
     private class Classified(val time: Long, val hits: List<Hit>, val identity: DeviceIntel.Identity, val vendor: String?)
@@ -442,9 +466,18 @@ class ScanForegroundService : Service() {
         }
         if (it.hasAccuracy()) { gpsAt = sysNow; gpsAccuracyM = it.accuracy }
         org.tucsoncommunity.kokoho.ui.MapGps.offer(it)
+        org.tucsoncommunity.kokoho.posture.KinematicPrivacyGate.onLocation(it, fixWallMs)
+        if (it.hasSpeed() && isRunning && wifiWanted()) {
+            PassByWifiScanScheduler.onSpeedSample(it.speed.toDouble(), sysNow) { wifiEngine.requestScan() }
+        }
         TripRecorder.onLocation(it)
         checkKnownAlpr(it)
         cellMonitor?.onLocation(it)
+    }
+
+    private fun triggerPassByWifiCue(cueSource: String, nowMs: Long = System.currentTimeMillis()) {
+        if (!isRunning || !wifiWanted()) return
+        PassByWifiScanScheduler.onVehicleCue(cueSource, nowMs) { wifiEngine.requestScan() }
     }
 
     /** Known plate cameras: distance at the previous fix, and when each last alerted. */
@@ -620,7 +653,8 @@ class ScanForegroundService : Service() {
         org.tucsoncommunity.kokoho.sdr.SdrRadio.shouldOpportunisticTpmsProbe = {
             Prefs.categoryEnabled(this, Category.RADIO) && (
                 ((lastLocation ?: lastFix)?.let { if (it.hasSpeed()) it.speed else 0f } ?: 0f) >= 4.5f ||
-                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasVerifiedAgentTpms(this)
+                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasVerifiedAgentTpms(this) ||
+                    org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.hasActiveGroundOrVehicleDetection(this)
                 )
         }
         if (sdrModes.isNotEmpty() || radioOn) {
@@ -825,10 +859,13 @@ class ScanForegroundService : Service() {
             while (isActive) {
                 holdAwake()
                 val interval = Prefs.scanIntervalMs(this@ScanForegroundService)
+                val now = System.currentTimeMillis()
+                val curSpeedMps = ((lastLocation ?: lastFix)?.takeIf { it.hasSpeed() }?.speed ?: 0f).toDouble()
                 org.tucsoncommunity.kokoho.ui.LiveWindow.wifiScanMs = interval
                 org.tucsoncommunity.kokoho.ui.LiveWindow.usbQuickClear = Prefs.usbQuickClear(this@ScanForegroundService)
-                org.tucsoncommunity.kokoho.ui.LiveWindow.wifiScanAt = System.currentTimeMillis()
-                wifiEngine.requestScan()
+                if (PassByWifiScanScheduler.tryRoutinePoll(now, curSpeedMps) { wifiEngine.requestScan() }) {
+                    org.tucsoncommunity.kokoho.ui.LiveWindow.wifiScanAt = now
+                }
                 delay(interval)
             }
         }
@@ -1013,7 +1050,21 @@ class ScanForegroundService : Service() {
             isBleTrackerPayload = isTrackerPayload,
             advert = a
         )
-        val keepInEvidenceRing = isRelevantCandidate || a.isWifi || !a.randomBle || !a.name.isNullOrBlank() || a.serviceUuids.isNotEmpty()
+        if (via == null && a.isBle) {
+            org.tucsoncommunity.kokoho.sdr.Tpms.decodeBle(a)?.let { bleTpms ->
+                onTpmsReading(bleTpms, (a.rssi + 105).coerceIn(8, 55).toDouble())
+            }
+        }
+        val signalTier = org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifySignalTier(
+            context = this,
+            macOrFacet = mac,
+            ssidOrName = a.name,
+            vendor = effectiveVendor,
+            advert = a,
+            hasRemoteId = remoteId != null
+        )
+        val isTierBCandidate = signalTier == org.tucsoncommunity.kokoho.posture.KokohoSignatures.WatchlistTier.TIER_B
+        val keepInEvidenceRing = isRelevantCandidate || isTierBCandidate || a.isWifi || !a.randomBle || !a.name.isNullOrBlank() || a.serviceUuids.isNotEmpty()
         if (!keepInEvidenceRing) {
             return
         }
@@ -1056,6 +1107,27 @@ class ScanForegroundService : Service() {
         val here = bestLoc?.let { DeviceRegistry.GeoSample(System.currentTimeMillis(), it.latitude, it.longitude) }
         val isFirst = DeviceRegistry.report(a, c.hits, c.identity, c.vendor, remoteId, geo, now, broadcast, here, lora, via != null)
         if (isFirst) serviceScope.launch { loadHistory(mac) }
+        if (via == null) {
+            val ringFacet = if (remoteId != null) {
+                "uas:mac:${org.tucsoncommunity.kokoho.posture.KokohoSignatures.normalizeMac(mac)}"
+            } else {
+                "hw:mac:${org.tucsoncommunity.kokoho.posture.KokohoSignatures.normalizeMac(mac)}"
+            }
+            org.tucsoncommunity.kokoho.posture.RecentSignalRingBuffer.record(
+                context = this,
+                facetKey = ringFacet,
+                tier = signalTier,
+                modality = a.source.name,
+                signalDb = a.rssi.toDouble(),
+                label = a.name ?: c.vendor,
+                lat = placedLoc?.latitude,
+                lon = placedLoc?.longitude,
+                timestampMs = now
+            )
+            if (a.isBle && (isRelevantCandidate || isTierBCandidate) && !isTrackerPayload) {
+                triggerPassByWifiCue("BLE_VEHICLE_CUE", now)
+            }
+        }
         // Over the mesh too (Meshtastic node): not the user's own whitelisted devices.
         if (toMesh && sharing() && !WhitelistCache.contains(mac)) { meshOutbox?.add(a, c.hits, now); mqttOutbox?.add(a, c.hits, now) }
         if (TripRecorder.isRecording) {
@@ -1736,9 +1808,12 @@ class ScanForegroundService : Service() {
     }
 
     private suspend fun writeHistory(batch: HistoryBatch) {
+        val allowUnflagged = org.tucsoncommunity.kokoho.posture.KinematicPrivacyGate.shouldWriteUnflaggedHistory()
+        val (keptSeen, keptDetails) = filterHistoryForKinematicGate(batch.seen, batch.details, allowUnflagged)
+        if (keptSeen.isEmpty() && keptDetails.isEmpty()) return
         val dao = AppDatabase.getInstance(this).knownDeviceDao()
         val sessionStart = batch.sessionStart
-        batch.seen.chunked(400).forEach { chunk ->
+        keptSeen.chunked(400).forEach { chunk ->
             dao.recordSightings(chunk.map { s ->
                 KnownDeviceEntity(
                     mac = s.mac,
@@ -1752,7 +1827,7 @@ class ScanForegroundService : Service() {
                 )
             }, sessionStart)
         }
-        batch.details.chunked(200).forEach { AppDatabase.getInstance(this).deviceDetailsDao().upsertAll(it) }
+        keptDetails.chunked(200).forEach { AppDatabase.getInstance(this).deviceDetailsDao().upsertAll(it) }
     }
 
     private suspend fun pruneOldData() {
@@ -1972,6 +2047,7 @@ class ScanForegroundService : Service() {
                 e.freqHz, e.snrDb, enabledAgencies = enabledAgencies
             )
         if (via == null) {
+            val curLoc = lastLocation ?: lastFix
             org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordRawRadioPeak(
                 context = this,
                 freqHz = e.freqHz,
@@ -1982,9 +2058,31 @@ class ScanForegroundService : Service() {
                 isTdma = e.tdma,
                 matchedAgency = (kokohoFreq ?: catalogAny)?.agency,
                 matchedAlpha = (kokohoFreq ?: catalogAny)?.alpha,
-                location = lastLocation ?: lastFix,
+                location = curLoc,
                 nowMs = now
             )
+            val rfTier = org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifySignalTier(
+                context = this,
+                macOrFacet = "rf:chan:${e.freqHz}:ANY",
+                freqHz = e.freqHz,
+                snrDb = e.snrDb
+            )
+            if (rfTier != org.tucsoncommunity.kokoho.posture.KokohoSignatures.WatchlistTier.AMBIENT) {
+                org.tucsoncommunity.kokoho.posture.RecentSignalRingBuffer.record(
+                    context = this,
+                    facetKey = if (kokohoFreq != null) "rf:chan:${e.freqHz}:${kokohoFreq.nac ?: "ANY"}" else "rf:inv:${e.freqHz}:${e.band.label}",
+                    tier = rfTier,
+                    modality = "SDR_RF",
+                    signalDb = e.snrDb.toDouble(),
+                    label = (kokohoFreq ?: catalogAny)?.alpha ?: e.band.label,
+                    lat = curLoc?.latitude,
+                    lon = curLoc?.longitude,
+                    timestampMs = now
+                )
+                if (!e.repeat) {
+                    triggerPassByWifiCue("SDR_RF_CUE", now)
+                }
+            }
         }
         if (kokohoFreq == null) return
         val resolvedAgency = kokohoFreq.agencyEnum
@@ -2022,10 +2120,41 @@ class ScanForegroundService : Service() {
      * agent vehicles when they later pass radio-silent.
      */
     private fun onTpmsReading(reading: org.tucsoncommunity.kokoho.sdr.Tpms.Reading, snrDb: Double) {
-        if (!Prefs.categoryEnabled(this, Category.RADIO)) return
+        if (!Prefs.categoryEnabled(this, Category.RADIO) && !reading.protocol.equals("BLE", ignoreCase = true)) return
         val now = System.currentTimeMillis()
         val geo = (lastLocation ?: lastFix)?.takeIf { usableForPlacing(it) }?.let { placeAt(now, it) }
+        val activeGround = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.hasActiveGroundOrVehicleDetection(this, now)
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.observeTpmsAmbient(
+            context = this,
+            rawFacetKey = reading.canonicalFacetKey,
+            lat = geo?.lat,
+            lon = geo?.lon,
+            hasNearbyAgent = activeGround,
+            nowMs = now
+        )
+        if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isOwnVehicleTpms(this, reading.canonicalFacetKey)) return
+        if (!org.tucsoncommunity.kokoho.posture.KinematicPrivacyGate.shouldCollectNonOwnTpms(activeGround, now)) return
+
         org.tucsoncommunity.kokoho.sdr.TpmsLog.observe(reading, snrDb, now, geo?.lat, geo?.lon)
+        org.tucsoncommunity.kokoho.posture.CoMovingTpmsTracker.recordTpmsSample(
+            context = this,
+            rawTpmsFacetKey = reading.canonicalFacetKey,
+            timestampMs = now,
+            rssiDb = snrDb
+        )
+        val tier = org.tucsoncommunity.kokoho.posture.KokohoSignatures.classifySignalTier(this, reading.canonicalFacetKey)
+        org.tucsoncommunity.kokoho.posture.RecentSignalRingBuffer.record(
+            context = this,
+            facetKey = reading.canonicalFacetKey,
+            tier = tier,
+            modality = if (reading.protocol.equals("BLE", ignoreCase = true)) "BLE_TPMS" else "SDR_TPMS",
+            signalDb = snrDb,
+            label = "${reading.protocol} ${reading.id}",
+            lat = geo?.lat,
+            lon = geo?.lon,
+            timestampMs = now
+        )
+        triggerPassByWifiCue("TPMS_PASS_BY_CUE", now)
         val verified = org.tucsoncommunity.kokoho.posture.KokohoSignatures.lookupVerifiedAgentTpms(this, reading.canonicalFacetKey)
         if (verified != null) {
             org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(this, now)

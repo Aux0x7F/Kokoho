@@ -3,6 +3,7 @@ package org.tucsoncommunity.kokoho.posture
 import android.content.Context
 import androidx.core.content.edit
 import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.launch
 import org.tucsoncommunity.kokoho.sdr.FreqNames
@@ -114,7 +115,8 @@ data class WitnessReportRecord(
     val accessoryKind: String = "",
     val photoDataUrls: List<String>? = null,
     val lat: Double? = null,
-    val lon: Double? = null
+    val lon: Double? = null,
+    val nearbySignals: List<RecentSignalRingBuffer.NearbySignalDto>? = null
 ) {
     val isApproved: Boolean
         get() = status.isBlank() || status.equals("APPROVED", ignoreCase = true)
@@ -145,6 +147,7 @@ object KokohoSignatures {
     private const val KEY_MAP_TIME_WINDOW = "map_time_window_v2"
     private const val KEY_MAP_HEAT_OVERLAY_ENABLED = "map_heat_overlay_enabled_v1"
     private const val KEY_MAP_CONFIRMATION_FILTER = "map_confirmation_filter_v1"
+    private const val KEY_MAP_MILITARY_ENABLED = "map_military_enabled_v1"
     private const val KEY_ADSB_ENABLED = "adsb_enabled"
     private const val KEY_DRONE_ENABLED = "drone_detection_enabled"
     private const val KEY_ENABLED_AIRCRAFT_AGENCIES = "enabled_aircraft_agencies"
@@ -207,11 +210,42 @@ object KokohoSignatures {
         val friendlyLabel: String get() = agencyEnum.friendlyLabel
     }
 
+    enum class WatchlistTier {
+        /** Confirmed high-specificity alerting signatures & corroborated agency TPMS wheel-sets (`learned_tpms_v1`). */
+        TIER_A,
+        /** Non-alerting investigative candidates: wide candidate MAC blocks, investigative RF ranges, and all non-own TPMS. */
+        TIER_B,
+        /** Ordinary ambient background signals (including excluded own-vehicle TPMS). */
+        AMBIENT
+    }
+
+    data class InvestigativeMacPrefix(
+        @SerializedName("prefix") val prefix: String = "",
+        @SerializedName("vendor") val vendor: String = "",
+        @SerializedName("rationale") val rationale: String = ""
+    )
+
+    data class InvestigativeRfRange(
+        @SerializedName("min_hz") val minHz: Long = 0L,
+        @SerializedName("max_hz") val maxHz: Long = 0L,
+        @SerializedName("mode") val mode: String = "",
+        @SerializedName("rationale") val rationale: String = ""
+    )
+
+    data class InvestigativeWatchlists(
+        @SerializedName("include_all_tpms") val includeAllTpms: Boolean = true,
+        @SerializedName("exclude_own_vehicle_tpms") val excludeOwnVehicleTpms: Boolean = true,
+        @SerializedName("facet_prefixes") val facetPrefixes: List<String> = listOf("hw:kit:tpms:", "tpms:"),
+        @SerializedName("mac_prefixes") val macPrefixes: List<InvestigativeMacPrefix> = emptyList(),
+        @SerializedName("rf_ranges_hz") val rfRangesHz: List<InvestigativeRfRange> = emptyList()
+    )
+
     private data class CatalogJson(
-        val schemaVersion: Int = 2,
-        val rfChannels: List<RfChannelSig> = emptyList(),
-        val p25Talkgroups: List<TalkgroupSig> = emptyList(),
-        val fleetOuis: List<FleetOuiSig> = emptyList()
+        @SerializedName("schemaVersion") val schemaVersion: Int = 2,
+        @SerializedName("rfChannels") val rfChannels: List<RfChannelSig> = emptyList(),
+        @SerializedName("p25Talkgroups") val p25Talkgroups: List<TalkgroupSig> = emptyList(),
+        @SerializedName("fleetOuis") val fleetOuis: List<FleetOuiSig> = emptyList(),
+        @SerializedName("investigative_watchlists") val investigativeWatchlists: InvestigativeWatchlists = InvestigativeWatchlists()
     )
 
     @Volatile
@@ -227,6 +261,10 @@ object KokohoSignatures {
 
     @Volatile
     var fleetOuis: List<FleetOuiSig> = emptyList()
+        private set
+
+    @Volatile
+    var investigativeWatchlists: InvestigativeWatchlists = InvestigativeWatchlists()
         private set
 
     @Volatile
@@ -255,6 +293,7 @@ object KokohoSignatures {
                     rfChannels = parsed.rfChannels
                     talkgroups = parsed.p25Talkgroups
                     fleetOuis = parsed.fleetOuis
+                    investigativeWatchlists = parsed.investigativeWatchlists
                 }
             }
         }
@@ -262,6 +301,23 @@ object KokohoSignatures {
         KokohoReferenceTables.ensureLoaded(context)
         loaded = true
         runRetroactiveCleanupV116IfNeeded(context)
+    }
+
+    @Synchronized
+    fun applyRemoteSignaturesJson(json: String): Boolean {
+        if (json.isBlank()) return false
+        return runCatching {
+            val parsed = Gson().fromJson(json, CatalogJson::class.java) ?: return false
+            if (parsed.rfChannels.isNotEmpty()) rfChannels = parsed.rfChannels
+            if (parsed.p25Talkgroups.isNotEmpty()) talkgroups = parsed.p25Talkgroups
+            if (parsed.fleetOuis.isNotEmpty()) fleetOuis = parsed.fleetOuis
+            if (parsed.investigativeWatchlists.macPrefixes.isNotEmpty() ||
+                parsed.investigativeWatchlists.rfRangesHz.isNotEmpty()
+            ) {
+                investigativeWatchlists = parsed.investigativeWatchlists
+            }
+            true
+        }.getOrDefault(false)
     }
 
     private fun runRetroactiveCleanupV116IfNeeded(context: Context) {
@@ -935,6 +991,29 @@ object KokohoSignatures {
     fun setMapConfirmationFilter(context: Context, filter: MapConfirmationFilter) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putString(KEY_MAP_CONFIRMATION_FILTER, filter.id)
+        }
+    }
+
+    /**
+     * Discreet Military airspace/corridor filter (`include_military=1`), strictly gated on
+     * `DeviceTrustManager.hasIntelligenceAccess(context)` (`INTELLIGENCE` or `OWNER`).
+     */
+    fun isMapMilitaryEnabled(context: Context): Boolean {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context)) return false
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_MILITARY_ENABLED, false)
+    }
+
+    fun setMapMilitaryEnabled(context: Context, enabled: Boolean) {
+        val allowed = enabled && DeviceTrustManager.hasIntelligenceAccess(context)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_MILITARY_ENABLED, allowed)
+        }
+    }
+
+    fun clearMilitaryOnRevocation(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            remove(KEY_MAP_MILITARY_ENABLED)
         }
     }
 
@@ -2385,6 +2464,30 @@ object KokohoSignatures {
             own.pairedEntityIds.size > OWN_TPMS_MAX_PAIRED_ENTITIES
     }
 
+    /** Alias for own-vehicle TPMS exclusion (`own_tpms_v1`). */
+    fun isOwnVehicleTpms(context: Context?, rawFacetKey: String): Boolean =
+        isOwnOrAmbientTpms(context, rawFacetKey)
+
+    fun markOwnVehicleTpms(
+        context: Context?,
+        rawFacetKey: String,
+        nowMs: Long = System.currentTimeMillis()
+    ) {
+        ensureTpmsIntelLoaded(context)
+        val k = canonicalTpmsFacetKey(rawFacetKey) ?: return
+        val prev = ownTpmsCache[k]
+        ownTpmsCache[k] = OwnTpmsEntry(
+            facetKey = k,
+            soloGridCells = prev?.soloGridCells.orEmpty(),
+            pairedEntityIds = prev?.pairedEntityIds.orEmpty(),
+            isOwnVehicle = true,
+            updatedAtMs = nowMs
+        )
+        learnedTpmsCache.remove(k)
+        confirmedEvidenceFacets.remove(k)
+        persistTpmsIntel(context)
+    }
+
     /**
      * Tracks background TPMS observations so the observer's own vehicle wheels (heard across >= 4 distinct ~500m grid
      * cells when no nearby agent is present) are permanently excluded from agent attribution and Hub sharing.
@@ -2795,6 +2898,15 @@ object KokohoSignatures {
         if (facets.any { it.startsWith("hw:kit:tpms:", ignoreCase = true) }) {
             caps.add("Vehicle TPMS")
         }
+        val hasMobileTpmsDisambig = facets.any { it.equals("tpms:disambig:MOBILE_VEHICLE", ignoreCase = true) } ||
+            details.any { it.contains("Mobile Vehicle (Co-Moving TPMS)", ignoreCase = true) || it.contains("MOBILE_VEHICLE", ignoreCase = true) }
+        val hasFixedInfraDisambig = facets.any { it.equals("tpms:disambig:FIXED_INFRA", ignoreCase = true) } ||
+            details.any { it.contains("Fixed / Pole Infrastructure", ignoreCase = true) || it.contains("FIXED_INFRA", ignoreCase = true) }
+        if (hasMobileTpmsDisambig) {
+            caps.add("Mobile Vehicle (Co-Moving TPMS)")
+        } else if (hasFixedInfraDisambig && "Vehicle TPMS" !in caps) {
+            caps.add("Fixed / Pole Infrastructure")
+        }
         val combined = (facets + details).joinToString(" ").uppercase()
         val sanitizedBodycam = combined
             .replace("AXON NETWORKS", "")
@@ -2977,6 +3089,165 @@ object KokohoSignatures {
         return matchOuiOrSsid(canonMac, nameOrSsid, vendor, hasRemoteId = false) != null
     }
 
+    /**
+     * Matches a MAC address against the non-alerting `investigative_watchlists.mac_prefixes`
+     * (`00:18:0A` Meraki, `00:1E:42` Teltonika, `E4:3E:D7` Digi, `00:0C:42` MikroTik,
+     * `74:AC:B9`/`B4:FB:E4` Ubiquiti, `DC:A6:32` Raspberry Pi).
+     */
+    fun matchInvestigativeMac(context: Context?, mac: String, ssidOrName: String? = null): InvestigativeMacPrefix? {
+        if (context != null) ensureLoaded(context)
+        if (isIgnoredInfrastructureOrRetail(mac, ssidOrName)) return null
+        val rawNorm = normalizeMac(mac)
+        val canonNorm = canonicalHardwareOuiMac(rawNorm)
+        return investigativeWatchlists.macPrefixes.firstOrNull { entry ->
+            val pfx = entry.prefix.trim().uppercase()
+            pfx.isNotEmpty() && (rawNorm.startsWith(pfx) || canonNorm.startsWith(pfx))
+        }
+    }
+
+    /**
+     * Matches an RF frequency (Hz) against `investigative_watchlists.rf_ranges_hz`, excluding
+     * NOAA weather broadcasts, FRS walkie-talkies, and suppressed commercial/repeater licenses.
+     */
+    fun matchInvestigativeRfRange(context: Context?, hz: Long): InvestigativeRfRange? {
+        if (context != null) ensureLoaded(context)
+        if (hz in 162_395_000L..162_555_000L) return null
+        if (abs(hz - 167_862_500L) <= 6_250L) return null
+        if (hz in 462_545_000L..462_730_000L || hz in 467_545_000L..467_730_000L) return null
+        val azRef = KokohoReferenceTables.lookupAzRf(hz, 1_200L)
+        if (azRef != null && azRef.isSuppressedCommercialOrRepeater) return null
+        return investigativeWatchlists.rfRangesHz.firstOrNull { r ->
+            hz in r.minHz..r.maxHz
+        }
+    }
+
+    /**
+     * Classifies any Wi-Fi, BLE, RF, ADS-B, Drone, or TPMS signal into the Two-Tier Watchlist:
+     *  - [WatchlistTier.TIER_A]: Confirmed alerting signatures + verified agency TPMS (`learned_tpms_v1`).
+     *  - [WatchlistTier.TIER_B]: Non-alerting investigative MAC prefixes, investigative RF bands,
+     *    and ALL non-own-vehicle TPMS readings (`!isOwnVehicleTpms(...)`).
+     *  - [WatchlistTier.AMBIENT]: Own-vehicle TPMS and ordinary unflagged consumer signals.
+     */
+    fun classifySignalTier(
+        context: Context?,
+        macOrFacet: String,
+        ssidOrName: String? = null,
+        vendor: String? = null,
+        freqHz: Long? = null,
+        snrDb: Int? = null,
+        advert: org.tucsoncommunity.kokoho.detect.Advert? = null,
+        hasRemoteId: Boolean = false
+    ): WatchlistTier {
+        if (context != null) ensureLoaded(context)
+        val trimmed = macOrFacet.trim()
+        if (trimmed.isEmpty()) return WatchlistTier.AMBIENT
+
+        // 1. TPMS wheel sensors: exclude own tires (`AMBIENT`), promote verified agent chassis (`TIER_A`),
+        //    and classify all other non-own TPMS as `TIER_B` (`Investigative`, non-alerting).
+        val tpmsFacet = canonicalTpmsFacetKey(trimmed)
+        if (tpmsFacet != null) {
+            if (investigativeWatchlists.excludeOwnVehicleTpms && isOwnVehicleTpms(context, tpmsFacet)) {
+                return WatchlistTier.AMBIENT
+            }
+            if (lookupVerifiedAgentTpms(context, tpmsFacet) != null) {
+                return WatchlistTier.TIER_A
+            }
+            return if (investigativeWatchlists.includeAllTpms) WatchlistTier.TIER_B else WatchlistTier.AMBIENT
+        }
+
+        // 2. Airborne ADS-B, Remote ID Drones, and P25 Unit RIDs / Talkgroups
+        if (hasRemoteId ||
+            trimmed.startsWith("adsb:", ignoreCase = true) ||
+            trimmed.startsWith("uas:", ignoreCase = true) ||
+            trimmed.startsWith("rf:rid:", ignoreCase = true) ||
+            trimmed.startsWith("p25:tg:", ignoreCase = true) ||
+            trimmed.startsWith("cell:anom:", ignoreCase = true)
+        ) {
+            return WatchlistTier.TIER_A
+        }
+
+        // 3. RF frequencies (`freqHz` or `rf:chan:<hz>:*` / `rf:inv:<hz>:*`)
+        val resolvedHz = freqHz ?: when {
+            trimmed.startsWith("rf:chan:", ignoreCase = true) ->
+                trimmed.substringAfter("rf:chan:").substringBefore(':').toLongOrNull()
+            trimmed.startsWith("rf:inv:", ignoreCase = true) ->
+                trimmed.substringAfter("rf:inv:").substringBefore(':').toLongOrNull()
+            else -> null
+        }
+        if (resolvedHz != null && resolvedHz > 0L) {
+            val allAgencies = KokohoAgency.entries.toSet()
+            val directMatch = matchFrequency(resolvedHz, snrDb = snrDb)
+            if (directMatch != null && directMatch.isAlertableDirectOrMobile) return WatchlistTier.TIER_A
+            if (snrDb != null) {
+                if (matchPublicSafetyMobileUplink(resolvedHz, snrDb, enabledAgencies = allAgencies) != null) {
+                    return WatchlistTier.TIER_A
+                }
+                if (matchCloseRangeFederalBand(resolvedHz, snrDb, enabledAgencies = allAgencies) != null) {
+                    return WatchlistTier.TIER_A
+                }
+            }
+            if (matchInvestigativeRfRange(context, resolvedHz) != null) {
+                return WatchlistTier.TIER_B
+            }
+            return WatchlistTier.AMBIENT
+        }
+
+        // 4. Wi-Fi / BLE MACs & Companion Kits
+        val cleanMac = when {
+            trimmed.startsWith("hw:mac:", ignoreCase = true) -> trimmed.substringAfter("hw:mac:")
+            trimmed.startsWith("kitmac:", ignoreCase = true) -> trimmed.substringAfter("kitmac:")
+            trimmed.startsWith("hw:kit:", ignoreCase = true) -> trimmed.substringAfter("hw:kit:").substringAfter(':')
+            else -> trimmed
+        }
+        if (isIgnoredInfrastructureOrRetail(cleanMac, ssidOrName)) return WatchlistTier.AMBIENT
+        if (isAxonNetworksConsumerRouter(cleanMac, ssidOrName, vendor)) return WatchlistTier.AMBIENT
+        if (isTacticalOrRemoteIdDrone(cleanMac, ssidOrName, vendor, hasRemoteId)) return WatchlistTier.TIER_A
+        if (isCompanionKitDevice(cleanMac, ssidOrName, vendor, advert)) return WatchlistTier.TIER_A
+        if (isExplicitAgencyOrTacticalSsid(ssidOrName) || isAttestedAgencySubblock(cleanMac)) return WatchlistTier.TIER_A
+
+        val learnedMac = lookupMacIntel(context, cleanMac)
+        if (learnedMac != null &&
+            learnedMac.corroboratedHits >= 3 &&
+            learnedMac.distinctDays >= 2 &&
+            learnedMac.reputationScore >= 0.88
+        ) {
+            return WatchlistTier.TIER_A
+        }
+        if (lookupAssignedMacBlock(context, cleanMac) != null) {
+            return WatchlistTier.TIER_A
+        }
+
+        if (matchInvestigativeMac(context, cleanMac, ssidOrName) != null) {
+            return WatchlistTier.TIER_B
+        }
+
+        val ouiOrSsid = matchOuiOrSsid(canonicalHardwareOuiMac(cleanMac), ssidOrName, vendor, hasRemoteId = false)
+        if (ouiOrSsid != null) {
+            return WatchlistTier.TIER_A
+        }
+
+        val canonPrefix = canonicalHardwareOuiMac(cleanMac).take(8)
+        if (canonPrefix in GENERIC_FLEET_ROUTER_OUIs) {
+            return WatchlistTier.TIER_B
+        }
+
+        return WatchlistTier.AMBIENT
+    }
+
+    fun isTierBInvestigativeCandidate(
+        context: Context?,
+        mac: String,
+        ssidOrName: String? = null,
+        vendor: String? = null,
+        advert: org.tucsoncommunity.kokoho.detect.Advert? = null
+    ): Boolean = classifySignalTier(
+        context = context,
+        macOrFacet = mac,
+        ssidOrName = ssidOrName,
+        vendor = vendor,
+        advert = advert
+    ) == WatchlistTier.TIER_B
+
     fun watchedTargetsForEnabled(context: Context): List<RadioWatch.Target> {
         ensureLoaded(context)
         val evaluated = getEvaluatedAgencies(context)
@@ -2990,7 +3261,7 @@ object KokohoSignatures {
     fun importChannelText(context: Context, text: String, sourceName: String): Int {
         ensureLoaded(context)
         val trimmed = text.trim()
-        val airRegex = Regex("""(?i)\b(AIR\s*\d+)\s*[-\u2013:]\s*([0-9]{2,4}\.[0-9]{1,6})\s*MHz(?:.*?NAC\s*([0-9A-Fa-f]{1,3}))?""")
+        val airRegex = Regex("""(?i)\b(AIR\s*\d+)\s*[-\p{Pd}:]\s*([0-9]{2,4}\.[0-9]{1,6})\s*MHz(?:.*?NAC\s*([0-9A-Fa-f]{1,3}))?""")
         val nacRegex = Regex("""(?i)\b([0-9A-Fa-f]{1,3})\s*NAC\b""")
         val freqStartRegex = Regex("""^\s*([0-9]{2,4}\.[0-9]{2,6})\b""")
         val updated = rfChannels.toMutableList()

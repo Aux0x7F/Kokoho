@@ -98,7 +98,9 @@ object FieldTelemetryLogger {
         var peakSnrB: Double,
         var lastLat: Double?,
         var lastLon: Double?,
-        var lastUpdatedMs: Long
+        var lastUpdatedMs: Long,
+        var rssiCorr: Double? = null,
+        var tpmsDisambiguation: String? = null
     )
 
     private val passTrackers = ConcurrentHashMap<String, FacetPassTracker>()
@@ -245,6 +247,8 @@ object FieldTelemetryLogger {
                     val passA = passTrackers[first.facetKey]?.passCount ?: 1
                     val passB = passTrackers[second.facetKey]?.passCount ?: 1
                     val sharedPasses = minOf(passA, passB).coerceAtLeast(1)
+                    val edgeRssiCorr = first.rssiCorr ?: second.rssiCorr
+                    val edgeTpmsDisambig = first.tpmsDisambig ?: second.tpmsDisambig
                     coOccurrences.compute(edgeKey) { _, existing ->
                         if (existing == null) {
                             CoOccurrenceAccumulator(
@@ -259,7 +263,9 @@ object FieldTelemetryLogger {
                                 peakSnrB = second.signalDb,
                                 lastLat = first.rawLat,
                                 lastLon = first.rawLon,
-                                lastUpdatedMs = nowMs
+                                lastUpdatedMs = nowMs,
+                                rssiCorr = edgeRssiCorr,
+                                tpmsDisambiguation = edgeTpmsDisambig
                             )
                         } else {
                             existing.sampleCount += 1
@@ -270,6 +276,12 @@ object FieldTelemetryLogger {
                             existing.lastLat = first.rawLat
                             existing.lastLon = first.rawLon
                             existing.lastUpdatedMs = nowMs
+                            if (edgeRssiCorr != null) {
+                                existing.rssiCorr = existing.rssiCorr?.let { maxOf(it, edgeRssiCorr) } ?: edgeRssiCorr
+                            }
+                            if (!edgeTpmsDisambig.isNullOrBlank()) {
+                                existing.tpmsDisambiguation = edgeTpmsDisambig
+                            }
                             existing
                         }
                     }
@@ -387,6 +399,13 @@ object FieldTelemetryLogger {
                     put("last_seen_ms", edge.lastUpdatedMs)
                     if (edge.lastLat != null) put("lat", edge.lastLat)
                     if (edge.lastLon != null) put("lon", edge.lastLon)
+                    edge.rssiCorr?.let { rc ->
+                        put("rssi_corr", rc)
+                        put("shared_arrival_peak", rc >= CoMovingTpmsTracker.MOBILE_CO_MOVING_SCORE_THRESHOLD)
+                    }
+                    edge.tpmsDisambiguation?.let { dm ->
+                        put("tpms_disambiguation", dm)
+                    }
                 }
             )
         }
