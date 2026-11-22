@@ -29,6 +29,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
+import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
 import org.tucsoncommunity.kokoho.posture.EvaluatedThreat
 import org.tucsoncommunity.kokoho.posture.EvidenceBadge
 import org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger
@@ -123,6 +124,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     private var mapTargetLabel: String = ""
     private var mapTargetIconKind: MapIcons.BadgeIconKind = MapIcons.BadgeIconKind.CAR
     private var mapTargetTrackPoints: List<Pair<Double, Double>> = emptyList()
+    private var unregisterTrustListener: (() -> Unit)? = null
+    private var lastIntelAccess: Boolean = false
 
     private var pendingPhotoCallback: ((String) -> Unit)? = null
     private val pickPhotoLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -251,6 +254,24 @@ class DeviceDetailActivity : AppCompatActivity() {
         rootLayout.addView(bodyScroll)
 
         setContentView(rootLayout)
+        lastIntelAccess = DeviceTrustManager.hasIntelligenceAccess(this)
+        val selfRef = java.lang.ref.WeakReference(this)
+        unregisterTrustListener = DeviceTrustManager.addTrustStateListener {
+            val act = selfRef.get()
+            if (act == null || act.isDestroyed || act.isFinishing) {
+                unregisterTrustListener?.invoke()
+                unregisterTrustListener = null
+            } else {
+                val nowIntel = DeviceTrustManager.hasIntelligenceAccess(act)
+                if (nowIntel != act.lastIntelAccess) {
+                    act.lastIntelAccess = nowIntel
+                    val top = act.breadcrumbStack.peek()
+                    if (top is DetailNode.Person || top is DetailNode.Location || top is DetailNode.Entity) {
+                        act.renderCurrentNode()
+                    }
+                }
+            }
+        }
         renderCurrentNode()
     }
 
@@ -275,6 +296,8 @@ class DeviceDetailActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        unregisterTrustListener?.invoke()
+        unregisterTrustListener = null
         runCatching { mapEngine?.onDestroy() }
         mapEngine = null
         rfMap = null
@@ -459,7 +482,11 @@ class DeviceDetailActivity : AppCompatActivity() {
             if (witness.notes.isNotBlank()) addKeyValueRow(repCard, "Notes", witness.notes)
 
             val linkedPid = witness.personId
-            val linkedPerson = linkedPid?.let { KokohoDirectory.personById(this, it) }
+            val linkedPerson = if (DeviceTrustManager.hasIntelligenceAccess(this)) {
+                linkedPid?.let { KokohoDirectory.personById(this, it) }
+            } else {
+                null
+            }
             if (linkedPerson != null) {
                 val personBtn = KokohoJourneyUi.secondaryActionButton(
                     this,
@@ -739,8 +766,12 @@ class DeviceDetailActivity : AppCompatActivity() {
         }
         bodyContent.addView(infoCard)
 
-        // Stationed Personnel Filterable Table (Rendered when personnel exist for this location)
-        val totalStationed = KokohoDirectory.stationedPersonnelCount(this, loc.id)
+        // Stationed Personnel Filterable Table (Rendered when Intelligence access is held and personnel exist)
+        val totalStationed = if (DeviceTrustManager.hasIntelligenceAccess(this)) {
+            KokohoDirectory.stationedPersonnelCount(this, loc.id)
+        } else {
+            0
+        }
         if (totalStationed > 0) {
             val tableCard = buildCard()
             val tableHeaderTv = addCardHeader(tableCard, "STATIONED PERSONNEL ($totalStationed)")
@@ -981,6 +1012,12 @@ class DeviceDetailActivity : AppCompatActivity() {
         avatarImageView.visibility = View.VISIBLE
         mapContainer.visibility = View.GONE
 
+        if (!DeviceTrustManager.hasIntelligenceAccess(this)) {
+            avatarImageView.visibility = View.GONE
+            classificationText.text = "Access Restricted"
+            return
+        }
+
         val person = KokohoDirectory.personById(this, personId) ?: run {
             classificationText.text = "Person Not Found"
             return
@@ -1157,7 +1194,11 @@ class DeviceDetailActivity : AppCompatActivity() {
                 )
             }
             is DetailNode.Person -> {
-                val p = KokohoDirectory.personById(this, node.personId)
+                val p = if (DeviceTrustManager.hasIntelligenceAccess(this)) {
+                    KokohoDirectory.personById(this, node.personId)
+                } else {
+                    null
+                }
                 listOfNotNull(
                     p?.takeIf { it.email.isNotBlank() }?.let {
                         KokohoJourneyUi.SubjourneyMenuItem("Copy Email") { copyToClipboard("Email", it.email) }

@@ -6,7 +6,7 @@ Ingests public-domain & open-source aviation, spectrum, hardware OUI, and cellul
   1. FAA Releasable Aircraft DB (`ReleasableAircraft.zip`: `MASTER.txt` + `ACFTREF.txt`)
   2. `sdr-enthusiasts/plane-alert-db` (`plane-alert-db.csv`, `plane-alert-pia.csv`, `pol`, `gov`, `mil`, `civ`)
   3. `wiedehopf/tar1090-db` (`tar1090-aircraft.csv.gz`)
-  4. OurAirports (`airports.csv` + `runways.csv` — airports, runways, & hospital helipads)
+  4. OurAirports (`airports.csv` + `runways.csv` - airports, runways, & hospital helipads)
   5. FCC ULS Land Mobile (`fcc_lmpriv` + `fcc_lmcomm`: `HD.dat`, `EN.dat`, `FR.dat`, `LO.dat`, `EM.dat`)
   6. DHS CISA NIFOG v2.01/2.02 nationwide interoperability channels + PCWIN municipal exclusions
   7. IEEE Registration Authority (`ieee_oui.csv` 24-bit, `ieee_mam.csv` 28-bit, `ieee_oui36.csv` 36-bit)
@@ -201,7 +201,7 @@ NIFOG_CHANNELS = [
     (458_712_500, "UTAC42D", "NIFOG UHF Tactical 42 Direct / Input", "POLICE", "DIRECT_TACTICAL", "FM"),
     (453_862_500, "UTAC43", "NIFOG UHF Tactical 43 Output", "POLICE", "REPEATER", "FM"),
     (458_862_500, "UTAC43D", "NIFOG UHF Tactical 43 Direct / Input", "POLICE", "DIRECT_TACTICAL", "FM"),
-    # 700 MHz Nationwide Interop (NIFOG) — Direct / Mobile Inputs (799-805 MHz) & Simplex
+    # 700 MHz Nationwide Interop (NIFOG) - Direct / Mobile Inputs (799-805 MHz) & Simplex
     (769_243_750, "7CALL50", "NIFOG 700 MHz Calling Output", "POLICE", "REPEATER", "P25"),
     (799_243_750, "7CALL50-IN", "NIFOG 700 MHz Calling Mobile Input", "POLICE", "MOBILE_INPUT", "P25"),
     (769_143_750, "7TAC51", "NIFOG 700 MHz Tactical 51 Output", "POLICE", "REPEATER", "P25"),
@@ -800,7 +800,7 @@ def build_fcc_and_nifog_tables(raw_dir: Path, conn: sqlite3.Connection, assets_d
                 if prev is None or rank > prev[0]:
                     freq_summary[hz] = (rank, cls, agency, mode, callsign, licensee[:48].replace("\t", " "), lat, lon)
 
-    # 3b. Ingest RadioReference Arizona Conventional Channels (`rr_az_conventional.csv` — 605 NTIA AZ Federal + DPS + Counties)
+    # 3b. Ingest RadioReference Arizona Conventional Channels (`rr_az_conventional.csv` - 605 NTIA AZ Federal + DPS + Counties)
     conv_csv = raw_dir / "rr_az_conventional.csv"
     if conv_csv.exists():
         with open(conv_csv, "r", encoding="utf-8-sig", errors="replace") as f:

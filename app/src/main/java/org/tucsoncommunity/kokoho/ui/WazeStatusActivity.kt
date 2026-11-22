@@ -160,7 +160,7 @@ class WazeStatusActivity : AppCompatActivity() {
             v.every.text = "Every ${Prefs.formatInterval(WazeStatus.everyS)}" +
                 if (WazeStatus.everyS != WazeStatus.baseS) "\nadapted: you are $motion" else ""
         } else {
-            v.ring.set(0, 0xFF8A8A8A.toInt(), "next check", "–")
+            v.ring.set(0, 0xFF8A8A8A.toInt(), "next check", "-")
             v.every.text = when {
                 !WazeUi.on(this) -> "Turn on Waze reports in Settings"
                 !ScanForegroundService.isRunning -> "Waze is checked while scanning"

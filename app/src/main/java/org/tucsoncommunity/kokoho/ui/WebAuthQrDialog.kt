@@ -145,7 +145,7 @@ object WebAuthQrDialog {
             !existingSlug.equals(cleanKey, ignoreCase = true)
         ) {
             val appLabel = resolveAppLabel(activity)
-            val curRole = DeviceTrustManager.enrolledRole(activity).lowercase().replaceFirstChar { it.uppercase() }
+            val curRole = DeviceTrustManager.formatRoleForDisplay(DeviceTrustManager.enrolledRole(activity))
             val curLabel = DeviceTrustManager.enrolledLabel(activity).trim()
             val seatDesc = if (curLabel.isNotEmpty()) "\"$curLabel\" ($curRole)" else curRole
             KokohoJourneyUi.showModal(

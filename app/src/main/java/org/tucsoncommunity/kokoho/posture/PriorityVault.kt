@@ -6,18 +6,23 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.os.PowerManager
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.security.keystore.UserNotAuthenticatedException
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -27,6 +32,7 @@ import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.Security
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
@@ -126,12 +132,21 @@ object PriorityVault {
         FAILED
     }
 
+    private data class TierSyncResult(
+        val ok: Boolean,
+        val changed: Boolean,
+        val isLocationsOnlyP2: Boolean
+    )
+
     private val gson = Gson()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scopeJob = SupervisorJob()
+    private val scope = CoroutineScope(scopeJob + Dispatchers.IO)
     private val vaultLock = Any()
     private val syncRunLock = Any()
     private val receiverLock = Any()
     private val revisionCounter = AtomicLong(1L)
+    private val inFlightIoCount = AtomicInteger(0)
+    private val downgradeEpoch = AtomicLong(0L)
 
     val vaultDataRevision: Long
         get() = revisionCounter.get()
@@ -149,11 +164,20 @@ object PriorityVault {
     private var inMemoryHydratedDir: HydratedDirectoryData? = null
 
     @Volatile
+    private var inMemoryHydratedForIntel: Boolean = false
+
+    @Volatile
+    private var suppressP3PersonnelDuringSync: Boolean = false
+
+    @Volatile
     private var registeredAppContext: Context? = null
 
     @Volatile
     var syncDeferredWhileLocked: Boolean = false
         private set
+
+    @Volatile
+    private var screenOff: Boolean = false
 
     @Volatile
     internal var simulateDeviceLockedForTest: Boolean = false
@@ -166,9 +190,20 @@ object PriorityVault {
             val action = intent?.action ?: return
             when (action) {
                 Intent.ACTION_SCREEN_OFF -> {
+                    synchronized(vaultLock) {
+                        screenOff = true
+                    }
                     clearInMemoryCaches(context)
                 }
+                Intent.ACTION_SCREEN_ON -> {
+                    synchronized(vaultLock) {
+                        screenOff = false
+                    }
+                }
                 Intent.ACTION_USER_PRESENT -> {
+                    synchronized(vaultLock) {
+                        screenOff = false
+                    }
                     if (context != null && syncDeferredWhileLocked && DeviceTrustManager.isEnrolled(context)) {
                         syncAllAsync(context)
                     }
@@ -185,6 +220,7 @@ object PriorityVault {
             runCatching {
                 val filter = IntentFilter().apply {
                     addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
                     addAction(Intent.ACTION_USER_PRESENT)
                 }
                 ContextCompat.registerReceiver(
@@ -194,6 +230,23 @@ object PriorityVault {
                     ContextCompat.RECEIVER_EXPORTED
                 )
                 registeredAppContext = app
+            }
+        }
+    }
+
+    @VisibleForTesting
+    internal fun hasActiveAsyncWorkForTest(): Boolean =
+        inFlightIoCount.get() > 0 || scopeJob.children.any { it.isActive }
+
+    @VisibleForTesting
+    internal fun cancelAndAwaitAsyncForTest(timeoutMs: Long = 3_000L) {
+        val children = scopeJob.children.toList()
+        scopeJob.cancelChildren()
+        if (children.isNotEmpty()) {
+            runBlocking {
+                withTimeoutOrNull(timeoutMs) {
+                    children.forEach { it.join() }
+                }
             }
         }
     }
@@ -323,6 +376,23 @@ object PriorityVault {
         return km?.isDeviceLocked == true
     }
 
+    internal fun isScreenOffOrLocked(context: Context): Boolean {
+        if (simulateDeviceLockedForTest || screenOff) return true
+        val km = runCatching { context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager }.getOrNull()
+        if (km?.isDeviceLocked == true) return true
+        val pm = runCatching { context.getSystemService(Context.POWER_SERVICE) as? PowerManager }.getOrNull()
+        if (pm != null && !pm.isInteractive) return true
+        return false
+    }
+
+    internal fun isSuppressingP3Personnel(): Boolean = suppressP3PersonnelDuringSync
+
+    internal fun isScreenOffOrLockedNoContext(): Boolean {
+        if (simulateDeviceLockedForTest || screenOff) return true
+        val app = registeredAppContext ?: return false
+        return isScreenOffOrLocked(app)
+    }
+
     private fun isDeviceLockedThrowable(t: Throwable?): Boolean {
         var cur = t
         var depth = 0
@@ -407,8 +477,10 @@ object PriorityVault {
 
     private fun unsealJsonFromFile(context: Context, sourceFile: File): String? = synchronized(vaultLock) {
         if (!sourceFile.exists() || sourceFile.length() <= 29L) return null
-        if (isDeviceCurrentlyLocked(context)) {
-            syncDeferredWhileLocked = true
+        if (isScreenOffOrLocked(context)) {
+            if (isDeviceCurrentlyLocked(context)) {
+                syncDeferredWhileLocked = true
+            }
             return null
         }
         val blob = runCatching { sourceFile.readBytes() }.getOrNull() ?: return null
@@ -442,13 +514,16 @@ object PriorityVault {
     fun getPlates(context: Context): List<KokohoHubClient.SyncedPlateRecord> {
         val app = context.applicationContext ?: context
         ensureScreenOffReceiverRegistered(app)
+        if (isScreenOffOrLocked(app)) return emptyList()
         inMemoryPlates?.let { return it }
         synchronized(vaultLock) {
+            if (isScreenOffOrLocked(app)) return emptyList()
             inMemoryPlates?.let { return it }
             val p1File = File(vaultDir(app), P1_PLATES_FILE)
             val json = unsealJsonFromFile(app, p1File) ?: return emptyList()
             val dto = runCatching { gson.fromJson(json, PlatesSyncResponseDto::class.java) }.getOrNull()
             val loaded = dto?.plates.orEmpty()
+            if (isScreenOffOrLocked(app)) return emptyList()
             inMemoryPlates = loaded
             return loaded
         }
@@ -457,9 +532,19 @@ object PriorityVault {
     internal fun getHydratedDirectory(context: Context): HydratedDirectoryData? {
         val app = context.applicationContext ?: context
         ensureScreenOffReceiverRegistered(app)
-        inMemoryHydratedDir?.let { return it }
+        if (isScreenOffOrLocked(app)) return null
+        val allowIntel = DeviceTrustManager.hasIntelligenceAccess(app)
+        if (!suppressP3PersonnelDuringSync) {
+            inMemoryHydratedDir?.takeIf { inMemoryHydratedForIntel == allowIntel }?.let { return it }
+        }
         synchronized(vaultLock) {
-            inMemoryHydratedDir?.let { return it }
+            if (isScreenOffOrLocked(app)) return null
+            val allowIntelNow = DeviceTrustManager.hasIntelligenceAccess(app)
+            val suppressNow = suppressP3PersonnelDuringSync
+            val allowPersonnelNow = allowIntelNow && !suppressNow
+            if (!suppressNow) {
+                inMemoryHydratedDir?.takeIf { inMemoryHydratedForIntel == allowIntelNow }?.let { return it }
+            }
             val dir = vaultDir(app)
             val p2File = File(dir, P2_SECTOR_DIR_FILE)
             val p3File = File(dir, P3_EXT_DIR_FILE)
@@ -472,31 +557,44 @@ object PriorityVault {
             val p2 = inMemoryP2 ?: if (hasP2) {
                 val j2 = unsealJsonFromFile(app, p2File) ?: return null
                 runCatching { gson.fromJson(j2, DirectoryTierSyncDto::class.java) }.getOrNull()?.also {
-                    inMemoryP2 = it
+                    if (!isScreenOffOrLocked(app)) {
+                        inMemoryP2 = it
+                    }
                 }
             } else {
                 null
             }
 
-            val p3 = inMemoryP3 ?: if (hasP3) {
-                val j3 = unsealJsonFromFile(app, p3File) ?: return null
-                runCatching { gson.fromJson(j3, DirectoryTierSyncDto::class.java) }.getOrNull()?.also {
-                    inMemoryP3 = it
-                }
-            } else {
+            val p3 = if (suppressNow) {
                 null
+            } else {
+                inMemoryP3 ?: if (hasP3) {
+                    val j3 = unsealJsonFromFile(app, p3File) ?: return null
+                    runCatching { gson.fromJson(j3, DirectoryTierSyncDto::class.java) }.getOrNull()?.also {
+                        if (!isScreenOffOrLocked(app)) {
+                            inMemoryP3 = it
+                        }
+                    }
+                } else {
+                    null
+                }
             }
 
+            if (isScreenOffOrLocked(app)) return null
             if (p2 == null && p3 == null) return null
-            val hydrated = buildHydratedDirectory(p2, p3)
-            inMemoryHydratedDir = hydrated
+            val hydrated = buildHydratedDirectory(p2, p3, allowPersonnel = allowPersonnelNow)
+            if (!suppressNow) {
+                inMemoryHydratedDir = hydrated
+                inMemoryHydratedForIntel = allowIntelNow
+            }
             return hydrated
         }
     }
 
     private fun buildHydratedDirectory(
         p2: DirectoryTierSyncDto?,
-        p3: DirectoryTierSyncDto?
+        p3: DirectoryTierSyncDto?,
+        allowPersonnel: Boolean
     ): HydratedDirectoryData {
         val locList = ArrayList<KokohoDirectory.FacilityLocation>()
         for (dto in p2?.locations.orEmpty() + p3?.locations.orEmpty()) {
@@ -511,6 +609,17 @@ object PriorityVault {
                 description = dto.description.trim(),
                 locationGroup = dto.locationGroup.trim().ifEmpty { "FEDERAL" },
                 stateCode = dto.stateCode.trim().ifEmpty { "AZ" }
+            )
+        }
+
+        if (!allowPersonnel) {
+            return HydratedDirectoryData(
+                locations = locList,
+                orderedPersons = emptyList(),
+                personsById = emptyMap(),
+                personsByLocation = emptyMap(),
+                managerByReportId = emptyMap(),
+                reportsByManagerId = emptyMap()
             )
         }
 
@@ -613,11 +722,20 @@ object PriorityVault {
     fun syncAllAsync(context: Context, onComplete: ((Boolean) -> Unit)? = null) {
         val app = context.applicationContext ?: context
         ensureScreenOffReceiverRegistered(app)
-        scope.launch {
-            val ok = syncAllBlocking(app)
+        inFlightIoCount.incrementAndGet()
+        val job = scope.launch {
+            val ok = try {
+                syncAllBlocking(app)
+            } finally {
+                inFlightIoCount.decrementAndGet()
+                DeviceTrustManager.notifyAsyncIdleForTest()
+            }
             if (onComplete != null) {
                 withContext(Dispatchers.Main) { onComplete(ok) }
             }
+        }
+        job.invokeOnCompletion {
+            DeviceTrustManager.notifyAsyncIdleForTest()
         }
     }
 
@@ -627,12 +745,21 @@ object PriorityVault {
     ) {
         val app = context.applicationContext ?: context
         ensureScreenOffReceiverRegistered(app)
-        scope.launch {
-            syncP1PlatesBlocking(app)
-            val plates = getPlates(app)
+        inFlightIoCount.incrementAndGet()
+        val job = scope.launch {
+            val plates = try {
+                syncP1PlatesBlocking(app)
+                getPlates(app)
+            } finally {
+                inFlightIoCount.decrementAndGet()
+                DeviceTrustManager.notifyAsyncIdleForTest()
+            }
             if (onComplete != null) {
                 withContext(Dispatchers.Main) { onComplete(plates) }
             }
+        }
+        job.invokeOnCompletion {
+            DeviceTrustManager.notifyAsyncIdleForTest()
         }
     }
 
@@ -664,18 +791,83 @@ object PriorityVault {
 
         val ok1 = syncP1Internal(app)
         if (!DeviceTrustManager.isEnrolled(app)) return false
-        val ok2 = syncTierInternal(app, tierName = "p2_sector_dir", fileName = P2_SECTOR_DIR_FILE, isP2 = true)
-        if (!DeviceTrustManager.isEnrolled(app)) return false
-        val ok3 = syncTierInternal(app, tierName = "p3_ext_dir", fileName = P3_EXT_DIR_FILE, isP2 = false)
 
-        if (ok1 && ok2 && ok3 && !isDeviceCurrentlyLocked(app)) {
+        var p2Res = TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
+        var p3Res = TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
+        var purgedStaleP3 = false
+        var clearedSuppression = false
+        try {
+            p2Res = syncTierInternal(app, tierName = "p2_sector_dir", fileName = P2_SECTOR_DIR_FILE, isP2 = true)
+            if (!DeviceTrustManager.isEnrolled(app)) return false
+
+            p3Res = syncTierInternal(app, tierName = "p3_ext_dir", fileName = P3_EXT_DIR_FILE, isP2 = false)
+
+            val p2LocationsOnly = p2Res.isLocationsOnlyP2 || isLoadedP2LocationsOnly(app)
+            if (p2LocationsOnly && !p3Res.ok) {
+                purgedStaleP3 = purgeStaleP3TierLocked(app)
+            }
+        } finally {
+            synchronized(vaultLock) {
+                if (suppressP3PersonnelDuringSync) {
+                    suppressP3PersonnelDuringSync = false
+                    inMemoryHydratedDir = null
+                    inMemoryHydratedForIntel = false
+                    clearedSuppression = true
+                }
+            }
+        }
+
+        if (p2Res.changed || p3Res.changed || purgedStaleP3 || clearedSuppression) {
+            revisionCounter.incrementAndGet()
+            if (!isScreenOffOrLocked(app)) {
+                KokohoDirectory.onVaultTierUpdated(app)
+            }
+        }
+
+        if (ok1 && p2Res.ok && p3Res.ok && !isDeviceCurrentlyLocked(app)) {
             syncDeferredWhileLocked = false
         }
         DeviceTrustManager.notifyTrustStateListeners(app)
-        return ok1 || ok2 || ok3
+        return ok1 || p2Res.ok || p3Res.ok
+    }
+
+    private fun isLoadedP2LocationsOnly(app: Context): Boolean = synchronized(vaultLock) {
+        val p2 = inMemoryP2 ?: run {
+            val p2File = File(vaultDir(app), P2_SECTOR_DIR_FILE)
+            val raw = unsealJsonFromFile(app, p2File) ?: return@run null
+            runCatching { gson.fromJson(raw, DirectoryTierSyncDto::class.java) }.getOrNull()?.also {
+                if (!isScreenOffOrLocked(app)) {
+                    inMemoryP2 = it
+                }
+            }
+        }
+        p2 != null && p2.locations.isNotEmpty() && p2.persons.isEmpty()
+    }
+
+    private fun purgeStaleP3TierLocked(app: Context): Boolean = synchronized(vaultLock) {
+        var purged = false
+        if (inMemoryP3 != null || inMemoryHydratedDir != null || inMemoryHydratedForIntel) {
+            inMemoryP3 = null
+            inMemoryHydratedDir = null
+            inMemoryHydratedForIntel = false
+            purged = true
+        }
+        val p3File = File(vaultDir(app), P3_EXT_DIR_FILE)
+        if (p3File.exists()) {
+            if (runCatching { p3File.delete() }.getOrDefault(false)) {
+                purged = true
+            }
+        }
+        val curMeta = readVaultMeta(app)
+        if (curMeta.p3Etag.isNotEmpty()) {
+            writeVaultMeta(app, curMeta.copy(p3Etag = ""))
+            purged = true
+        }
+        purged
     }
 
     private fun syncP1Internal(app: Context): Boolean {
+        val startDowngradeEpoch = downgradeEpoch.get()
         var meta = readVaultMeta(app)
         val p1File = File(vaultDir(app), P1_PLATES_FILE)
         val effectiveSince = if (p1File.exists() && p1File.length() > 29L) meta.p1SinceMs.coerceAtLeast(0L) else 0L
@@ -697,10 +889,17 @@ object PriorityVault {
                 serverTimeMs = nextServerTime,
                 plates = dto.plates
             )
-            val outcome = sealJsonToFile(app, p1File, gson.toJson(toSeal))
+            val outcome = synchronized(vaultLock) {
+                if (!DeviceTrustManager.isEnrolled(app) || downgradeEpoch.get() != startDowngradeEpoch) {
+                    return false
+                }
+                sealJsonToFile(app, p1File, gson.toJson(toSeal))
+            }
             if (outcome != SealOutcome.SEALED) return false
             synchronized(vaultLock) {
-                inMemoryPlates = dto.plates
+                if (!isScreenOffOrLocked(app)) {
+                    inMemoryPlates = dto.plates
+                }
             }
             meta = readVaultMeta(app).copy(p1SinceMs = nextServerTime)
             writeVaultMeta(app, meta)
@@ -746,10 +945,17 @@ object PriorityVault {
             serverTimeMs = nextServerTime,
             plates = mergedList
         )
-        val outcome = sealJsonToFile(app, p1File, gson.toJson(toSeal))
+        val outcome = synchronized(vaultLock) {
+            if (!DeviceTrustManager.isEnrolled(app) || downgradeEpoch.get() != startDowngradeEpoch) {
+                return false
+            }
+            sealJsonToFile(app, p1File, gson.toJson(toSeal))
+        }
         if (outcome != SealOutcome.SEALED) return false
         synchronized(vaultLock) {
-            inMemoryPlates = mergedList
+            if (!isScreenOffOrLocked(app)) {
+                inMemoryPlates = mergedList
+            }
         }
         meta = readVaultMeta(app).copy(p1SinceMs = nextServerTime)
         writeVaultMeta(app, meta)
@@ -762,7 +968,8 @@ object PriorityVault {
         tierName: String,
         fileName: String,
         isP2: Boolean
-    ): Boolean {
+    ): TierSyncResult {
+        val startDowngradeEpoch = downgradeEpoch.get()
         val meta = readVaultMeta(app)
         val tierFile = File(vaultDir(app), fileName)
         val prevEtag = if (isP2) meta.p2Etag else meta.p3Etag
@@ -776,38 +983,116 @@ object PriorityVault {
             app,
             "/v1/sync/tier/$tierName",
             extraHeaders = extraHeaders
-        ) ?: return false
+        ) ?: return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
 
         if (resp.code == 304) {
-            return true
+            var p2LocOnly = false
+            synchronized(vaultLock) {
+                if (!DeviceTrustManager.isEnrolled(app) || downgradeEpoch.get() != startDowngradeEpoch) {
+                    return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
+                }
+                if (isP2) {
+                    val p2 = inMemoryP2 ?: run {
+                        val raw = unsealJsonFromFile(app, tierFile)
+                        if (raw != null) runCatching { gson.fromJson(raw, DirectoryTierSyncDto::class.java) }.getOrNull() else null
+                    }
+                    p2LocOnly = p2 != null && p2.locations.isNotEmpty() && p2.persons.isEmpty()
+                    if (p2LocOnly) {
+                        suppressP3PersonnelDuringSync = true
+                        inMemoryHydratedDir = null
+                        inMemoryHydratedForIntel = false
+                        revisionCounter.incrementAndGet()
+                    }
+                }
+            }
+            if (p2LocOnly) {
+                if (!isScreenOffOrLocked(app)) {
+                    KokohoDirectory.onVaultTierUpdated(app)
+                } else {
+                    KokohoDirectory.clearInMemoryVaultCache()
+                }
+            }
+            return TierSyncResult(ok = true, changed = false, isLocationsOnlyP2 = p2LocOnly)
         }
         if (resp.code !in 200..299 || resp.body.isNullOrBlank()) {
-            return false
+            return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
         }
 
         val dto = runCatching { gson.fromJson(resp.body, DirectoryTierSyncDto::class.java) }.getOrNull()
-            ?: return false
+            ?: return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
+        val hasLeakPayload = dto.persons.isNotEmpty() || dto.edges.isNotEmpty()
+        val p2LocOnly = isP2 && dto.locations.isNotEmpty() && dto.persons.isEmpty()
         val canonicalJson = gson.toJson(dto)
-        val outcome = sealJsonToFile(app, tierFile, canonicalJson)
-        if (outcome != SealOutcome.SEALED) return false
-
         val resolvedEtag = dto.etag.ifBlank { resp.etag.orEmpty() }.trim().trim('"')
-        val updatedMeta = readVaultMeta(app).let { cur ->
-            if (isP2) cur.copy(p2Etag = resolvedEtag) else cur.copy(p3Etag = resolvedEtag)
-        }
-        writeVaultMeta(app, updatedMeta)
 
         synchronized(vaultLock) {
-            if (isP2) {
-                inMemoryP2 = dto
-            } else {
-                inMemoryP3 = dto
+            val enrolledNow = DeviceTrustManager.isEnrolled(app)
+            val allowIntelNow = DeviceTrustManager.hasIntelligenceAccess(app)
+            if (!enrolledNow ||
+                downgradeEpoch.get() != startDowngradeEpoch ||
+                (hasLeakPayload && !allowIntelNow)
+            ) {
+                return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
             }
+            val outcome = sealJsonToFile(app, tierFile, canonicalJson)
+            if (outcome != SealOutcome.SEALED) {
+                return TierSyncResult(ok = false, changed = false, isLocationsOnlyP2 = false)
+            }
+            val updatedMeta = readVaultMeta(app).let { cur ->
+                if (isP2) cur.copy(p2Etag = resolvedEtag) else cur.copy(p3Etag = resolvedEtag)
+            }
+            writeVaultMeta(app, updatedMeta)
             inMemoryHydratedDir = null
+            inMemoryHydratedForIntel = false
+            if (!isScreenOffOrLocked(app)) {
+                if (isP2) {
+                    inMemoryP2 = dto
+                    if (p2LocOnly) {
+                        suppressP3PersonnelDuringSync = true
+                        revisionCounter.incrementAndGet()
+                    }
+                } else {
+                    inMemoryP3 = dto
+                }
+            } else if (isP2 && p2LocOnly) {
+                suppressP3PersonnelDuringSync = true
+                revisionCounter.incrementAndGet()
+            }
+        }
+        if (isP2 && p2LocOnly) {
+            if (!isScreenOffOrLocked(app)) {
+                KokohoDirectory.onVaultTierUpdated(app)
+            } else {
+                KokohoDirectory.clearInMemoryVaultCache()
+            }
+        }
+        return TierSyncResult(ok = true, changed = true, isLocationsOnlyP2 = p2LocOnly)
+    }
+
+    /**
+     * Purges sealed directory tiers (`p2_sector_dir.seal`, `p3_ext_dir.seal`) and resets their ETags
+     * upon live downgrade (loss of `INTELLIGENCE` / `OWNER`) while preserving `p1_plates.seal`,
+     * `p1SinceMs`, and the hardware keystore key for continued `RESPONDER` operation.
+     */
+    fun purgeDirectoryTiersOnDowngrade(context: Context) {
+        val app = context.applicationContext ?: context
+        downgradeEpoch.incrementAndGet()
+        synchronized(vaultLock) {
+            inMemoryP2 = null
+            inMemoryP3 = null
+            inMemoryHydratedDir = null
+            inMemoryHydratedForIntel = false
+            suppressP3PersonnelDuringSync = false
+            val dir = vaultDir(app)
+            runCatching { File(dir, P2_SECTOR_DIR_FILE).delete() }
+            runCatching { File(dir, P3_EXT_DIR_FILE).delete() }
+            val curMeta = readVaultMeta(app)
+            if (curMeta.p2Etag.isNotEmpty() || curMeta.p3Etag.isNotEmpty()) {
+                writeVaultMeta(app, curMeta.copy(p2Etag = "", p3Etag = ""))
+            }
         }
         revisionCounter.incrementAndGet()
-        KokohoDirectory.onVaultTierUpdated(app)
-        return true
+        KokohoDirectory.clearInMemoryVaultCache()
     }
 
     /**
@@ -820,6 +1105,7 @@ object PriorityVault {
             inMemoryP2 = null
             inMemoryP3 = null
             inMemoryHydratedDir = null
+            inMemoryHydratedForIntel = false
         }
         revisionCounter.incrementAndGet()
         KokohoHubClient.clearInMemoryPlatesCache()
@@ -833,12 +1119,16 @@ object PriorityVault {
      */
     fun destroyVaultKeyAndFiles(context: Context) {
         val app = context.applicationContext ?: context
+        downgradeEpoch.incrementAndGet()
         synchronized(vaultLock) {
             inMemoryPlates = null
             inMemoryP2 = null
             inMemoryP3 = null
             inMemoryHydratedDir = null
+            inMemoryHydratedForIntel = false
+            suppressP3PersonnelDuringSync = false
             syncDeferredWhileLocked = false
+            screenOff = false
             robolectricTestKeyBytes?.fill(0)
             robolectricTestKeyBytes = null
 

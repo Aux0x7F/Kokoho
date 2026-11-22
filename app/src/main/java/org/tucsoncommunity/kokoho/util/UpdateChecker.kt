@@ -199,6 +199,7 @@ object UpdateChecker {
         val cleanPath = if (manifestPath.startsWith("/")) manifestPath else "/$manifestPath"
         val sep = if ('?' in cleanPath) '&' else '?'
         val url = "$base$cleanPath${sep}pkg=$pkg&vc=${BuildConfig.VERSION_CODE}&ch=${Uri.encode(BuildConfig.RELEASE_CHANNEL)}"
+        var signedTag: DeviceTrustManager.SignedRequestTag? = null
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8_000
             readTimeout = 10_000
@@ -206,14 +207,21 @@ object UpdateChecker {
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Cache-Control", "no-cache")
             setRequestProperty("User-Agent", "${context.packageName}/${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-            DeviceTrustManager.attachSignedHeaders(context, this)
+            signedTag = DeviceTrustManager.attachSignedHeadersWithTag(context, this)
         }
         try {
             val code = conn.responseCode
             if (code != 200) {
                 val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
                 val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
-                DeviceTrustManager.inspectResponseForRevocation(context, code, seatHdr, err)
+                DeviceTrustManager.inspectResponseForRevocationIfCurrent(
+                    context = context,
+                    httpCode = code,
+                    seatStatusHeader = seatHdr,
+                    errorBody = err,
+                    expectedEpoch = signedTag?.epoch,
+                    expectedSeatId = signedTag?.seatId
+                )
                 throw IllegalStateException("Update server answered HTTP $code")
             }
             val text = conn.inputStream.bufferedReader().use { it.readText() }

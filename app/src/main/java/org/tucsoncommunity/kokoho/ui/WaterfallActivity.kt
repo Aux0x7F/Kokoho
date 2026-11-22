@@ -112,7 +112,7 @@ class WaterfallActivity : AppCompatActivity() {
                 if (!isFinishing && !isDestroyed) {
                     MaterialAlertDialogBuilder(this)
                         .setTitle("Antenna check")
-                        .setMessage(r.verdict + "\n\nMeasured on FM radio (87.5–108 MHz) and NOAA weather radio (162.400–162.550 MHz).")
+                        .setMessage(r.verdict + "\n\nMeasured on FM radio (87.5-108 MHz) and NOAA weather radio (162.400-162.550 MHz).")
                         .setPositiveButton("OK", null)
                         .show()
                 }

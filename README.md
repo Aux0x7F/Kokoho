@@ -14,7 +14,7 @@
 Kokoho correlates observations across three passive receive paths against bundled and user-imported signature tables (`assets/kokoho_signatures.json`):
 
 - **VHF / UHF / 800 MHz RF & P25 (`org.tucsoncommunity.kokoho.sdr`):**
-  Drives attached USB OTG RTL-SDR dongles (`RtlSdr.kt`) or local `rtl_tcp` streams (`RtlTcp.kt`) to sweep conventional federal allocations (162–174 MHz, 406–420 MHz) and decode P25 Phase 1 Trunking Signalling Blocks (`P25Tsbk.kt`, `P25Demod.kt`) for Network Access Codes (NAC) and talkgroup IDs (including PCWIN regional trunked talkgroups).
+  Drives attached USB OTG RTL-SDR dongles (`RtlSdr.kt`) or local `rtl_tcp` streams (`RtlTcp.kt`) to sweep conventional federal allocations (162-174 MHz, 406-420 MHz) and decode P25 Phase 1 Trunking Signalling Blocks (`P25Tsbk.kt`, `P25Demod.kt`) for Network Access Codes (NAC) and talkgroup IDs (including PCWIN regional trunked talkgroups).
 - **Fleet Wi-Fi & Bluetooth LE OUIs (`org.tucsoncommunity.kokoho.service`, `org.tucsoncommunity.kokoho.detect`):**
   Passively scans 802.11 beacons/probes and BLE advertisements for mobile routers, ruggedized terminals, and tactical radios (e.g., Cradlepoint, Sierra Wireless, Motorola APX/Astro, Axon fleet hardware). Colocated OUI sightings within a 90-second window fuse with concurrent RF detections into a single correlated entity track.
 - **ADS-B Aircraft Telemetry (`org.tucsoncommunity.kokoho.online.PoliceAircraft`, `org.tucsoncommunity.kokoho.sdr.AdsbTracker`):**
@@ -47,11 +47,11 @@ By default, filtering is scoped to **DHS** sub-agencies (**CBP**, **ICE**, **HSI
 
 ## Repository Structure
 
-- `app/src/main/java/org/tucsoncommunity/kokoho/posture/` — Posture engine, offline triangulation, agency signature matcher, Auxnet SSE/check-in client, and 3-tab UI controller (`Monitor` | `Map` | `Utility`).
-- `app/src/main/java/org/tucsoncommunity/kokoho/ui/` — MapLibre dark vector map (`RfMap.kt`), Entity Details view with inline local classification editing and `1/4`-screen radius map (`DeviceDetailActivity.kt`), and unified detection/telemetry logs (`DetectionLogActivity.kt`).
-- `app/src/main/java/org/tucsoncommunity/kokoho/sdr/` — RTL-SDR USB host driver, P25 Phase 1 TSBK control channel decoder, waterfall spectrum view, and NOAA antenna check.
-- `app/src/main/java/org/tucsoncommunity/kokoho/settings/` — Searchable Settings activity (agency toggles, ADS-B aircraft scope, signal decay time, privacy controls, RadioReference CSV/TSV channel import, and imperial/metric units).
-- `app/src/main/assets/kokoho_signatures.json` — Bundled Tucson sector VHF/UHF frequencies, P25 NACs, PCWIN talkgroups, and fleet hardware OUIs.
+- `app/src/main/java/org/tucsoncommunity/kokoho/posture/` - Posture engine, offline triangulation, agency signature matcher, Auxnet SSE/check-in client, and 3-tab UI controller (`Monitor` | `Map` | `Utility`).
+- `app/src/main/java/org/tucsoncommunity/kokoho/ui/` - MapLibre dark vector map (`RfMap.kt`), Entity Details view with inline local classification editing and `1/4`-screen radius map (`DeviceDetailActivity.kt`), and unified detection/telemetry logs (`DetectionLogActivity.kt`).
+- `app/src/main/java/org/tucsoncommunity/kokoho/sdr/` - RTL-SDR USB host driver, P25 Phase 1 TSBK control channel decoder, waterfall spectrum view, and NOAA antenna check.
+- `app/src/main/java/org/tucsoncommunity/kokoho/settings/` - Searchable Settings activity (agency toggles, ADS-B aircraft scope, signal decay time, privacy controls, RadioReference CSV/TSV channel import, and imperial/metric units).
+- `app/src/main/assets/kokoho_signatures.json` - Bundled Tucson sector VHF/UHF frequencies, P25 NACs, PCWIN talkgroups, and fleet hardware OUIs.
 
 ---
 

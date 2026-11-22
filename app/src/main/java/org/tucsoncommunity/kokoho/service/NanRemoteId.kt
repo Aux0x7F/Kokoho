@@ -28,7 +28,7 @@ import org.tucsoncommunity.kokoho.detect.Advert
  * Apache-2.0: written anew here). A passive subscription to the "org.opendroneid.remoteid"
  * service: listen only, nothing is published or sent to the drone.
  *
- * Hardened against Android 14–17 `HalDevMgr` concurrency rejections (`ifaceType=4` when STA +
+ * Hardened against Android 14-17 `HalDevMgr` concurrency rejections (`ifaceType=4` when STA +
  * AP_BRIDGE hotspot are active concurrently):
  *  - Runs all `WifiAwareManager` Binder IPC on a dedicated background [HandlerThread] (never on the UI thread).
  *  - Enforces single-flight [attaching] state + minimum attach cooldown ([MIN_ATTACH_GAP_MS]) +

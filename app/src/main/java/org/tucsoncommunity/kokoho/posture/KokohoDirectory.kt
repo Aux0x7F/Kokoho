@@ -102,12 +102,31 @@ object KokohoDirectory {
     @Volatile
     private var legacyFilesCleaned = false
 
+    @Volatile
+    private var hydratedForIntelligence = false
+
+    @Volatile
+    private var hydratedForUnlocked = false
+
+    @Volatile
+    private var hydratedWhileSuppressingP3 = false
+
     private var locationsMap: Map<String, FacilityLocation> = emptyMap()
     private var locationsList: List<FacilityLocation> = emptyList()
     private val userPersons = ConcurrentHashMap<String, PersonRecord>()
 
     val isDirectoryAvailable: Boolean
-        get() = hydratedVaultDir != null
+        get() = !PriorityVault.isSuppressingP3Personnel() &&
+            !PriorityVault.isScreenOffOrLockedNoContext() &&
+            hydratedVaultDir?.orderedPersons?.isNotEmpty() == true
+
+    fun isPersonnelDirectoryAvailable(context: Context): Boolean {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) {
+            return false
+        }
+        ensureLoaded(context)
+        return isDirectoryAvailable || (!PriorityVault.isScreenOffOrLocked(context) && userPersons.isNotEmpty())
+    }
 
     /**
      * Fast capability check indicating whether this install is enrolled on a Hub seat or holds
@@ -120,6 +139,9 @@ object KokohoDirectory {
     fun invalidateForReload() {
         initialized = false
         hydratedRevision = -1L
+        hydratedForIntelligence = false
+        hydratedForUnlocked = false
+        hydratedWhileSuppressingP3 = false
         visibleCacheKey = ""
     }
 
@@ -128,6 +150,9 @@ object KokohoDirectory {
         initialized = false
         hydratedVaultDir = null
         hydratedRevision = -1L
+        hydratedForIntelligence = false
+        hydratedForUnlocked = false
+        hydratedWhileSuppressingP3 = false
         visibleCacheKey = ""
         ensureLoaded(context)
     }
@@ -136,9 +161,13 @@ object KokohoDirectory {
     fun clearInMemoryVaultCache() {
         hydratedVaultDir = null
         hydratedRevision = -1L
+        hydratedForIntelligence = false
+        hydratedForUnlocked = false
+        hydratedWhileSuppressingP3 = false
         initialized = false
         locationsMap = emptyMap()
         locationsList = emptyList()
+        userPersons.clear()
         visibleCacheKey = ""
         visibleCacheList = emptyList()
     }
@@ -184,8 +213,17 @@ object KokohoDirectory {
             deleteLegacyDbArtifacts(app)
         }
 
+        val allowIntel = DeviceTrustManager.hasIntelligenceAccess(app)
+        val screenLocked = PriorityVault.isScreenOffOrLocked(app)
+        val suppressingP3 = PriorityVault.isSuppressingP3Personnel()
         val currentRev = PriorityVault.vaultDataRevision
-        if (initialized && locationsList.isNotEmpty()) {
+        if (initialized &&
+            locationsList.isNotEmpty() &&
+            hydratedForIntelligence == allowIntel &&
+            hydratedForUnlocked == !screenLocked &&
+            hydratedWhileSuppressingP3 == suppressingP3 &&
+            !suppressingP3
+        ) {
             if (hydratedVaultDir != null && hydratedRevision == currentRev) {
                 return
             }
@@ -232,8 +270,15 @@ object KokohoDirectory {
             }
         }
 
-        // 3. Load user-submitted local person records
-        loadUserPersons(app)
+        // 3. Load user-submitted local person records (strictly gated to Intelligence / Owner while unlocked)
+        if (allowIntel && !screenLocked) {
+            loadUserPersons(app)
+        } else {
+            userPersons.clear()
+        }
+        hydratedForIntelligence = allowIntel
+        hydratedForUnlocked = !screenLocked
+        hydratedWhileSuppressingP3 = suppressingP3
 
         locationsMap = mergedLocations
         locationsList = mergedLocations.values.toList()
@@ -302,6 +347,7 @@ object KokohoDirectory {
     }
 
     fun stationedPersonnelCount(context: Context, locationId: String): Int {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return 0
         ensureLoaded(context)
         val canonLoc = canonicalLocationId(locationId)
         val vaultRows = hydratedVaultDir?.personsByLocation?.get(canonLoc).orEmpty()
@@ -318,6 +364,7 @@ object KokohoDirectory {
         pills: List<String> = emptyList(),
         liveQuery: String = ""
     ): List<PersonRecord> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         ensureLoaded(context)
         val canonLoc = canonicalLocationId(locationId)
         val rows = ArrayList<PersonRecord>()
@@ -348,6 +395,7 @@ object KokohoDirectory {
         existingPills: List<String>,
         limit: Int = 8
     ): List<String> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         val q = prefix.trim().lowercase(Locale.US)
         if (q.isEmpty()) return emptyList()
         val existingSet = existingPills.map { it.trim().lowercase(Locale.US) }.toSet()
@@ -386,6 +434,7 @@ object KokohoDirectory {
         agencyHint: KokohoAgency? = null,
         limit: Int = 20
     ): List<PersonRecord> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         ensureLoaded(context)
         val q = query.trim().lowercase(Locale.US)
         if (q.isEmpty()) return emptyList()
@@ -421,6 +470,7 @@ object KokohoDirectory {
     }
 
     fun browsePersons(context: Context, limit: Int = 20): List<PersonRecord> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         ensureLoaded(context)
         val cap = limit.coerceAtLeast(1)
         val results = ArrayList<PersonRecord>(cap)
@@ -445,6 +495,7 @@ object KokohoDirectory {
         tokens: List<String>,
         limit: Int = 40
     ): List<PersonRecord> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         ensureLoaded(context)
         val cleanTokens = tokens
             .flatMap { it.trim().lowercase(Locale.US).split(Regex("\\s+")) }
@@ -490,6 +541,7 @@ object KokohoDirectory {
         existingSetLower: Set<String>,
         limit: Int = 5
     ): List<String> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         val q = prefix.trim().lowercase(Locale.US)
         if (q.length < 2) return emptyList()
         val matches = searchPersons(context, q, limit = 24)
@@ -509,6 +561,7 @@ object KokohoDirectory {
     }
 
     fun personById(context: Context, personId: String): PersonRecord? {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return null
         ensureLoaded(context)
         val clean = canonicalPersonId(personId)
         userPersons[clean]?.let { return it }
@@ -516,6 +569,7 @@ object KokohoDirectory {
     }
 
     fun managedBy(context: Context, personId: String): PersonRecord? {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return null
         ensureLoaded(context)
         val clean = canonicalPersonId(personId)
         val userRec = userPersons[clean]
@@ -533,6 +587,7 @@ object KokohoDirectory {
     }
 
     fun manages(context: Context, personId: String): List<PersonRecord> {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return emptyList()
         ensureLoaded(context)
         val clean = canonicalPersonId(personId)
         val out = ArrayList<PersonRecord>()
@@ -551,6 +606,7 @@ object KokohoDirectory {
     }
 
     fun saveUserPerson(context: Context, person: PersonRecord) {
+        if (!DeviceTrustManager.hasIntelligenceAccess(context) || PriorityVault.isScreenOffOrLocked(context)) return
         ensureLoaded(context)
         userPersons[person.personId] = person
         persistUserPersons(context)

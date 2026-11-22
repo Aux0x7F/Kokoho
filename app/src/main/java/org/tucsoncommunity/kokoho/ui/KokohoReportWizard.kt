@@ -19,6 +19,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.doAfterTextChanged
+import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
 import org.tucsoncommunity.kokoho.posture.KokohoAgency
 import org.tucsoncommunity.kokoho.posture.KokohoDirectory
 import org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
@@ -447,7 +448,7 @@ object KokohoReportWizard {
             if (suppressAutocomplete) return@doAfterTextChanged
             val q = ed?.toString()?.trim().orEmpty()
             suggestionsBox.removeAllViews()
-            if (q.length < 2) {
+            if (q.length < 2 || !DeviceTrustManager.hasIntelligenceAccess(activity)) {
                 suggestionsBox.visibility = View.GONE
                 return@doAfterTextChanged
             }
@@ -683,9 +684,9 @@ object KokohoReportWizard {
             val accVal = if (selectedSubject == SubjectKind.ACCESSORY) selectedAccessoryType else ""
             val notesVal = notesInput.text?.toString()?.trim().orEmpty()
 
-            var resolvedPid = selectedPersonId
-            if (selectedSubject == SubjectKind.AGENT && nameVal.isNotEmpty()) {
-                val pid = resolvedPid ?: "user-${UUID.randomUUID().toString().take(8)}"
+            var resolvedPid: String? = null
+            if (selectedSubject == SubjectKind.AGENT && nameVal.isNotEmpty() && DeviceTrustManager.hasIntelligenceAccess(activity)) {
+                val pid = selectedPersonId ?: "user-${UUID.randomUUID().toString().take(8)}"
                 resolvedPid = pid
                 val existingPerson = KokohoDirectory.personById(activity, pid)
                 KokohoDirectory.saveUserPerson(

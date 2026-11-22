@@ -7,14 +7,19 @@ import android.os.Looper
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.edit
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import java.io.File
 import java.io.RandomAccessFile
 import java.math.BigInteger
@@ -35,7 +40,10 @@ import java.security.interfaces.ECPrivateKey
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.Mac
@@ -64,6 +72,8 @@ object DeviceTrustManager {
     private const val PREFS = "kokoho_trust_prefs"
     private const val KEY_STATUS = "trust_status"
     private const val KEY_ROLE = "trust_role"
+    private const val KEY_ROLES = "trust_roles"
+    private const val KEY_AFFINITY_GROUP = "trust_affinity_group"
     private const val KEY_LABEL = "trust_label"
     private const val KEY_IMPORTED_APK_STAMP = "imported_apk_stamp"
 
@@ -84,7 +94,9 @@ object DeviceTrustManager {
         @SerializedName("status") val status: String = "",
         @SerializedName("seat_id") val seatId: String = "",
         @SerializedName("slug") val slug: String = "",
-        @SerializedName("role") val role: String = "MEMBER",
+        @SerializedName("role") val role: String = "RESPONDER",
+        @SerializedName("roles") val roles: List<String> = emptyList(),
+        @SerializedName("affinity_group") val affinityGroup: String? = null,
         @SerializedName("label") val label: String = "",
         @SerializedName("message") val message: String? = null
     )
@@ -115,13 +127,48 @@ object DeviceTrustManager {
     private class ActiveSessionKey(
         val kid: String,
         val aeadKey: ByteArray,
-        val expiresAtMs: Long
+        val expiresAtMs: Long,
+        val seatId: String,
+        val epoch: Long
+    )
+
+    internal data class SignedRequestTag(
+        val epoch: Long,
+        val seatId: String
+    )
+
+    private data class AuthOutcomeResult(
+        val dto: AuthResponseDto?,
+        val committed: Boolean,
+        val nextExpectedEpoch: Long?,
+        val superseded: Boolean
+    )
+
+    private data class LaunchSnapshot(
+        val launchEpoch: Long,
+        val seat: SeatIdentity?,
+        val wasEnrolled: Boolean,
+        val claimActive: Boolean
+    )
+
+    private data class SessionKeyNegotiationError(
+        val code: Int,
+        val seatHeader: String?,
+        val errorBody: String?,
+        val reqEpoch: Long,
+        val reqSeatId: String
     )
 
     private val gson = Gson()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scopeJob = SupervisorJob()
+    private val scope = CoroutineScope(scopeJob + Dispatchers.IO)
     private val keyLock = Any()
     private val sessionLock = Any()
+    private val trustMutationLock = Any()
+    private val asyncIdleLock = Object()
+    private val inFlightIoCount = AtomicInteger(0)
+    private val activeClaimCount = AtomicInteger(0)
+    private val authMutationEpoch = AtomicLong(0L)
     private val trustListeners = CopyOnWriteArrayList<() -> Unit>()
 
     @Volatile
@@ -129,6 +176,49 @@ object DeviceTrustManager {
 
     @Volatile
     private var fallbackJvmKeyPair: KeyPair? = null
+
+    internal fun notifyAsyncIdleForTest() {
+        synchronized(asyncIdleLock) {
+            asyncIdleLock.notifyAll()
+        }
+    }
+
+    @VisibleForTesting
+    internal fun hasActiveAsyncWorkForTest(): Boolean =
+        inFlightIoCount.get() > 0 || scopeJob.children.any { it.isActive }
+
+    @VisibleForTesting
+    internal fun trustListenerCountForTest(): Int = trustListeners.size
+
+    @VisibleForTesting
+    internal fun clearTrustListenersForTest() {
+        trustListeners.clear()
+    }
+
+    @VisibleForTesting
+    internal fun awaitAsyncIdleForTest(
+        timeoutMs: Long = 5_000L,
+        drainMainLooper: () -> Unit = {}
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            drainMainLooper()
+            val busy = hasActiveAsyncWorkForTest() || PriorityVault.hasActiveAsyncWorkForTest()
+            if (!busy) {
+                drainMainLooper()
+                if (!hasActiveAsyncWorkForTest() && !PriorityVault.hasActiveAsyncWorkForTest()) {
+                    return true
+                }
+            }
+            synchronized(asyncIdleLock) {
+                if (hasActiveAsyncWorkForTest() || PriorityVault.hasActiveAsyncWorkForTest()) {
+                    runCatching { asyncIdleLock.wait(10L) }
+                }
+            }
+        }
+        drainMainLooper()
+        return !hasActiveAsyncWorkForTest() && !PriorityVault.hasActiveAsyncWorkForTest()
+    }
 
     fun addTrustStateListener(listener: () -> Unit): () -> Unit {
         trustListeners.add(listener)
@@ -150,13 +240,106 @@ object DeviceTrustManager {
         }
     }
 
+    private fun normalizeRoleToken(raw: String?): String {
+        val norm = raw?.trim()?.uppercase(Locale.US).orEmpty()
+        return if (norm == "MEMBER") "RESPONDER" else norm
+    }
+
+    private fun normalizeRoles(rawRoles: List<*>?, fallbackRole: String?): List<String> {
+        val out = LinkedHashSet<String>()
+        if (rawRoles != null) {
+            for (item in rawRoles) {
+                val tok = normalizeRoleToken(item?.toString())
+                if (tok.isNotEmpty()) out += tok
+            }
+        }
+        if (out.isEmpty()) {
+            val fb = normalizeRoleToken(fallbackRole)
+            if (fb.isNotEmpty()) out += fb
+        }
+        if (out.isEmpty()) {
+            out += "RESPONDER"
+        }
+        return out.toList()
+    }
+
+    private fun resolvePrimaryRole(rawRoles: List<*>?, fallbackRole: String?): String {
+        val nextRoles = normalizeRoles(rawRoles, fallbackRole)
+        val rawRoleNorm = normalizeRoleToken(fallbackRole)
+        return if (rawRoleNorm.isNotEmpty() && rawRoleNorm in nextRoles) rawRoleNorm else nextRoles.first()
+    }
+
+    internal fun formatRoleForDisplay(rawRole: String?): String {
+        val tok = normalizeRoleToken(rawRole).ifEmpty { "RESPONDER" }
+        return tok.lowercase(Locale.US).replaceFirstChar { it.uppercase(Locale.US) }
+    }
+
+    private fun encodeRolesJson(roles: List<String>): String {
+        val arr = JSONArray()
+        for (r in roles) {
+            val norm = normalizeRoleToken(r)
+            if (norm.isNotEmpty()) arr.put(norm)
+        }
+        return arr.toString()
+    }
+
+    private fun decodeRolesJson(raw: String?): List<String> {
+        val clean = raw?.trim().orEmpty()
+        if (clean.isEmpty()) return emptyList()
+        val out = LinkedHashSet<String>()
+        if (clean.startsWith("[")) {
+            val parsed = runCatching {
+                val arr = JSONArray(clean)
+                for (i in 0 until arr.length()) {
+                    val tok = normalizeRoleToken(arr.optString(i))
+                    if (tok.isNotEmpty()) out += tok
+                }
+                true
+            }.getOrDefault(false)
+            if (parsed) return out.toList()
+        }
+        for (part in clean.split(',')) {
+            val tok = normalizeRoleToken(part)
+            if (tok.isNotEmpty()) out += tok
+        }
+        return out.toList()
+    }
+
     fun enrollmentStatus(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_STATUS, "UNENROLLED") ?: "UNENROLLED"
 
-    fun enrolledRole(context: Context): String =
+    fun enrolledRole(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val norm = normalizeRoleToken(prefs.getString(KEY_ROLE, null))
+        if (norm.isNotEmpty()) return norm
+        return decodeRolesJson(prefs.getString(KEY_ROLES, null)).firstOrNull() ?: "RESPONDER"
+    }
+
+    fun enrolledRoles(context: Context): List<String> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val decoded = decodeRolesJson(prefs.getString(KEY_ROLES, null))
+        if (decoded.isNotEmpty()) return decoded
+        return listOf(enrolledRole(context))
+    }
+
+    fun enrolledAffinityGroup(context: Context): String? =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_ROLE, "MEMBER") ?: "MEMBER"
+            .getString(KEY_AFFINITY_GROUP, null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    fun hasRole(context: Context, role: String): Boolean {
+        if (!isEnrolled(context)) return false
+        val target = normalizeRoleToken(role)
+        if (target.isEmpty()) return false
+        return target in enrolledRoles(context)
+    }
+
+    fun hasIntelligenceAccess(context: Context): Boolean {
+        if (!isEnrolled(context)) return false
+        return enrolledRoles(context).any { it == "INTELLIGENCE" || it == "OWNER" }
+    }
 
     fun enrolledLabel(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -352,19 +535,32 @@ object DeviceTrustManager {
         Base64.encodeToString(sig.sign(), Base64.NO_WRAP)
     }.getOrNull()
 
+    private fun attachSignedHeadersForSeat(conn: HttpURLConnection, seat: SeatIdentity): Boolean {
+        if (seat.seatId.isBlank()) return false
+        val (privKey, _) = getOrCreateSigningKeys() ?: return false
+        val ts = System.currentTimeMillis()
+        val sig = signMessageBase64(privKey, "req|${seat.seatId}|$ts") ?: return false
+        conn.setRequestProperty("x-kokoho-seat-id", seat.seatId)
+        conn.setRequestProperty("x-kokoho-ts", ts.toString())
+        conn.setRequestProperty("x-kokoho-sig", sig)
+        return true
+    }
+
+    internal fun attachSignedHeadersWithTag(context: Context, conn: HttpURLConnection): SignedRequestTag? {
+        val (epoch, seat) = synchronized(trustMutationLock) {
+            authMutationEpoch.get() to loadOrExtractSeatIdentity(context)
+        }
+        if (seat == null || seat.seatId.isBlank()) return null
+        if (!attachSignedHeadersForSeat(conn, seat)) return null
+        return SignedRequestTag(epoch = epoch, seatId = seat.seatId.trim())
+    }
+
     /**
      * Attaches signed hardware-key seat headers (`x-kokoho-seat-id`, `x-kokoho-ts`, `x-kokoho-sig`)
      * to outgoing Hub HTTP connections when enrolled or holding a seat identity.
      */
     fun attachSignedHeaders(context: Context, conn: HttpURLConnection) {
-        val seat = loadOrExtractSeatIdentity(context) ?: return
-        if (seat.seatId.isBlank()) return
-        val (privKey, _) = getOrCreateSigningKeys() ?: return
-        val ts = System.currentTimeMillis()
-        val sig = signMessageBase64(privKey, "req|${seat.seatId}|$ts") ?: return
-        conn.setRequestProperty("x-kokoho-seat-id", seat.seatId)
-        conn.setRequestProperty("x-kokoho-ts", ts.toString())
-        conn.setRequestProperty("x-kokoho-sig", sig)
+        attachSignedHeadersWithTag(context, conn)
     }
 
     // ---- Ephemeral ECDH + HKDF-SHA256 + AES-256-GCM Envelope Transport -------------------------
@@ -372,6 +568,30 @@ object DeviceTrustManager {
     fun clearSessionKey() = synchronized(sessionLock) {
         currentSessionKey?.aeadKey?.fill(0)
         currentSessionKey = null
+    }
+
+    private fun clearSessionKeyIfMatches(expectedKid: String, expectedSeatId: String) = synchronized(sessionLock) {
+        val cur = currentSessionKey ?: return
+        if (cur.kid == expectedKid && cur.seatId == expectedSeatId) {
+            cur.aeadKey.fill(0)
+            currentSessionKey = null
+        }
+    }
+
+    private fun clearSessionKeyForOtherSeat(currentSeatId: String) = synchronized(sessionLock) {
+        val cur = currentSessionKey ?: return
+        if (cur.seatId != currentSeatId) {
+            cur.aeadKey.fill(0)
+            currentSessionKey = null
+        }
+    }
+
+    private fun clearSessionKeyIfEpochBefore(minEpoch: Long) = synchronized(sessionLock) {
+        val cur = currentSessionKey ?: return
+        if (cur.epoch < minEpoch) {
+            cur.aeadKey.fill(0)
+            currentSessionKey = null
+        }
     }
 
     fun hasActiveSessionKey(): Boolean = synchronized(sessionLock) {
@@ -476,33 +696,57 @@ object DeviceTrustManager {
         return String(plain, Charsets.UTF_8)
     }
 
-    private fun getOrNegotiateSessionKeyBlocking(context: Context, forceRefresh: Boolean = false): ActiveSessionKey? =
-        synchronized(sessionLock) {
-            val app = context.applicationContext ?: context
+    private fun getOrNegotiateSessionKeyBlocking(
+        context: Context,
+        forceRefresh: Boolean = false,
+        expectedSeatId: String? = null,
+        expectedEpoch: Long? = null
+    ): ActiveSessionKey? {
+        val app = context.applicationContext ?: context
+        val (snapEpoch, snapSeat) = synchronized(trustMutationLock) {
+            authMutationEpoch.get() to loadOrExtractSeatIdentity(app)
+        }
+        val snapSeatId = snapSeat?.seatId?.trim().orEmpty()
+        if (snapSeat == null || snapSeatId.isBlank()) return null
+        if (!expectedSeatId.isNullOrBlank() && snapSeatId != expectedSeatId.trim()) return null
+        if (expectedEpoch != null && snapEpoch != expectedEpoch) return null
+
+        var non2xxError: SessionKeyNegotiationError? = null
+        val keyResult = synchronized(sessionLock) {
             val now = System.currentTimeMillis()
             if (!forceRefresh) {
-                currentSessionKey?.takeIf { now < it.expiresAtMs - 15_000L }?.let { return it }
+                currentSessionKey?.takeIf {
+                    it.seatId == snapSeatId && now < it.expiresAtMs - 15_000L
+                }?.let { return@synchronized it }
             }
             currentSessionKey?.aeadKey?.fill(0)
             currentSessionKey = null
 
-            val seat = loadOrExtractSeatIdentity(app) ?: return null
-            if (seat.seatId.isBlank()) return null
             if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
-                return null
+                return@synchronized null
+            }
+
+            val reqEpoch = authMutationEpoch.get()
+            val curSeatNow = loadOrExtractSeatIdentity(app)
+            val curSeatIdNow = curSeatNow?.seatId?.trim().orEmpty()
+            if (curSeatNow == null || curSeatIdNow != snapSeatId) {
+                return@synchronized null
+            }
+            if (expectedEpoch != null && reqEpoch != expectedEpoch) {
+                return@synchronized null
             }
 
             val ephemKp = runCatching {
                 KeyPairGenerator.getInstance("EC").apply {
                     initialize(ECGenParameterSpec("secp256r1"))
                 }.generateKeyPair()
-            }.getOrNull() ?: return null
+            }.getOrNull() ?: return@synchronized null
 
             val clientSpkiB64 = Base64.encodeToString(ephemKp.public.encoded, Base64.NO_WRAP)
             val reqJson = gson.toJson(SessionKeyRequestDto(clientEphemeralSpkiB64 = clientSpkiB64))
             val base = KokohoHubClient.hubUrl(app)
 
-            return runCatching {
+            runCatching {
                 val conn = (URL("$base/v1/auth/session-key").openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     connectTimeout = 8_000
@@ -510,15 +754,17 @@ object DeviceTrustManager {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     setRequestProperty("Accept", "application/json")
-                    attachSignedHeaders(app, this)
                 }
                 try {
+                    if (!attachSignedHeadersForSeat(conn, curSeatNow)) {
+                        return@runCatching null
+                    }
                     conn.outputStream.use { it.write(reqJson.toByteArray(Charsets.UTF_8)) }
                     val code = conn.responseCode
                     val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
                     if (code !in 200..299) {
                         val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
-                        inspectResponseForRevocation(app, code, seatHdr, err)
+                        non2xxError = SessionKeyNegotiationError(code, seatHdr, err, reqEpoch, curSeatIdNow)
                         return@runCatching null
                     }
                     val respText = conn.inputStream.bufferedReader().use { it.readText() }
@@ -531,13 +777,33 @@ object DeviceTrustManager {
                         ?: return@runCatching null
                     val aeadKey = deriveSessionAeadKey(sharedSecret, dto.kid)
                     sharedSecret.fill(0)
+                    val latestSeatId = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty()
+                    if (authMutationEpoch.get() != reqEpoch || latestSeatId != curSeatIdNow) {
+                        aeadKey.fill(0)
+                        return@runCatching null
+                    }
                     val expiresAt = dto.expiresAtMs.takeIf { it > now } ?: (now + 15 * 60_000L)
-                    ActiveSessionKey(dto.kid, aeadKey, expiresAt).also { currentSessionKey = it }
+                    ActiveSessionKey(dto.kid, aeadKey, expiresAt, curSeatIdNow, reqEpoch).also {
+                        currentSessionKey = it
+                    }
                 } finally {
                     conn.disconnect()
                 }
             }.getOrNull()
         }
+
+        non2xxError?.let { errInfo ->
+            inspectResponseForRevocationIfCurrent(
+                context = app,
+                httpCode = errInfo.code,
+                seatStatusHeader = errInfo.seatHeader,
+                errorBody = errInfo.errorBody,
+                expectedEpoch = errInfo.reqEpoch,
+                expectedSeatId = errInfo.reqSeatId
+            )
+        }
+        return keyResult
+    }
 
     fun executeEnvelopedGet(
         context: Context,
@@ -575,11 +841,31 @@ object DeviceTrustManager {
         if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
             return null
         }
+        val (launchEpoch, launchSeat, wasEnrolledAtLaunch) = synchronized(trustMutationLock) {
+            Triple(authMutationEpoch.get(), loadOrExtractSeatIdentity(app), isEnrolled(app))
+        }
+        val launchSeatId = launchSeat?.seatId?.trim().orEmpty()
+        if (launchSeat == null || launchSeatId.isEmpty()) return null
+
         val cleanPath = if (pathAndQuery.startsWith("/")) pathAndQuery else "/$pathAndQuery"
         val base = KokohoHubClient.hubUrl(app)
 
         for (attempt in 0..1) {
-            val sk = getOrNegotiateSessionKeyBlocking(app, forceRefresh = attempt > 0) ?: return null
+            val curSeatId = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty()
+            if (curSeatId != launchSeatId || (attempt > 0 && authMutationEpoch.get() != launchEpoch)) {
+                return null
+            }
+            val sk = getOrNegotiateSessionKeyBlocking(
+                app,
+                forceRefresh = attempt > 0,
+                expectedSeatId = launchSeatId,
+                expectedEpoch = if (attempt > 0) launchEpoch else null
+            ) ?: return null
+
+            if (loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty() != launchSeatId) {
+                return null
+            }
+
             val wireBodyBytes: ByteArray? = if (method == "POST") {
                 val env = sealEnvelope(sk.kid, sk.aeadKey, plainJsonBody ?: "{}") ?: return null
                 gson.toJson(env).toByteArray(Charsets.UTF_8)
@@ -594,7 +880,6 @@ object DeviceTrustManager {
                     readTimeout = 12_000
                     setRequestProperty("Accept", "$ENV_CONTENT_TYPE, application/json")
                     setRequestProperty("x-kokoho-env-kid", sk.kid)
-                    attachSignedHeaders(app, this)
                     for ((hk, hv) in extraHeaders) {
                         setRequestProperty(hk, hv)
                     }
@@ -604,6 +889,9 @@ object DeviceTrustManager {
                     }
                 }
                 try {
+                    if (!attachSignedHeadersForSeat(conn, launchSeat)) {
+                        return@runCatching null
+                    }
                     if (wireBodyBytes != null) {
                         conn.outputStream.use { it.write(wireBodyBytes) }
                     }
@@ -612,7 +900,7 @@ object DeviceTrustManager {
                     val etagHdr = conn.getHeaderField("ETag")
 
                     if (code == 419) {
-                        clearSessionKey()
+                        clearSessionKeyIfMatches(expectedKid = sk.kid, expectedSeatId = launchSeatId)
                         return@runCatching EnvelopedHttpResponse(419, null, etagHdr)
                     }
                     if (code == 304) {
@@ -620,7 +908,14 @@ object DeviceTrustManager {
                     }
                     if (code !in 200..299) {
                         val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
-                        inspectResponseForRevocation(app, code, seatHdr, err)
+                        inspectResponseForRevocationIfCurrent(
+                            context = app,
+                            httpCode = code,
+                            seatStatusHeader = seatHdr,
+                            errorBody = err,
+                            expectedEpoch = launchEpoch,
+                            expectedSeatId = launchSeatId
+                        )
                         return@runCatching EnvelopedHttpResponse(code, null, etagHdr)
                     }
 
@@ -643,9 +938,21 @@ object DeviceTrustManager {
             }.getOrNull() ?: return null
 
             if (result.code == 419 && attempt == 0) {
-                continue
+                val seatStillSame = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty() == launchSeatId
+                if (seatStillSame && authMutationEpoch.get() == launchEpoch) {
+                    continue
+                }
+                return null
             }
-            return if (result.code == 304 || result.code in 200..299) result else null
+            if (result.code == 304 || result.code in 200..299) {
+                val seatStillSame = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty() == launchSeatId
+                val revokedSinceLaunch = wasEnrolledAtLaunch && !isEnrolled(app)
+                if (!seatStillSame || revokedSinceLaunch) {
+                    return null
+                }
+                return result
+            }
+            return null
         }
         return null
     }
@@ -654,7 +961,7 @@ object DeviceTrustManager {
 
     /**
      * Inspects Hub HTTP error responses and triggers [handleSeatRevokedOrDisplaced] whenever
-     * HTTP `403` carries `x-kokoho-seat-status: REVOKED` or a `"REVOKED"` payload.
+     * HTTP `403` carries `x-kokoho-seat-status: REVOKED`/`DISPLACED` or a matching payload.
      */
     fun inspectResponseForRevocation(
         context: Context,
@@ -662,14 +969,41 @@ object DeviceTrustManager {
         seatStatusHeader: String?,
         errorBody: String?
     ): Boolean {
-        if (httpCode != 403) return false
-        val headerRevoked = seatStatusHeader?.trim()?.equals("REVOKED", ignoreCase = true) == true
-        val bodyRevoked = errorBody?.contains("REVOKED", ignoreCase = true) == true
-        if (headerRevoked || bodyRevoked) {
-            handleSeatRevokedOrDisplaced(context, newStatus = "REVOKED")
-            return true
+        val status = parseRevocationOrDisplacementStatus(httpCode, seatStatusHeader, errorBody) ?: return false
+        handleSeatRevokedOrDisplaced(context, newStatus = status)
+        return true
+    }
+
+    internal fun inspectResponseForRevocationIfCurrent(
+        context: Context,
+        httpCode: Int,
+        seatStatusHeader: String?,
+        errorBody: String?,
+        expectedEpoch: Long? = null,
+        expectedSeatId: String? = null
+    ): Boolean {
+        val status = parseRevocationOrDisplacementStatus(httpCode, seatStatusHeader, errorBody) ?: return false
+        return handleSeatRevokedOrDisplacedInternal(
+            context = context,
+            newStatus = status,
+            expectedEpoch = expectedEpoch,
+            expectedSeatId = expectedSeatId
+        )
+    }
+
+    private fun parseRevocationOrDisplacementStatus(
+        httpCode: Int,
+        seatStatusHeader: String?,
+        errorBody: String?
+    ): String? {
+        if (httpCode != 403) return null
+        val hdrUpper = seatStatusHeader?.trim()?.uppercase(Locale.US).orEmpty()
+        val bodyUpper = errorBody?.uppercase(Locale.US).orEmpty()
+        return when {
+            hdrUpper == "DISPLACED" || bodyUpper.contains("DISPLACED") -> "DISPLACED"
+            hdrUpper == "REVOKED" || bodyUpper.contains("REVOKED") -> "REVOKED"
+            else -> null
         }
-        return false
     }
 
     /**
@@ -678,39 +1012,66 @@ object DeviceTrustManager {
      * so `Restore` in `Permissions` can cleanly re-authorize the phone later.
      */
     fun handleSeatRevokedOrDisplaced(context: Context, newStatus: String = "REVOKED") {
+        handleSeatRevokedOrDisplacedInternal(context, newStatus, expectedEpoch = null, expectedSeatId = null)
+    }
+
+    private fun handleSeatRevokedOrDisplacedInternal(
+        context: Context,
+        newStatus: String = "REVOKED",
+        expectedEpoch: Long? = null,
+        expectedSeatId: String? = null
+    ): Boolean {
         val app = context.applicationContext ?: context
-
-        // 1. Destroy hardware vault key (`kokoho_vault_aes_v1`), legacy wrap key (`kokoho_dir_wrap_v1`),
-        //    and all files in `noBackupFilesDir/vault/` (`p1_plates.seal`, `p2_sector_dir.seal`, `p3_ext_dir.seal`, `vault_meta.json`).
-        PriorityVault.destroyVaultKeyAndFiles(app)
-        synchronized(keyLock) {
-            runCatching {
-                if (Security.getProvider(KEYSTORE_PROVIDER) != null) {
-                    val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-                    if (ks.containsAlias(PriorityVault.VAULT_KEY_ALIAS)) {
-                        ks.deleteEntry(PriorityVault.VAULT_KEY_ALIAS)
-                    }
-                    if (ks.containsAlias(LEGACY_AES_WRAP_ALIAS)) {
-                        ks.deleteEntry(LEGACY_AES_WRAP_ALIAS)
-                    }
-                }
-            }
-            for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
-                runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
-                runCatching { File(dir, "directory.db").delete() }
-                runCatching { File(dir, "directory.db.vc").delete() }
-                runCatching { File(dir, "directory.db.tmp").delete() }
-            }
-        }
-
-        // 2. Clear ECDH session key and update enrollment status (leaving seat_identity.json & kokoho_seat_ec_v1 intact).
-        clearSessionKey()
         val resolvedStatus = newStatus.trim().ifEmpty { "REVOKED" }.let {
             if (it.equals("ENROLLED", ignoreCase = true)) "REVOKED" else it
         }
-        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-            putString(KEY_STATUS, resolvedStatus)
+
+        val bumpedEpoch: Long
+        synchronized(trustMutationLock) {
+            if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) {
+                return false
+            }
+            if (!expectedSeatId.isNullOrBlank()) {
+                val curSeatId = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty()
+                if (curSeatId != expectedSeatId.trim()) {
+                    return false
+                }
+            }
+            bumpedEpoch = authMutationEpoch.incrementAndGet()
+
+            // 1. Destroy hardware vault key (`kokoho_vault_aes_v1`), legacy wrap key (`kokoho_dir_wrap_v1`),
+            //    and all files in `noBackupFilesDir/vault/` (`p1_plates.seal`, `p2_sector_dir.seal`, `p3_ext_dir.seal`, `vault_meta.json`).
+            PriorityVault.destroyVaultKeyAndFiles(app)
+            synchronized(keyLock) {
+                runCatching {
+                    if (Security.getProvider(KEYSTORE_PROVIDER) != null) {
+                        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+                        if (ks.containsAlias(PriorityVault.VAULT_KEY_ALIAS)) {
+                            ks.deleteEntry(PriorityVault.VAULT_KEY_ALIAS)
+                        }
+                        if (ks.containsAlias(LEGACY_AES_WRAP_ALIAS)) {
+                            ks.deleteEntry(LEGACY_AES_WRAP_ALIAS)
+                        }
+                    }
+                }
+                for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
+                    runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
+                    runCatching { File(dir, "directory.db").delete() }
+                    runCatching { File(dir, "directory.db.vc").delete() }
+                    runCatching { File(dir, "directory.db.tmp").delete() }
+                }
+            }
+
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit(commit = true) {
+                putString(KEY_STATUS, resolvedStatus)
+                remove(KEY_ROLE)
+                remove(KEY_ROLES)
+                remove(KEY_AFFINITY_GROUP)
+            }
         }
+
+        // 2. Clear ECDH session key and in-RAM caches AFTER releasing trustMutationLock (preserving lock DAG).
+        clearSessionKeyIfEpochBefore(bumpedEpoch)
 
         // 3. Clear legacy SharedPreferences synced plates & KokohoHubClient in-RAM active objects/plates.
         KokohoHubClient.clearAllOnRevocation(app)
@@ -721,9 +1082,22 @@ object DeviceTrustManager {
         KokohoDirectory.ensureLoaded(app)
 
         notifyTrustStateListeners(app)
+        return true
     }
 
     // ---- Enrollment & Single-Session Web QR Grant ----------------------------------------------
+
+    private fun isFallbackSnapshotStillValid(
+        app: Context,
+        expectedEpoch: Long,
+        originalSeat: SeatIdentity
+    ): Boolean = synchronized(trustMutationLock) {
+        if (activeClaimCount.get() > 0) return false
+        if (authMutationEpoch.get() != expectedEpoch) return false
+        if (isEnrolled(app)) return false
+        val curSeat = loadOrExtractSeatIdentity(app) ?: return false
+        curSeat.seatId == originalSeat.seatId && curSeat.slug == originalSeat.slug
+    }
 
     /**
      * Automatically performs hardware status verification (or initial enrollment) in the background
@@ -733,33 +1107,69 @@ object DeviceTrustManager {
         val app = context.applicationContext ?: context
         PriorityVault.ensureScreenOffReceiverRegistered(app)
         VpnGeoGate.ensureNetworkCallbackRegistered(app)
-        val seat = loadOrExtractSeatIdentity(app)
-        if (seat == null) {
+        val snapshot = synchronized(trustMutationLock) {
+            LaunchSnapshot(
+                launchEpoch = authMutationEpoch.get(),
+                seat = loadOrExtractSeatIdentity(app),
+                wasEnrolled = isEnrolled(app),
+                claimActive = activeClaimCount.get() > 0
+            )
+        }
+        val seat = snapshot.seat
+        if (seat == null || snapshot.claimActive) {
             onComplete?.invoke(null)
             return
         }
-        scope.launch {
-            val wasEnrolled = isEnrolled(app)
-            val resp = if (seat.seatId.isNotBlank()) {
-                val statusResp = checkDeviceStatusBlocking(app, seat)
-                when {
-                    statusResp != null && statusResp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> statusResp
-                    statusResp != null && statusResp.status.equals("ENROLLED", ignoreCase = true) -> statusResp
-                    statusResp != null && wasEnrolled -> statusResp // Displaced/revoked/agreed already wiped in applyAuthOutcome
-                    statusResp != null && statusResp.status.uppercase() in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") -> statusResp
-                    !wasEnrolled && (seat.slug.isNotBlank() || seat.voucher.isNotBlank()) -> enrollBlocking(app, seat)
-                    else -> statusResp
+        inFlightIoCount.incrementAndGet()
+        val job = scope.launch {
+            val resp = try {
+                val launchEpoch = snapshot.launchEpoch
+                val wasEnrolled = snapshot.wasEnrolled
+                val outResp = if (seat.seatId.isNotBlank()) {
+                    val statusRes = checkDeviceStatusWithOutcome(app, seat, expectedEpoch = launchEpoch)
+                    val statusResp = statusRes.dto
+                    val cleanStatus = (statusResp?.status as String?)?.trim().orEmpty()
+                    val handledRevokedOrDisplaced = cleanStatus.equals("REVOKED", ignoreCase = true) ||
+                        cleanStatus.equals("DISPLACED", ignoreCase = true)
+                    when {
+                        statusRes.superseded && !handledRevokedOrDisplaced -> null
+                        statusResp != null && cleanStatus.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> statusResp
+                        statusResp != null && cleanStatus.equals("ENROLLED", ignoreCase = true) -> statusResp
+                        statusResp != null && wasEnrolled -> statusResp // Displaced/revoked/agreed already wiped in applyAuthOutcome
+                        statusResp != null && cleanStatus.uppercase(Locale.US) in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") -> statusResp
+                        !wasEnrolled && (seat.slug.isNotBlank() || seat.voucher.isNotBlank()) -> {
+                            val fallbackEpoch = statusRes.nextExpectedEpoch ?: launchEpoch
+                            if (isFallbackSnapshotStillValid(app, fallbackEpoch, seat)) {
+                                enrollBlocking(app, seat, expectedEpoch = fallbackEpoch)
+                            } else {
+                                null
+                            }
+                        }
+                        else -> statusResp
+                    }
+                } else {
+                    if (isFallbackSnapshotStillValid(app, launchEpoch, seat)) {
+                        enrollBlocking(app, seat, expectedEpoch = launchEpoch)
+                    } else {
+                        null
+                    }
                 }
-            } else {
-                enrollBlocking(app, seat)
-            }
-            if ((resp == null || resp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true)) && isEnrolled(app)) {
-                // Offline or paused on Tucson VPN gate while enrolled: load locally sealed directory
-                KokohoDirectory.ensureLoaded(app)
+                val outStatus = (outResp?.status as String?)?.trim().orEmpty()
+                if ((outResp == null || outStatus.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true)) && isEnrolled(app)) {
+                    // Offline or paused on Tucson VPN gate while enrolled: load locally sealed directory
+                    KokohoDirectory.ensureLoaded(app)
+                }
+                outResp
+            } finally {
+                inFlightIoCount.decrementAndGet()
+                notifyAsyncIdleForTest()
             }
             if (onComplete != null) {
                 withContext(Dispatchers.Main) { onComplete(resp) }
             }
+        }
+        job.invokeOnCompletion {
+            notifyAsyncIdleForTest()
         }
     }
 
@@ -774,51 +1184,76 @@ object DeviceTrustManager {
             onResult(false, "Invalid invitation QR code.")
             return
         }
-        scope.launch {
-            val existing = loadOrExtractSeatIdentity(app)
-            val sameSlug = existing != null && existing.slug.equals(cleanSlug, ignoreCase = true)
-            if (!sameSlug) {
-                clearSessionKey()
+        val (claimEpoch, existing, sameSlug) = synchronized(trustMutationLock) {
+            activeClaimCount.incrementAndGet()
+            val nextEpoch = authMutationEpoch.incrementAndGet()
+            val cur = loadOrExtractSeatIdentity(app)
+            val same = cur != null && cur.slug.equals(cleanSlug, ignoreCase = true)
+            Triple(nextEpoch, cur, same)
+        }
+        inFlightIoCount.incrementAndGet()
+        val job = scope.launch {
+            val outcome = try {
+                if (!sameSlug) {
+                    clearSessionKey()
+                }
+                val tempIdentity = if (sameSlug && existing != null) {
+                    SeatIdentity(
+                        seatId = existing.seatId,
+                        slug = cleanSlug,
+                        voucher = existing.voucher
+                    )
+                } else {
+                    SeatIdentity(
+                        seatId = "",
+                        slug = cleanSlug,
+                        voucher = ""
+                    )
+                }
+                enrollBlockingWithOutcome(app, tempIdentity, expectedEpoch = claimEpoch)
+            } finally {
+                activeClaimCount.decrementAndGet()
+                inFlightIoCount.decrementAndGet()
+                notifyAsyncIdleForTest()
             }
-            val tempIdentity = if (sameSlug && existing != null) {
-                SeatIdentity(
-                    seatId = existing.seatId,
-                    slug = cleanSlug,
-                    voucher = existing.voucher
-                )
-            } else {
-                SeatIdentity(
-                    seatId = "",
-                    slug = cleanSlug,
-                    voucher = ""
-                )
-            }
-            val resp = enrollBlocking(app, tempIdentity)
+            val resp = outcome.dto
+            val cleanStatus = (resp?.status as String?)?.trim().orEmpty()
             withContext(Dispatchers.Main) {
                 when {
+                    cleanStatus.equals("ENROLLED", ignoreCase = true) && !outcome.committed -> onResult(
+                        false,
+                        "Enrollment was superseded by a newer seat update."
+                    )
                     resp == null -> onResult(
                         false,
                         "Could not reach Kokoho Hub to verify device enrollment. Make sure your VPN and internet connection are active."
                     )
-                    resp.status.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> onResult(
+                    cleanStatus.equals(VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON, ignoreCase = true) -> onResult(
                         false,
                         resp.message ?: VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
                     )
-                    resp.status.equals("ENROLLED", ignoreCase = true) -> onResult(
-                        true,
-                        "This phone is enrolled (${resp.role.lowercase().replaceFirstChar { it.uppercase() }})."
-                    )
-                    resp.status.equals("PENDING_REBIND", ignoreCase = true) -> onResult(
+                    cleanStatus.equals("ENROLLED", ignoreCase = true) -> {
+                        val primary = resolvePrimaryRole(resp.roles as List<*>?, resp.role as String?)
+                        val displayRole = formatRoleForDisplay(primary)
+                        onResult(
+                            true,
+                            "This phone is enrolled ($displayRole)."
+                        )
+                    }
+                    cleanStatus.equals("PENDING_REBIND", ignoreCase = true) -> onResult(
                         false,
                         formatUnenrolledGrantMessage("PENDING_REBIND", resp, hasSeatRef = true)
                     )
-                    resp.status.equals("REVOKED", ignoreCase = true) -> onResult(
+                    cleanStatus.equals("REVOKED", ignoreCase = true) -> onResult(
                         false,
                         "This invitation seat has been revoked."
                     )
                     else -> onResult(false, resp.message ?: "Enrollment could not be completed.")
                 }
             }
+        }
+        job.invokeOnCompletion {
+            notifyAsyncIdleForTest()
         }
     }
 
@@ -881,7 +1316,8 @@ object DeviceTrustManager {
         seatId: String,
         challengeId: String,
         secret: String,
-        privateKey: PrivateKey
+        privateKey: PrivateKey,
+        expectedEpoch: Long? = null
     ): Triple<Boolean, Int, String> {
         val ts = System.currentTimeMillis()
         val msg = "grant|$seatId|${challengeId.trim()}|${secret.trim()}|$ts"
@@ -917,7 +1353,14 @@ object DeviceTrustManager {
                     val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }
                         .getOrNull()
                         .orEmpty()
-                    inspectResponseForRevocation(app, code, seatHdr, err)
+                    inspectResponseForRevocationIfCurrent(
+                        context = app,
+                        httpCode = code,
+                        seatStatusHeader = seatHdr,
+                        errorBody = err,
+                        expectedEpoch = expectedEpoch,
+                        expectedSeatId = seatId
+                    )
                     Triple(false, code, err)
                 }
             } finally {
@@ -934,125 +1377,170 @@ object DeviceTrustManager {
         onResult: (ok: Boolean, message: String) -> Unit
     ) {
         val app = context.applicationContext ?: context
-        scope.launch {
-            if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
-                withContext(Dispatchers.Main) {
-                    onResult(false, VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE)
-                }
-                return@launch
-            }
-            var seat = loadOrExtractSeatIdentity(app)
-            var enr: AuthResponseDto? = null
-
-            if (!isEnrolled(app)) {
-                if (seat != null && seat.seatId.isNotBlank()) {
-                    enr = checkDeviceStatusBlocking(app, seat)
-                    seat = loadOrExtractSeatIdentity(app)
-                }
-                if (!isEnrolled(app)) {
-                    val blockedStatus = enr?.status?.uppercase().orEmpty()
-                    enr = if (blockedStatus in setOf("REVOKED", "PENDING_REBIND", "DISPLACED")) {
-                        enr
-                    } else if (!slugHint.isNullOrBlank()) {
-                        enrollBlocking(
-                            app,
-                            SeatIdentity(
-                                seatId = seat?.seatId.orEmpty(),
-                                slug = slugHint.trim(),
-                                voucher = seat?.voucher.orEmpty()
-                            )
-                        )
-                    } else if (seat != null && (seat.voucher.isNotBlank() || seat.slug.isNotBlank())) {
-                        enrollBlocking(app, seat)
-                    } else {
-                        enr
+        inFlightIoCount.incrementAndGet()
+        val job = scope.launch {
+            val outcome: Pair<Boolean, String> = try {
+                run {
+                    if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+                        return@run false to VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
                     }
-                    seat = loadOrExtractSeatIdentity(app)
-                }
-                if (seat == null || seat.seatId.isBlank() || !isEnrolled(app)) {
-                    val hasSeatRef = (seat != null && (seat.seatId.isNotBlank() || seat.slug.isNotBlank())) ||
-                        !slugHint.isNullOrBlank()
-                    val status = enr?.status?.takeIf { it.isNotBlank() } ?: enrollmentStatus(app)
-                    val msg = formatUnenrolledGrantMessage(status, enr, hasSeatRef)
-                    withContext(Dispatchers.Main) { onResult(false, msg) }
-                    return@launch
-                }
-            }
+                    var seat = loadOrExtractSeatIdentity(app)
+                    var enr: AuthResponseDto? = null
 
-            val currentSeat = seat ?: run {
-                val msg = formatUnenrolledGrantMessage(enrollmentStatus(app), enr, !slugHint.isNullOrBlank())
-                withContext(Dispatchers.Main) { onResult(false, msg) }
-                return@launch
-            }
+                    if (!isEnrolled(app)) {
+                        if (seat != null && seat.seatId.isNotBlank()) {
+                            enr = checkDeviceStatusBlocking(app, seat)
+                            seat = loadOrExtractSeatIdentity(app)
+                        }
+                        if (!isEnrolled(app)) {
+                            val blockedStatus = (enr?.status as String?)?.trim()?.uppercase(Locale.US).orEmpty()
+                            enr = if (blockedStatus in setOf("REVOKED", "PENDING_REBIND", "DISPLACED")) {
+                                enr
+                            } else if (!slugHint.isNullOrBlank()) {
+                                enrollBlocking(
+                                    app,
+                                    SeatIdentity(
+                                        seatId = seat?.seatId.orEmpty(),
+                                        slug = slugHint.trim(),
+                                        voucher = seat?.voucher.orEmpty()
+                                    )
+                                )
+                            } else if (seat != null && (seat.voucher.isNotBlank() || seat.slug.isNotBlank())) {
+                                enrollBlocking(app, seat)
+                            } else {
+                                enr
+                            }
+                            seat = loadOrExtractSeatIdentity(app)
+                        }
+                        if (seat == null || seat.seatId.isBlank() || !isEnrolled(app)) {
+                            val hasSeatRef = (seat != null && (seat.seatId.isNotBlank() || seat.slug.isNotBlank())) ||
+                                !slugHint.isNullOrBlank()
+                            val status = (enr?.status as String?)?.takeIf { it.isNotBlank() } ?: enrollmentStatus(app)
+                            val msg = formatUnenrolledGrantMessage(status, enr, hasSeatRef)
+                            return@run false to msg
+                        }
+                    }
 
-            val keys = getOrCreateSigningKeys()
-            if (keys == null) {
-                withContext(Dispatchers.Main) {
-                    onResult(false, "Android hardware keystore is unavailable on this device.")
-                }
-                return@launch
-            }
-
-            var attempt = postGrantWebOnce(app, currentSeat.seatId, challengeId, secret, keys.first)
-            if (!attempt.first && (attempt.second == 403 || attempt.second == 401)) {
-                var recResp = checkDeviceStatusBlocking(app, currentSeat)
-                val recStatus = recResp?.status?.uppercase().orEmpty()
-                if (!isEnrolled(app) &&
-                    recStatus !in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") &&
-                    (!slugHint.isNullOrBlank() || currentSeat.voucher.isNotBlank() || currentSeat.slug.isNotBlank())
-                ) {
-                    recResp = enrollBlocking(
-                        app,
-                        SeatIdentity(
-                            seatId = currentSeat.seatId,
-                            slug = slugHint?.trim()?.takeIf { it.isNotEmpty() } ?: currentSeat.slug,
-                            voucher = currentSeat.voucher
+                    val (firstAttemptEpoch, latestSeat) = synchronized(trustMutationLock) {
+                        authMutationEpoch.get() to loadOrExtractSeatIdentity(app)
+                    }
+                    val currentSeat: SeatIdentity = (latestSeat?.takeIf { it.seatId.isNotBlank() } ?: seat)
+                        ?: return@run false to formatUnenrolledGrantMessage(
+                            enrollmentStatus(app),
+                            enr,
+                            !slugHint.isNullOrBlank()
                         )
-                    )
-                }
-                val refreshedSeat = loadOrExtractSeatIdentity(app)
-                if (refreshedSeat != null && refreshedSeat.seatId.isNotBlank() && isEnrolled(app)) {
-                    attempt = postGrantWebOnce(app, refreshedSeat.seatId, challengeId, secret, keys.first)
-                } else if (recResp != null && recStatus in setOf("PENDING_REBIND", "REVOKED", "DISPLACED")) {
-                    val msg = formatUnenrolledGrantMessage(
-                        if (recStatus == "DISPLACED") "REVOKED" else recResp.status,
-                        recResp,
-                        hasSeatRef = true
-                    )
-                    withContext(Dispatchers.Main) { onResult(false, msg) }
-                    return@launch
-                }
-            }
 
-            val finalOk = attempt.first
-            val finalMsg = if (finalOk) {
-                attempt.third
-            } else if (attempt.second == -1) {
-                attempt.third
-            } else {
-                formatGrantErrorMessage(attempt.second, attempt.third)
+                    val keys = getOrCreateSigningKeys()
+                        ?: return@run false to "Android hardware keystore is unavailable on this device."
+
+                    var attempt = postGrantWebOnce(
+                        app = app,
+                        seatId = currentSeat.seatId,
+                        challengeId = challengeId,
+                        secret = secret,
+                        privateKey = keys.first,
+                        expectedEpoch = firstAttemptEpoch
+                    )
+                    if (!attempt.first && (attempt.second == 403 || attempt.second == 401)) {
+                        var recResp = checkDeviceStatusBlocking(app, currentSeat)
+                        val recStatus = (recResp?.status as String?)?.trim()?.uppercase(Locale.US).orEmpty()
+                        if (!isEnrolled(app) &&
+                            recStatus !in setOf("REVOKED", "PENDING_REBIND", "DISPLACED") &&
+                            (!slugHint.isNullOrBlank() || currentSeat.voucher.isNotBlank() || currentSeat.slug.isNotBlank())
+                        ) {
+                            recResp = enrollBlocking(
+                                app,
+                                SeatIdentity(
+                                    seatId = currentSeat.seatId,
+                                    slug = slugHint?.trim()?.takeIf { it.isNotEmpty() } ?: currentSeat.slug,
+                                    voucher = currentSeat.voucher
+                                )
+                            )
+                        }
+                        val (retryEpoch, refreshedSeat) = synchronized(trustMutationLock) {
+                            authMutationEpoch.get() to loadOrExtractSeatIdentity(app)
+                        }
+                        if (refreshedSeat != null && refreshedSeat.seatId.isNotBlank() && isEnrolled(app)) {
+                            attempt = postGrantWebOnce(
+                                app = app,
+                                seatId = refreshedSeat.seatId,
+                                challengeId = challengeId,
+                                secret = secret,
+                                privateKey = keys.first,
+                                expectedEpoch = retryEpoch
+                            )
+                        } else if (recResp != null && recStatus in setOf("PENDING_REBIND", "REVOKED", "DISPLACED")) {
+                            val msg = formatUnenrolledGrantMessage(
+                                if (recStatus == "DISPLACED") "REVOKED" else (recResp.status as String?),
+                                recResp,
+                                hasSeatRef = true
+                            )
+                            return@run false to msg
+                        }
+                    }
+
+                    val finalOk = attempt.first
+                    val finalMsg = if (finalOk) {
+                        attempt.third
+                    } else if (attempt.second == -1) {
+                        attempt.third
+                    } else {
+                        formatGrantErrorMessage(attempt.second, attempt.third)
+                    }
+                    finalOk to finalMsg
+                }
+            } finally {
+                inFlightIoCount.decrementAndGet()
+                notifyAsyncIdleForTest()
             }
 
             withContext(Dispatchers.Main) {
-                onResult(finalOk, finalMsg)
+                onResult(outcome.first, outcome.second)
             }
+        }
+        job.invokeOnCompletion {
+            notifyAsyncIdleForTest()
         }
     }
 
-    internal fun enrollBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
+    internal fun enrollBlocking(
+        context: Context,
+        seat: SeatIdentity,
+        expectedEpoch: Long? = null
+    ): AuthResponseDto? = enrollBlockingWithOutcome(context, seat, expectedEpoch).dto
+
+    private fun enrollBlockingWithOutcome(
+        context: Context,
+        seat: SeatIdentity,
+        expectedEpoch: Long? = null
+    ): AuthOutcomeResult {
+        val effectiveEpoch = expectedEpoch ?: authMutationEpoch.get()
+        if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) {
+            return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = true)
+        }
         if (VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
-            return AuthResponseDto(
-                ok = false,
-                status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
-                message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+            return AuthOutcomeResult(
+                dto = AuthResponseDto(
+                    ok = false,
+                    status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
+                    message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+                ),
+                committed = false,
+                nextExpectedEpoch = null,
+                superseded = false
             )
         }
-        val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
+        val (privKey, pubSpkiB64) = getOrCreateSigningKeys()
+            ?: return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
         val idOrSlug = seat.seatId.ifBlank { seat.slug }
-        if (idOrSlug.isBlank()) return null
+        if (idOrSlug.isBlank()) {
+            return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
+        }
         val ts = System.currentTimeMillis()
         val msg = "enroll|$idOrSlug|${seat.voucher}|$ts"
-        val sig = signMessageBase64(privKey, msg) ?: return null
+        val sig = signMessageBase64(privKey, msg)
+            ?: return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
         val devInfo = "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})"
 
         val bodyMap = mapOf(
@@ -1064,37 +1552,91 @@ object DeviceTrustManager {
             "timestamp_ms" to ts,
             "signature_b64" to sig
         )
-        val dto = postAuthJson(context, "/v1/auth/enroll", bodyMap) ?: return null
-        applyAuthOutcome(context, seat, dto, isStatusPoll = false)
-        return dto
+        val dto = postAuthJson(
+            context = context,
+            path = "/v1/auth/enroll",
+            payload = bodyMap,
+            expectedEpoch = effectiveEpoch,
+            expectedSeatId = seat.seatId.trim().takeIf { it.isNotEmpty() }
+        ) ?: return AuthOutcomeResult(
+            dto = null,
+            committed = false,
+            nextExpectedEpoch = effectiveEpoch,
+            superseded = (authMutationEpoch.get() != effectiveEpoch)
+        )
+        return applyAuthOutcome(context, seat, dto, isStatusPoll = false, expectedEpoch = effectiveEpoch)
     }
 
-    internal fun checkDeviceStatusBlocking(context: Context, seat: SeatIdentity): AuthResponseDto? {
-        if (seat.seatId.isBlank()) return null
+    internal fun checkDeviceStatusBlocking(
+        context: Context,
+        seat: SeatIdentity,
+        expectedEpoch: Long? = null
+    ): AuthResponseDto? = checkDeviceStatusWithOutcome(context, seat, expectedEpoch).dto
+
+    private fun checkDeviceStatusWithOutcome(
+        context: Context,
+        seat: SeatIdentity,
+        expectedEpoch: Long? = null
+    ): AuthOutcomeResult {
+        if (seat.seatId.isBlank()) {
+            return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
+        }
+        val effectiveEpoch = expectedEpoch ?: authMutationEpoch.get()
+        if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) {
+            return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = true)
+        }
         if (VpnGeoGate.checkHubEgressAllowedBlocking(context, forceSeatedCheck = true) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
-            return AuthResponseDto(
-                ok = false,
-                status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
-                message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+            return AuthOutcomeResult(
+                dto = AuthResponseDto(
+                    ok = false,
+                    status = VpnGeoGate.STATUS_VPN_REQUIRED_TUCSON,
+                    message = VpnGeoGate.TUCSON_VPN_ADVISORY_MESSAGE
+                ),
+                committed = false,
+                nextExpectedEpoch = null,
+                superseded = false
             )
         }
-        val (privKey, pubSpkiB64) = getOrCreateSigningKeys() ?: return null
+        val (privKey, pubSpkiB64) = getOrCreateSigningKeys()
+            ?: return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
         val ts = System.currentTimeMillis()
         val msg = "status|${seat.seatId}|$ts"
-        val sig = signMessageBase64(privKey, msg) ?: return null
+        val sig = signMessageBase64(privKey, msg)
+            ?: return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
         val bodyMap = mapOf(
             "seat_id" to seat.seatId,
             "pubkey_spki_b64" to pubSpkiB64,
             "timestamp_ms" to ts,
             "signature_b64" to sig
         )
-        val dto = postAuthJson(context, "/v1/auth/status", bodyMap) ?: return null
-        applyAuthOutcome(context, seat, dto, isStatusPoll = true)
-        return dto
+        val dto = postAuthJson(
+            context = context,
+            path = "/v1/auth/status",
+            payload = bodyMap,
+            expectedEpoch = effectiveEpoch,
+            expectedSeatId = seat.seatId.trim()
+        ) ?: return AuthOutcomeResult(
+            dto = null,
+            committed = false,
+            nextExpectedEpoch = effectiveEpoch,
+            superseded = (authMutationEpoch.get() != effectiveEpoch)
+        )
+        return applyAuthOutcome(context, seat, dto, isStatusPoll = true, expectedEpoch = effectiveEpoch)
     }
 
-    private fun postAuthJson(context: Context, path: String, payload: Map<String, Any>): AuthResponseDto? =
-        runCatching {
+    private fun postAuthJson(
+        context: Context,
+        path: String,
+        payload: Map<String, Any>,
+        expectedEpoch: Long? = null,
+        expectedSeatId: String? = null
+    ): AuthResponseDto? {
+        if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) return null
+        if (!expectedSeatId.isNullOrBlank()) {
+            val curSeatId = loadOrExtractSeatIdentity(context)?.seatId?.trim().orEmpty()
+            if (curSeatId != expectedSeatId.trim()) return null
+        }
+        return runCatching {
             val base = KokohoHubClient.hubUrl(context)
             val conn = (URL("$base$path").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -1112,73 +1654,162 @@ object DeviceTrustManager {
                     gson.fromJson(txt, AuthResponseDto::class.java)
                 } else {
                     val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull().orEmpty()
-                    if (inspectResponseForRevocation(context, code, seatHdr, err)) {
-                        AuthResponseDto(ok = false, status = "REVOKED", message = "This invitation seat has been revoked.")
+                    if (inspectResponseForRevocationIfCurrent(
+                            context = context,
+                            httpCode = code,
+                            seatStatusHeader = seatHdr,
+                            errorBody = err,
+                            expectedEpoch = expectedEpoch,
+                            expectedSeatId = expectedSeatId
+                        )
+                    ) {
+                        val disp = parseRevocationOrDisplacementStatus(code, seatHdr, err) ?: "REVOKED"
+                        AuthResponseDto(ok = false, status = disp, message = "This invitation seat has been revoked.")
+                    } else if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) {
+                        null
                     } else {
                         runCatching { gson.fromJson(err, AuthResponseDto::class.java) }
                             .getOrNull()
-                            ?.takeIf { it.status.isNotBlank() }
+                            ?.takeIf { !(it.status as String?).isNullOrBlank() }
                     }
                 }
             } finally {
                 conn.disconnect()
             }
         }.getOrNull()
+    }
 
     private fun applyAuthOutcome(
         context: Context,
         prevSeat: SeatIdentity,
         dto: AuthResponseDto,
-        isStatusPoll: Boolean
-    ) {
+        isStatusPoll: Boolean,
+        expectedEpoch: Long? = null
+    ): AuthOutcomeResult {
         val app = context.applicationContext ?: context
-        val wasEnrolled = enrollmentStatus(app).equals("ENROLLED", ignoreCase = true)
+        val dtoSeatId = (dto.seatId as String?)?.trim().orEmpty()
+        val dtoSlug = (dto.slug as String?)?.trim().orEmpty()
+        val dtoLabel = (dto.label as String?)?.trim().orEmpty()
+        val rawRoles = dto.roles as List<*>?
+        val rawRoleStr = dto.role as String?
+        val rawRoleNorm = normalizeRoleToken(rawRoleStr)
+        val nextRoles = normalizeRoles(rawRoles, rawRoleStr)
+        val primaryRole = resolvePrimaryRole(rawRoles, rawRoleStr)
+        val nextAffinity = (dto.affinityGroup as String?)?.trim()?.takeIf { it.isNotEmpty() }
+        val hasIntelNow = nextRoles.any { it == "INTELLIGENCE" || it == "OWNER" }
+        val cleanStatus = (dto.status as String?)?.trim().orEmpty()
+        val normStatus = cleanStatus.uppercase(Locale.US)
 
-        if (dto.seatId.isNotBlank() || dto.slug.isNotBlank()) {
-            saveSeatIdentity(
-                app,
-                SeatIdentity(
-                    seatId = dto.seatId.ifBlank { prevSeat.seatId },
-                    slug = dto.slug.ifBlank { prevSeat.slug },
-                    voucher = prevSeat.voucher
+        var wasEnrolled = false
+        var hadIntelligenceAccess = false
+        var seatSwitched = false
+        var committedEpoch: Long? = null
+        var action: String
+
+        synchronized(trustMutationLock) {
+            if (expectedEpoch != null && authMutationEpoch.get() != expectedEpoch) {
+                return AuthOutcomeResult(dto, committed = false, nextExpectedEpoch = null, superseded = true)
+            }
+            if (isStatusPoll && activeClaimCount.get() > 0) {
+                return AuthOutcomeResult(dto, committed = false, nextExpectedEpoch = null, superseded = true)
+            }
+            wasEnrolled = enrollmentStatus(app).equals("ENROLLED", ignoreCase = true)
+            hadIntelligenceAccess = hasIntelligenceAccess(app)
+            val priorSeatId = prevSeat.seatId.ifBlank { loadOrExtractSeatIdentity(app)?.seatId.orEmpty() }
+            seatSwitched = priorSeatId.isNotBlank() && dtoSeatId.isNotBlank() && dtoSeatId != priorSeatId
+
+            if (dtoSeatId.isNotBlank() || dtoSlug.isNotBlank()) {
+                saveSeatIdentity(
+                    app,
+                    SeatIdentity(
+                        seatId = dtoSeatId.ifBlank { prevSeat.seatId },
+                        slug = dtoSlug.ifBlank { prevSeat.slug },
+                        voucher = prevSeat.voucher
+                    )
                 )
-            )
+            }
+
+            if (normStatus == "ENROLLED") {
+                committedEpoch = authMutationEpoch.incrementAndGet()
+                app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit(commit = true) {
+                    putString(KEY_STATUS, "ENROLLED")
+                    putString(KEY_ROLE, primaryRole)
+                    putString(KEY_ROLES, encodeRolesJson(nextRoles))
+                    if (nextAffinity != null) {
+                        putString(KEY_AFFINITY_GROUP, nextAffinity)
+                    } else {
+                        remove(KEY_AFFINITY_GROUP)
+                    }
+                    if (dtoLabel.isNotBlank()) putString(KEY_LABEL, dtoLabel)
+                }
+                action = "ENROLLED"
+            } else if (normStatus == "REVOKED" ||
+                normStatus == "DISPLACED" ||
+                (wasEnrolled && (isStatusPoll || normStatus.isNotEmpty()))
+            ) {
+                action = "REVOKED"
+            } else {
+                committedEpoch = authMutationEpoch.incrementAndGet()
+                app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit(commit = true) {
+                    putString(KEY_STATUS, cleanStatus.ifEmpty { "UNENROLLED" })
+                    if (rawRoleNorm.isNotEmpty() || rawRoles?.isNotEmpty() == true) {
+                        putString(KEY_ROLE, primaryRole)
+                        putString(KEY_ROLES, encodeRolesJson(nextRoles))
+                    }
+                    if (nextAffinity != null) {
+                        putString(KEY_AFFINITY_GROUP, nextAffinity)
+                    } else {
+                        remove(KEY_AFFINITY_GROUP)
+                    }
+                    if (dtoLabel.isNotBlank()) putString(KEY_LABEL, dtoLabel)
+                }
+                action = "OTHER"
+            }
         }
 
-        val normStatus = dto.status.trim().uppercase()
-        if (normStatus == "ENROLLED") {
-            if (prevSeat.seatId.isNotBlank() && dto.seatId.isNotBlank() && dto.seatId != prevSeat.seatId) {
-                clearSessionKey()
+        when (action) {
+            "ENROLLED" -> {
+                if (seatSwitched) {
+                    clearSessionKeyForOtherSeat(dtoSeatId)
+                }
+                for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
+                    runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
+                    runCatching { File(dir, "directory.db").delete() }
+                    runCatching { File(dir, "directory.db.vc").delete() }
+                }
+                val lostIntel = (hadIntelligenceAccess && !hasIntelNow) || (seatSwitched && !hasIntelNow)
+                val gainedIntel = !hadIntelligenceAccess && hasIntelNow
+                if (lostIntel) {
+                    PriorityVault.purgeDirectoryTiersOnDowngrade(app)
+                    KokohoDirectory.purgeDecryptedCache(app)
+                    KokohoDirectory.ensureLoaded(app)
+                } else if (gainedIntel || seatSwitched) {
+                    PriorityVault.clearInMemoryCaches(app)
+                    KokohoDirectory.invalidateForReload()
+                    KokohoDirectory.ensureLoaded(app)
+                }
+                PriorityVault.syncAllAsync(app)
+                notifyTrustStateListeners(app)
             }
-            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-                putString(KEY_STATUS, "ENROLLED")
-                if (dto.role.isNotBlank()) putString(KEY_ROLE, dto.role)
-                if (dto.label.isNotBlank()) putString(KEY_LABEL, dto.label)
+            "REVOKED" -> {
+                val targetSeatId = dtoSeatId.ifBlank { prevSeat.seatId }.trim().ifBlank { null }
+                handleSeatRevokedOrDisplacedInternal(
+                    context = app,
+                    newStatus = normStatus.ifEmpty { "REVOKED" },
+                    expectedEpoch = expectedEpoch,
+                    expectedSeatId = targetSeatId
+                )
             }
-            for (dir in listOfNotNull(app.noBackupFilesDir, app.filesDir)) {
-                runCatching { File(dir, LEGACY_WRAPPED_DIR_KEY_FILE).delete() }
-                runCatching { File(dir, "directory.db").delete() }
-                runCatching { File(dir, "directory.db.vc").delete() }
+            else -> {
+                notifyTrustStateListeners(app)
             }
-            notifyTrustStateListeners(app)
-            PriorityVault.syncAllAsync(app)
-            return
         }
-
-        if (normStatus == "REVOKED" ||
-            normStatus == "DISPLACED" ||
-            (wasEnrolled && (isStatusPoll || normStatus.isNotEmpty()))
-        ) {
-            handleSeatRevokedOrDisplaced(app, newStatus = normStatus.ifEmpty { "REVOKED" })
-            return
-        }
-
-        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-            putString(KEY_STATUS, dto.status.ifBlank { "UNENROLLED" })
-            if (dto.role.isNotBlank()) putString(KEY_ROLE, dto.role)
-            if (dto.label.isNotBlank()) putString(KEY_LABEL, dto.label)
-        }
-        notifyTrustStateListeners(app)
+        return AuthOutcomeResult(
+            dto = dto,
+            committed = true,
+            nextExpectedEpoch = committedEpoch,
+            superseded = false
+        )
     }
 
     /** Test-only helper for configuring an enrolled seat in Robolectric JVM unit tests. */
@@ -1187,27 +1818,78 @@ object DeviceTrustManager {
         seatId: String,
         slug: String = "inv-test",
         voucher: String = "vouch-test",
-        role: String = "MEMBER"
+        role: String = "RESPONDER",
+        roles: List<String> = emptyList(),
+        affinityGroup: String? = null
     ) {
         val app = context.applicationContext ?: context
-        getOrCreateSigningKeys()
-        saveSeatIdentity(app, SeatIdentity(seatId = seatId, slug = slug, voucher = voucher))
-        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-            putString(KEY_STATUS, "ENROLLED")
-            putString(KEY_ROLE, role)
+        val normRoles = normalizeRoles(roles, role)
+        val normRoleArg = normalizeRoleToken(role)
+        val primaryRole = if (roles.isNotEmpty() && normRoleArg == "RESPONDER" && "RESPONDER" !in normRoles) {
+            normRoles.first()
+        } else {
+            resolvePrimaryRole(roles, role)
+        }
+        val cleanAffinity = affinityGroup?.trim()?.takeIf { it.isNotEmpty() }
+        val hasIntelNow = normRoles.any { it == "INTELLIGENCE" || it == "OWNER" }
+
+        var hadIntel = false
+        var priorSeatId = ""
+        synchronized(trustMutationLock) {
+            authMutationEpoch.incrementAndGet()
+            hadIntel = hasIntelligenceAccess(app)
+            priorSeatId = loadOrExtractSeatIdentity(app)?.seatId?.trim().orEmpty()
+            getOrCreateSigningKeys()
+            saveSeatIdentity(app, SeatIdentity(seatId = seatId, slug = slug, voucher = voucher))
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit(commit = true) {
+                putString(KEY_STATUS, "ENROLLED")
+                putString(KEY_ROLE, primaryRole)
+                putString(KEY_ROLES, encodeRolesJson(normRoles))
+                if (cleanAffinity != null) {
+                    putString(KEY_AFFINITY_GROUP, cleanAffinity)
+                } else {
+                    remove(KEY_AFFINITY_GROUP)
+                }
+            }
+        }
+        if (priorSeatId.isNotBlank() && priorSeatId != seatId.trim()) {
+            clearSessionKeyForOtherSeat(seatId.trim())
+        }
+        if (hadIntel && !hasIntelNow) {
+            PriorityVault.purgeDirectoryTiersOnDowngrade(app)
+            KokohoDirectory.purgeDecryptedCache(app)
+            KokohoDirectory.ensureLoaded(app)
+        } else if (!hadIntel && hasIntelNow) {
+            PriorityVault.clearInMemoryCaches(app)
+            KokohoDirectory.invalidateForReload()
+            KokohoDirectory.ensureLoaded(app)
         }
         notifyTrustStateListeners(app)
     }
 
     internal fun resetTrustForTest(context: Context) {
         val app = context.applicationContext ?: context
+        val children = scopeJob.children.toList()
+        scopeJob.cancelChildren()
+        if (children.isNotEmpty()) {
+            runBlocking {
+                withTimeoutOrNull(3_000L) {
+                    children.forEach { it.join() }
+                }
+            }
+        }
+        PriorityVault.cancelAndAwaitAsyncForTest()
         VpnGeoGate.resetForTest()
         clearSessionKey()
+        synchronized(trustMutationLock) {
+            activeClaimCount.set(0)
+            authMutationEpoch.incrementAndGet()
+            trustListeners.clear()
+            runCatching { File(app.noBackupFilesDir, SEAT_FILE_NAME).delete() }
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit(commit = true) { clear() }
+        }
         PriorityVault.destroyVaultKeyAndFiles(app)
-        runCatching { File(app.noBackupFilesDir, SEAT_FILE_NAME).delete() }
-        app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { clear() }
         KokohoDirectory.purgeDecryptedCache(app)
-        notifyTrustStateListeners(app)
     }
 
     private fun normalizeFixed32(raw: ByteArray): ByteArray {

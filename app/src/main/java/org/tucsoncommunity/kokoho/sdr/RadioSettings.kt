@@ -36,7 +36,7 @@ object RadioSettings {
         )
     }
 
-    private val RANGE = Regex("""^\s*(\d{2,4}(?:[.,]\d+)?)\s*(?:-|–|to)\s*(\d{2,4}(?:[.,]\d+)?)\s*(?:mhz)?\s*(.*)$""", RegexOption.IGNORE_CASE)
+    private val RANGE = Regex("""^\s*(\d{2,4}(?:[.,]\d+)?)\s*(?:-|to)\s*(\d{2,4}(?:[.,]\d+)?)\s*(?:mhz)?\s*(.*)$""", RegexOption.IGNORE_CASE)
     private val PLAIN_LINE = Regex("""^\s*\d{2,4}(?:\.\d+)?(?:\s|$)""")
     private val FREQ = Regex("""^\s*(\d{2,4}(?:[.,]\d+)?)\s*(?:mhz)?\s*[,;:\-]?\s*(.*)$""", RegexOption.IGNORE_CASE)
 

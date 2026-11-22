@@ -17,6 +17,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -45,6 +46,11 @@ class DeviceTrustAndSchemaTest {
 
     private var activeServer: HttpServer? = null
 
+    @Before
+    fun setUp() {
+        DeviceTrustManager.clearTrustListenersForTest()
+    }
+
     @After
     fun tearDown() {
         activeServer?.stop(0)
@@ -55,6 +61,7 @@ class DeviceTrustAndSchemaTest {
         KokohoHubClient.clearAllOnRevocation(ctx)
         KokohoHubClient.setHubUrl(ctx, KokohoHubClient.DEFAULT_HUB_URL)
         Shadows.shadowOf(Looper.getMainLooper()).idle()
+        DeviceTrustManager.clearTrustListenersForTest()
     }
 
     @Test
@@ -195,7 +202,7 @@ class DeviceTrustAndSchemaTest {
     fun allV1312DtosHaveExplicitSerializedNameOnEverySingleField() {
         val dtoClasses = listOf(
             DeviceTrustManager.SeatIdentity::class.java to 3,
-            DeviceTrustManager.AuthResponseDto::class.java to 7,
+            DeviceTrustManager.AuthResponseDto::class.java to 9,
             DeviceTrustManager.SessionKeyRequestDto::class.java to 1,
             DeviceTrustManager.SessionKeyResponseDto::class.java to 4,
             DeviceTrustManager.AeadEnvelopeDto::class.java to 3,
@@ -223,9 +230,14 @@ class DeviceTrustAndSchemaTest {
         val authFieldNames = DeviceTrustManager.AuthResponseDto::class.java.declaredFields.map { it.name }
         assertFalse("dirKeyHex must be eliminated in v1.3.12", "dirKeyHex" in authFieldNames)
 
+        val defaultAuth = DeviceTrustManager.AuthResponseDto()
+        assertEquals("RESPONDER", defaultAuth.role)
+        assertTrue(defaultAuth.roles.isEmpty())
+        assertNull(defaultAuth.affinityGroup)
+
         val gson = Gson()
         val parsedAuth = gson.fromJson(
-            """{"ok":true,"status":"ENROLLED","seat_id":"seat-009","slug":"inv-abc","role":"OWNER","label":"Alpha","message":"ok"}""",
+            """{"ok":true,"status":"ENROLLED","seat_id":"seat-009","slug":"inv-abc","role":"OWNER","roles":["OWNER","DEV"],"affinity_group":"Core","label":"Alpha","message":"ok"}""",
             DeviceTrustManager.AuthResponseDto::class.java
         )
         assertTrue(parsedAuth.ok)
@@ -233,6 +245,8 @@ class DeviceTrustAndSchemaTest {
         assertEquals("seat-009", parsedAuth.seatId)
         assertEquals("inv-abc", parsedAuth.slug)
         assertEquals("OWNER", parsedAuth.role)
+        assertEquals(listOf("OWNER", "DEV"), parsedAuth.roles)
+        assertEquals("Core", parsedAuth.affinityGroup)
         assertEquals("Alpha", parsedAuth.label)
         assertEquals("ok", parsedAuth.message)
     }
@@ -585,138 +599,156 @@ class DeviceTrustAndSchemaTest {
         KokohoHubClient.setHubUrl(ctx, baseUrl)
 
         // 0. Unenrolled baseline: Search tab must be hidden!
-        val act = Robolectric.buildActivity(AppCompatActivity::class.java).setup().get()
+        val actCtrl = Robolectric.buildActivity(AppCompatActivity::class.java).setup()
+        val act = actCtrl.get()
         val binding = ActivityMainBinding.inflate(act.layoutInflater)
         act.setContentView(binding.root)
         val views = KokohoViews(act, binding, onSwitchPanes = {}, onFilterChanged = {})
-        assertEquals(listOf("Monitor", "Map"), views.visibleTabs.map { it.title })
-        assertNull(views.tabButton(KokohoViews.Tab.SEARCH))
+        try {
+            assertEquals(listOf("Monitor", "Map"), views.visibleTabs.map { it.title })
+            assertNull(views.tabButton(KokohoViews.Tab.SEARCH))
 
-        // 1. Enroll seat -> Search tab dynamically appears!
-        DeviceTrustManager.setEnrolledForTest(ctx, seatId = "seat-unit-01", slug = "inv-unit-test")
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-        assertEquals(listOf("Monitor", "Map", "Search"), views.visibleTabs.map { it.title })
-        assertNotNull(views.tabButton(KokohoViews.Tab.SEARCH))
-        views.selectTab(KokohoViews.Tab.SEARCH)
-        assertEquals(KokohoViews.Tab.SEARCH, views.currentTab)
+            // 1. Enroll Intelligence seat -> Search tab dynamically appears!
+            DeviceTrustManager.setEnrolledForTest(ctx, seatId = "seat-unit-01", slug = "inv-unit-test", roles = listOf("INTELLIGENCE"))
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(listOf("Monitor", "Map", "Search"), views.visibleTabs.map { it.title })
+            assertNotNull(views.tabButton(KokohoViews.Tab.SEARCH))
+            views.selectTab(KokohoViews.Tab.SEARCH)
+            assertEquals(KokohoViews.Tab.SEARCH, views.currentTab)
 
-        // 2. Device locked simulation: sync defers cleanly without writing partial files!
-        PriorityVault.simulateDeviceLockedForTest = true
-        assertFalse(PriorityVault.syncAllBlocking(ctx))
-        assertTrue(PriorityVault.syncDeferredWhileLocked)
-        PriorityVault.simulateDeviceLockedForTest = false
+            // 2. Device locked simulation: sync defers cleanly without writing partial files!
+            PriorityVault.simulateDeviceLockedForTest = true
+            assertFalse(PriorityVault.syncAllBlocking(ctx))
+            assertTrue(PriorityVault.syncDeferredWhileLocked)
+            PriorityVault.simulateDeviceLockedForTest = false
 
-        // 3. Initial Priority-Ordered Sync (SNAPSHOT + P2 200 + P3 200)
-        assertTrue(PriorityVault.syncAllBlocking(ctx))
-        assertFalse(PriorityVault.syncDeferredWhileLocked)
-        assertEquals(1, handshakeCount.get())
-        assertEquals(listOf("since_ms=0"), p1Calls.toList())
-        assertEquals(listOf(""), p2IfNoneMatchSeen.toList())
-        assertEquals(listOf(""), p3IfNoneMatchSeen.toList())
+            // 3. Initial Priority-Ordered Sync (SNAPSHOT + P2 200 + P3 200)
+            assertTrue(PriorityVault.syncAllBlocking(ctx))
+            assertFalse(PriorityVault.syncDeferredWhileLocked)
+            assertEquals(1, handshakeCount.get())
+            assertEquals(listOf("since_ms=0"), p1Calls.toList())
+            assertEquals(listOf(""), p2IfNoneMatchSeen.toList())
+            assertEquals(listOf(""), p3IfNoneMatchSeen.toList())
 
-        // Verify zero directory.db exists on disk, while sealed .seal files exist and do NOT contain plaintext!
-        assertFalse("Zero directory.db file may ever be written to disk", File(ctx.noBackupFilesDir, "directory.db").exists())
-        val p2SealBytes = File(PriorityVault.vaultDir(ctx), PriorityVault.P2_SECTOR_DIR_FILE).readBytes()
-        assertFalse("Sealed tier blob must not contain plaintext strings", String(p2SealBytes, Charsets.ISO_8859_1).contains("Dana Supervisor"))
+            // Verify zero directory.db exists on disk, while sealed .seal files exist and do NOT contain plaintext!
+            assertFalse("Zero directory.db file may ever be written to disk", File(ctx.noBackupFilesDir, "directory.db").exists())
+            val p2SealBytes = File(PriorityVault.vaultDir(ctx), PriorityVault.P2_SECTOR_DIR_FILE).readBytes()
+            assertFalse("Sealed tier blob must not contain plaintext strings", String(p2SealBytes, Charsets.ISO_8859_1).contains("Dana Supervisor"))
 
-        // Verify hydrated plates, locations, stationed personnel, and edges/managed_by
-        val plates1 = KokohoHubClient.syncedPlates(ctx)
-        assertEquals(2, plates1.size)
-        assertEquals("Silver", plates1.first { it.plateId == "pl-alpha" }.color)
+            // Verify hydrated plates, locations, stationed personnel, and edges/managed_by
+            val plates1 = KokohoHubClient.syncedPlates(ctx)
+            assertEquals(2, plates1.size)
+            assertEquals("Silver", plates1.first { it.plateId == "pl-alpha" }.color)
 
-        val annexLoc = KokohoDirectory.locationById(ctx, "loc:sector-annex-1")
-        assertNotNull("Synced p2_sector_dir location must hydrate into KokohoDirectory", annexLoc)
-        assertEquals("Sector Annex Test Facility", annexLoc!!.title)
-        assertEquals(2, KokohoDirectory.stationedPersonnelCount(ctx, annexLoc.id))
-        assertEquals("Dana Supervisor", KokohoDirectory.managedBy(ctx, "p-analyst-2")?.fullName)
-        assertEquals("Dana Supervisor", KokohoDirectory.managedBy(ctx, "p-regional-3")?.fullName)
-        assertEquals(
-            listOf("Alex Analyst", "Morgan Regional"),
-            KokohoDirectory.manages(ctx, "p-supervisor-1").map { it.fullName }
-        )
+            val annexLoc = KokohoDirectory.locationById(ctx, "loc:sector-annex-1")
+            assertNotNull("Synced p2_sector_dir location must hydrate into KokohoDirectory", annexLoc)
+            assertEquals("Sector Annex Test Facility", annexLoc!!.title)
+            assertEquals(2, KokohoDirectory.stationedPersonnelCount(ctx, annexLoc.id))
+            assertEquals("Dana Supervisor", KokohoDirectory.managedBy(ctx, "p-analyst-2")?.fullName)
+            assertEquals("Dana Supervisor", KokohoDirectory.managedBy(ctx, "p-regional-3")?.fullName)
+            assertEquals(
+                listOf("Alex Analyst", "Morgan Regional"),
+                KokohoDirectory.manages(ctx, "p-supervisor-1").map { it.fullName }
+            )
 
-        // 4. Force 419 SESSION_KEY_EXPIRED + Second Sync -> must renegotiate session key ONCE, merge P1 DELTA, and get 304 on P2 & P3!
-        forceExpireNextRequest.set(true)
-        assertTrue(PriorityVault.syncAllBlocking(ctx))
-        assertEquals("419 must trigger exactly one session-key renegotiation", 2, handshakeCount.get())
-        assertEquals(listOf("since_ms=0", "since_ms=1000"), p1Calls.toList())
-        assertEquals("\"etag-p2-v1\"", p2IfNoneMatchSeen.last())
-        assertEquals("\"etag-p3-v1\"", p3IfNoneMatchSeen.last())
+            // 4. Force 419 SESSION_KEY_EXPIRED + Second Sync -> must renegotiate session key ONCE, merge P1 DELTA, and get 304 on P2 & P3!
+            forceExpireNextRequest.set(true)
+            assertTrue(PriorityVault.syncAllBlocking(ctx))
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            views.searchView?.awaitPendingQueriesForTest { Shadows.shadowOf(Looper.getMainLooper()).idle() }
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals("419 must trigger exactly one session-key renegotiation", 2, handshakeCount.get())
+            assertEquals(listOf("since_ms=0", "since_ms=1000"), p1Calls.toList())
+            assertEquals("\"etag-p2-v1\"", p2IfNoneMatchSeen.last())
+            assertEquals("\"etag-p3-v1\"", p3IfNoneMatchSeen.last())
 
-        val platesMerged = KokohoHubClient.syncedPlates(ctx)
-        assertEquals("DELTA must update pl-alpha and append pl-gamma (total 3)", 3, platesMerged.size)
-        val updatedAlpha = platesMerged.first { it.plateId == "pl-alpha" }
-        assertEquals("Charcoal", updatedAlpha.color)
-        assertTrue(updatedAlpha.detected)
-        assertEquals(2_000L, PriorityVault.readVaultMeta(ctx).p1SinceMs)
+            val platesMerged = KokohoHubClient.syncedPlates(ctx)
+            assertEquals("DELTA must update pl-alpha and append pl-gamma (total 3)", 3, platesMerged.size)
+            val updatedAlpha = platesMerged.first { it.plateId == "pl-alpha" }
+            assertEquals("Charcoal", updatedAlpha.color)
+            assertTrue(updatedAlpha.detected)
+            assertEquals(2_000L, PriorityVault.readVaultMeta(ctx).p1SinceMs)
 
-        // 5. ACTION_SCREEN_OFF Broadcast -> must zero all decrypted RAM caches, then transparently re-unseal on next read!
-        assertFalse(PriorityVault.isInMemoryCacheZeroed())
-        ctx.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
-        assertTrue("ACTION_SCREEN_OFF must zero in-RAM PriorityVault caches", PriorityVault.isInMemoryCacheZeroed())
-        assertFalse("KokohoDirectory in-RAM hydrated state must clear on screen off", KokohoDirectory.isDirectoryAvailable)
+            // 5. ACTION_SCREEN_OFF Broadcast -> must zero all decrypted RAM caches, block unsealing while off, then re-unseal on wake!
+            assertFalse(PriorityVault.isInMemoryCacheZeroed())
+            ctx.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            views.searchView?.awaitPendingQueriesForTest { Shadows.shadowOf(Looper.getMainLooper()).idle() }
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertTrue("ACTION_SCREEN_OFF must zero in-RAM PriorityVault caches", PriorityVault.isInMemoryCacheZeroed())
+            assertFalse("KokohoDirectory in-RAM hydrated state must clear on screen off", KokohoDirectory.isDirectoryAvailable)
+            assertTrue("Plates must remain sealed while screen is off", KokohoHubClient.syncedPlates(ctx).isEmpty())
+            assertNull("Directory person must remain sealed while screen is off", KokohoDirectory.personById(ctx, "p-supervisor-1"))
+            assertTrue("Cache must remain zeroed after reads while screen is off", PriorityVault.isInMemoryCacheZeroed())
 
-        // Re-access while unlocked -> transparently unseals in <25ms without network!
-        val t0 = System.nanoTime()
-        val rehydratedPlates = KokohoHubClient.syncedPlates(ctx)
-        val rehydratedPerson = KokohoDirectory.personById(ctx, "p-supervisor-1")
-        val elapsedMs = (System.nanoTime() - t0) / 1_000_000.0
-        assertEquals(3, rehydratedPlates.size)
-        assertEquals("Dana Supervisor", rehydratedPerson?.fullName)
-        assertTrue("Transparent re-unseal took ${elapsedMs}ms", elapsedMs < 250.0)
+            // Re-access after wake/unlock -> transparently unseals in <25ms without network!
+            ctx.sendBroadcast(Intent(Intent.ACTION_SCREEN_ON))
+            ctx.sendBroadcast(Intent(Intent.ACTION_USER_PRESENT))
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            val t0 = System.nanoTime()
+            val rehydratedPlates = KokohoHubClient.syncedPlates(ctx)
+            val rehydratedPerson = KokohoDirectory.personById(ctx, "p-supervisor-1")
+            val elapsedMs = (System.nanoTime() - t0) / 1_000_000.0
+            assertEquals(3, rehydratedPlates.size)
+            assertEquals("Dana Supervisor", rehydratedPerson?.fullName)
+            assertTrue("Transparent re-unseal took ${elapsedMs}ms", elapsedMs < 250.0)
 
-        // 6. Enveloped POST /v1/checkin succeeds while enrolled, then seat is REVOKED (403 + x-kokoho-seat-status: REVOKED)!
-        val checkinOk = DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=0", "{}")
-        assertNotNull(checkinOk)
-        assertEquals(200, checkinOk!!.code)
-        KokohoHubClient.ingestThreatObjectJson("""{"uuid":"threat-live-1","updated_at_ms":${System.currentTimeMillis()}}""")
-        assertEquals(1, KokohoHubClient.activeObjects().size)
+            // 6. Enveloped POST /v1/checkin succeeds while enrolled, then seat is REVOKED (403 + x-kokoho-seat-status: REVOKED)!
+            val checkinOk = DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=0", "{}")
+            assertNotNull(checkinOk)
+            assertEquals(200, checkinOk!!.code)
+            KokohoHubClient.ingestThreatObjectJson("""{"uuid":"threat-live-1","updated_at_ms":${System.currentTimeMillis()}}""")
+            assertEquals(1, KokohoHubClient.activeObjects().size)
 
-        // Seed legacy artifacts to verify revocation deletes them too
-        File(ctx.noBackupFilesDir, "dir_key.wrap").writeBytes(byteArrayOf(1, 2, 3))
-        File(ctx.noBackupFilesDir, "directory.db").writeBytes(byteArrayOf(4, 5, 6))
-        File(ctx.noBackupFilesDir, "directory.db.vc").writeText("1411")
-        ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putString("kokoho_synced_plates_json", "[{\"plate_id\":\"legacy\"}]")
-            .putString("synced_plates_json", "[{\"plate_id\":\"legacy\"}]")
-            .commit()
+            // Seed legacy artifacts to verify revocation deletes them too
+            File(ctx.noBackupFilesDir, "dir_key.wrap").writeBytes(byteArrayOf(1, 2, 3))
+            File(ctx.noBackupFilesDir, "directory.db").writeBytes(byteArrayOf(4, 5, 6))
+            File(ctx.noBackupFilesDir, "directory.db.vc").writeText("1411")
+            ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("kokoho_synced_plates_json", "[{\"plate_id\":\"legacy\"}]")
+                .putString("synced_plates_json", "[{\"plate_id\":\"legacy\"}]")
+                .commit()
 
-        seatRevokedOnHub.set(true)
-        val revokedResp = DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=42", "{}")
-        assertNull("Revoked seat checkin must return null after handling 403 REVOKED", revokedResp)
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
+            seatRevokedOnHub.set(true)
+            val revokedResp = DeviceTrustManager.executeEnvelopedPost(ctx, "/v1/checkin?since=42", "{}")
+            assertNull("Revoked seat checkin must return null after handling 403 REVOKED", revokedResp)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
 
-        // Verify ALL 5 atomic wipe guarantees!
-        assertFalse("Device must no longer be enrolled", DeviceTrustManager.isEnrolled(ctx))
-        assertEquals("REVOKED", DeviceTrustManager.enrollmentStatus(ctx))
-        assertFalse("Session key must be wiped", DeviceTrustManager.hasActiveSessionKey())
-        assertFalse("Vault directory must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P1_PLATES_FILE).exists())
-        assertFalse("Vault p2 seal must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P2_SECTOR_DIR_FILE).exists())
-        assertFalse("Vault p3 seal must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P3_EXT_DIR_FILE).exists())
-        assertFalse("Vault meta must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.VAULT_META_FILE).exists())
-        assertFalse("Legacy dir_key.wrap must be wiped", File(ctx.noBackupFilesDir, "dir_key.wrap").exists())
-        assertFalse("Legacy directory.db must be wiped", File(ctx.noBackupFilesDir, "directory.db").exists())
-        assertFalse("Legacy directory.db.vc must be wiped", File(ctx.noBackupFilesDir, "directory.db.vc").exists())
-        assertNull(ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE).getString("kokoho_synced_plates_json", null))
-        assertNull(ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE).getString("synced_plates_json", null))
-        assertTrue("Active Hub objects must be cleared on revocation", KokohoHubClient.activeObjects().isEmpty())
-        assertTrue("Synced plates must be empty after revocation", KokohoHubClient.syncedPlates(ctx).isEmpty())
-        assertNull("Synced facility must be purged from KokohoDirectory", KokohoDirectory.locationById(ctx, "loc:sector-annex-1"))
-        assertNull("Synced person must be purged from KokohoDirectory", KokohoDirectory.personById(ctx, "p-supervisor-1"))
-        assertTrue("Public baseline locations must remain loaded", KokohoDirectory.allLocations(ctx).isNotEmpty())
+            // Verify ALL 5 atomic wipe guarantees!
+            assertFalse("Device must no longer be enrolled", DeviceTrustManager.isEnrolled(ctx))
+            assertEquals("REVOKED", DeviceTrustManager.enrollmentStatus(ctx))
+            assertFalse("Session key must be wiped", DeviceTrustManager.hasActiveSessionKey())
+            assertFalse("Vault directory must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P1_PLATES_FILE).exists())
+            assertFalse("Vault p2 seal must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P2_SECTOR_DIR_FILE).exists())
+            assertFalse("Vault p3 seal must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.P3_EXT_DIR_FILE).exists())
+            assertFalse("Vault meta must be wiped", File(PriorityVault.vaultDir(ctx), PriorityVault.VAULT_META_FILE).exists())
+            assertFalse("Legacy dir_key.wrap must be wiped", File(ctx.noBackupFilesDir, "dir_key.wrap").exists())
+            assertFalse("Legacy directory.db must be wiped", File(ctx.noBackupFilesDir, "directory.db").exists())
+            assertFalse("Legacy directory.db.vc must be wiped", File(ctx.noBackupFilesDir, "directory.db.vc").exists())
+            assertNull(ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE).getString("kokoho_synced_plates_json", null))
+            assertNull(ctx.getSharedPreferences("kokoho_hub_prefs", Context.MODE_PRIVATE).getString("synced_plates_json", null))
+            assertTrue("Active Hub objects must be cleared on revocation", KokohoHubClient.activeObjects().isEmpty())
+            assertTrue("Synced plates must be empty after revocation", KokohoHubClient.syncedPlates(ctx).isEmpty())
+            assertNull("Synced facility must be purged from KokohoDirectory", KokohoDirectory.locationById(ctx, "loc:sector-annex-1"))
+            assertNull("Synced person must be purged from KokohoDirectory", KokohoDirectory.personById(ctx, "p-supervisor-1"))
+            assertTrue("Public baseline locations must remain loaded", KokohoDirectory.allLocations(ctx).isNotEmpty())
 
-        // Search tab must collapse cleanly back to Monitor!
-        assertEquals(listOf("Monitor", "Map"), views.visibleTabs.map { it.title })
-        assertNull(views.tabButton(KokohoViews.Tab.SEARCH))
-        assertNull(views.searchView)
-        assertEquals(KokohoViews.Tab.MONITOR, views.currentTab)
+            // Search tab must collapse cleanly back to Monitor!
+            assertEquals(listOf("Monitor", "Map"), views.visibleTabs.map { it.title })
+            assertNull(views.tabButton(KokohoViews.Tab.SEARCH))
+            assertNull(views.searchView)
+            assertEquals(KokohoViews.Tab.MONITOR, views.currentTab)
 
-        // seat_identity.json MUST remain intact for future Restore in Permissions!
-        val preservedSeat = DeviceTrustManager.loadOrExtractSeatIdentity(ctx)
-        assertNotNull("seat_identity.json must remain intact for Restore", preservedSeat)
-        assertEquals("seat-unit-01", preservedSeat!!.seatId)
+            // seat_identity.json MUST remain intact for future Restore in Permissions!
+            val preservedSeat = DeviceTrustManager.loadOrExtractSeatIdentity(ctx)
+            assertNotNull("seat_identity.json must remain intact for Restore", preservedSeat)
+            assertEquals("seat-unit-01", preservedSeat!!.seatId)
+        } finally {
+            views.destroy()
+            actCtrl.pause().stop().destroy()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+        }
     }
 
     @Test
@@ -795,7 +827,8 @@ class DeviceTrustAndSchemaTest {
                 status = "ENROLLED",
                 seatId = "seat-new-02",
                 slug = "inv-new-02",
-                role = "MEMBER",
+                role = "RESPONDER",
+                roles = listOf("RESPONDER"),
                 label = "Invite 2"
             )
             val bytes = gson.toJson(resp).toByteArray(Charsets.UTF_8)
@@ -859,7 +892,7 @@ class DeviceTrustAndSchemaTest {
         activeServer = server
         server.createContext("/") { ex ->
             hitCount.incrementAndGet()
-            val bytes = """{"ok":true,"status":"ENROLLED","seat_id":"seat-vpn-1","slug":"inv-vpn-1","role":"MEMBER","label":"VpnSeat"}""".toByteArray(Charsets.UTF_8)
+            val bytes = """{"ok":true,"status":"ENROLLED","seat_id":"seat-vpn-1","slug":"inv-vpn-1","role":"RESPONDER","roles":["RESPONDER"],"label":"VpnSeat"}""".toByteArray(Charsets.UTF_8)
             ex.responseHeaders.set("Content-Type", "application/json")
             ex.sendResponseHeaders(200, bytes.size.toLong())
             ex.responseBody.use { it.write(bytes) }

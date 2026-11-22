@@ -30,6 +30,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.TooltipCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import com.google.android.material.button.MaterialButton
 import org.tucsoncommunity.kokoho.R
 import org.tucsoncommunity.kokoho.databinding.ActivityMainBinding
@@ -46,6 +48,8 @@ import org.tucsoncommunity.kokoho.util.UpdateChecker
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Manages Kokoho's 3 top-level activity categories and full-bleed posture UI:
@@ -169,6 +173,10 @@ class KokohoViews(
     var searchView: org.tucsoncommunity.kokoho.ui.KokohoSearchView? = null
         private set
     private var unregisterTrustListener: (() -> Unit)? = null
+    @Volatile
+    private var destroyed = false
+    internal val initialSyncCompleted = AtomicBoolean(false)
+    private var lifecycleObserver: DefaultLifecycleObserver? = null
     private val vpnNoticeWrapper: FrameLayout
     val vpnNoticePill: MaterialButton
     private val bluetoothNoticePill: MaterialButton
@@ -535,30 +543,61 @@ class KokohoViews(
         refreshSearchTabVisibility()
 
         val selfRef = java.lang.ref.WeakReference(this)
-        unregisterTrustListener = DeviceTrustManager.addTrustStateListener {
+        val unregisterRef = AtomicReference<(() -> Unit)?>(null)
+        val unreg = DeviceTrustManager.addTrustStateListener {
             val v = selfRef.get()
-            if (v == null || v.activity.isDestroyed) {
-                unregisterTrustListener?.invoke()
-                unregisterTrustListener = null
+            if (v == null || v.destroyed || v.activity.isDestroyed || v.activity.isFinishing) {
+                unregisterRef.getAndSet(null)?.invoke()
             } else {
                 v.syncVpnNoticeVisibility()
                 v.refreshSearchTabVisibility()
-                v.searchView?.scheduleSearch()
+                v.searchView?.onTrustOrVaultUpdated()
                 v.onFilterChanged()
             }
         }
+        unregisterRef.set(unreg)
+        unregisterTrustListener = unreg
+
+        val observer = object : DefaultLifecycleObserver {
+            override fun onDestroy(owner: LifecycleOwner) {
+                selfRef.get()?.destroy()
+            }
+        }
+        lifecycleObserver = observer
+        activity.lifecycle.addObserver(observer)
+
         DeviceTrustManager.ensureEnrolledAsync(activity) {
-            syncVpnNoticeVisibility()
-            refreshSearchTabVisibility()
-            searchView?.scheduleSearch()
-            onFilterChanged()
+            val v = selfRef.get()
+            if (v == null || v.destroyed || v.activity.isDestroyed || v.activity.isFinishing) {
+                return@ensureEnrolledAsync
+            }
+            v.initialSyncCompleted.set(true)
+            v.syncVpnNoticeVisibility()
+            v.refreshSearchTabVisibility()
+            v.searchView?.onTrustOrVaultUpdated()
+            v.onFilterChanged()
         }
 
         syncRunningState(ScanForegroundService.isRunning)
         selectTab(Tab.MONITOR)
     }
 
+    fun destroy() {
+        if (destroyed) return
+        destroyed = true
+        unregisterTrustListener?.invoke()
+        unregisterTrustListener = null
+        lifecycleObserver?.let { obs ->
+            runCatching { activity.lifecycle.removeObserver(obs) }
+        }
+        lifecycleObserver = null
+        stopSharePulse()
+        searchView?.destroy()
+        searchView = null
+    }
+
     fun refreshSearchTabVisibility() {
+        if (destroyed || activity.isDestroyed || activity.isFinishing) return
         val wantSearch = DeviceTrustManager.isEnrolled(activity) || PriorityVault.hasAnySyncedData(activity)
         val nextTabs = if (wantSearch) {
             listOf(Tab.MONITOR, Tab.MAP, Tab.SEARCH)
@@ -578,6 +617,7 @@ class KokohoViews(
             val oldSv = searchView
             searchView = null
             oldSv?.onTabUnselected()
+            oldSv?.destroy()
             oldSv?.root?.let { binding.contentArea.removeView(it) }
         }
 

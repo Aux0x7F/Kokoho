@@ -81,7 +81,7 @@ object DeviceRows {
                 else if (category != null && d.name != null && d.name != label) "\"${d.name}\"" else type?.takeIf { it != label },
                 if (category != null) sources.joinToString("+") { if (it == Advert.Source.BLE) "BLE" else "WiFi" }.ifEmpty { null } else null,
                 "${ProximityUtil.band(d.bestRssi)} ${d.bestRssi} dBm",
-                timeFmt.format(Date(d.firstSeen)) + "–" + timeFmt.format(Date(d.lastSeen))
+                timeFmt.format(Date(d.firstSeen)) + "-" + timeFmt.format(Date(d.lastSeen))
             ) + badges).joinToString(" · "),
             tag = tag,
             tagColor = when {

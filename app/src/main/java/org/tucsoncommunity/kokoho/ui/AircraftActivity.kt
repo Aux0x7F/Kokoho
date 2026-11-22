@@ -71,7 +71,7 @@ class AircraftActivity : AppCompatActivity() {
         val box = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         val root = android.widget.ScrollView(ctx).apply { addView(box); visibility = View.GONE }
         val tiles = listOf(VisualMode.tile(ctx, "0", "aircraft", accent), VisualMode.tile(ctx, "0", "law enforcement", POLICE),
-            VisualMode.tile(ctx, "–", "nearest", accent))
+            VisualMode.tile(ctx, "-", "nearest", accent))
         val radar = AircraftRadarView(ctx)
         val sources = TextView(ctx).apply { textSize = 12f; alpha = 0.8f }
         val rateCard: LinearLayout
@@ -95,7 +95,7 @@ class AircraftActivity : AppCompatActivity() {
         fun show(list: List<Row>) {
             value(tiles[0], "${list.size}")
             value(tiles[1], "${list.count { it.seen.hit != null }}")
-            value(tiles[2], list.firstNotNullOfOrNull { it.distanceKm }?.let { Units.distance(it * 1000) } ?: "–")
+            value(tiles[2], list.firstNotNullOfOrNull { it.distanceKm }?.let { Units.distance(it * 1000) } ?: "-")
             val far = list.mapNotNull { it.distanceKm }.maxOrNull() ?: 0.0
             val range = listOf(10.0, 25.0, 50.0, 100.0, 200.0).firstOrNull { far <= it } ?: 200.0
             radar.set(list.mapNotNull { r ->

@@ -22,6 +22,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.annotation.VisibleForTesting
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -31,14 +32,17 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import org.tucsoncommunity.kokoho.posture.DeviceTrustManager
 import org.tucsoncommunity.kokoho.posture.EvaluatedThreat
 import org.tucsoncommunity.kokoho.posture.KokohoAgency
 import org.tucsoncommunity.kokoho.posture.KokohoDirectory
 import org.tucsoncommunity.kokoho.posture.KokohoPostureEngine
+import org.tucsoncommunity.kokoho.posture.PriorityVault
 import org.tucsoncommunity.kokoho.service.DeviceRegistry
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -103,6 +107,9 @@ class KokohoSearchView(
     private val queryGeneration = AtomicLong(0L)
     private val stationedCountCache = ConcurrentHashMap<String, Int>()
     private val iconBitmapCache = ConcurrentHashMap<String, Bitmap>()
+    @Volatile private var isDestroyed: Boolean = false
+    @Volatile private var lastQueryVaultRevision: Long = -1L
+    @Volatile private var lastQueryIntelAccess: Boolean = false
 
     private val adapter = SearchAdapter()
 
@@ -171,7 +178,6 @@ class KokohoSearchView(
         }
 
         searchInput = EditText(activity).apply {
-            hint = "Search detections, stations, personnel, devices…"
             setHintTextColor(KokohoJourneyUi.INK_MUTED)
             setTextColor(Color.WHITE)
             textSize = 15f
@@ -182,6 +188,7 @@ class KokohoSearchView(
             setPadding(0, dp(8), dp(6), dp(8))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
+        updateSearchHint()
 
         clearInputButton = ImageButton(activity).apply {
             contentDescription = "Clear search text"
@@ -318,6 +325,9 @@ class KokohoSearchView(
     fun addFilterPill(pill: String) {
         val clean = pill.trim()
         if (clean.isEmpty()) return
+        if (isPersonSchemaToken(clean) && !DeviceTrustManager.hasIntelligenceAccess(activity)) {
+            return
+        }
         if (activePills.none { it.equals(clean, ignoreCase = true) }) {
             activePills += clean
         }
@@ -332,10 +342,44 @@ class KokohoSearchView(
 
     fun getCurrentResults(): List<SearchResultRow> = adapter.currentList
 
+    @VisibleForTesting
+    internal fun getCurrentSuggestions(): List<String> = currentSuggestions.toList()
+
+    private fun updateSearchHint() {
+        searchInput.hint = if (DeviceTrustManager.hasIntelligenceAccess(activity)) {
+            "Search detections, stations, personnel, devices…"
+        } else {
+            "Search detections, stations, plates, devices…"
+        }
+    }
+
+    private fun isPersonSchemaToken(token: String): Boolean =
+        when (token.trim().lowercase(Locale.US)) {
+            "person", "persons", "personnel", "people" -> true
+            else -> false
+        }
+
+    fun onTrustOrVaultUpdated() {
+        if (isDestroyed || activity.isDestroyed || activity.isFinishing) return
+        stationedCountCache.clear()
+        updateSearchHint()
+        if (!DeviceTrustManager.hasIntelligenceAccess(activity)) {
+            if (activePills.removeAll { isPersonSchemaToken(it) }) {
+                renderPills()
+            }
+        }
+        if (root.visibility == View.VISIBLE && !PriorityVault.isScreenOffOrLocked(activity)) {
+            scheduleSearch()
+        }
+    }
+
     private fun commitTopFilterSuggestionOrRawToken(): Boolean {
         val raw = searchInput.text?.toString()?.trim().orEmpty()
         if (raw.isEmpty()) return false
         val picked = currentSuggestions.firstOrNull() ?: raw
+        if (isPersonSchemaToken(picked) && !DeviceTrustManager.hasIntelligenceAccess(activity)) {
+            return false
+        }
         addFilterPill(picked)
         return true
     }
@@ -354,6 +398,7 @@ class KokohoSearchView(
 
     /** Called when `Tab.SEARCH` becomes active: refreshes index and brings up the soft keyboard immediately. */
     fun onTabSelected() {
+        updateSearchHint()
         renderPills()
         scheduleSearch()
         searchInput.isFocusable = true
@@ -484,16 +529,51 @@ class KokohoSearchView(
         }
     }
 
+    fun destroy() {
+        if (isDestroyed) return
+        isDestroyed = true
+        queryGeneration.incrementAndGet()
+        mainHandler.removeCallbacksAndMessages(null)
+        queryExecutor.shutdownNow()
+        stationedCountCache.clear()
+        iconBitmapCache.clear()
+    }
+
+    @VisibleForTesting
+    internal fun awaitPendingQueriesForTest(drainMainLooper: () -> Unit = {}) {
+        if (!isDestroyed && !queryExecutor.isShutdown) {
+            runCatching { queryExecutor.submit {}.get(5, TimeUnit.SECONDS) }
+        }
+        drainMainLooper()
+    }
+
     fun scheduleSearch() {
+        if (isDestroyed || activity.isDestroyed || activity.isFinishing || queryExecutor.isShutdown) return
+        if (PriorityVault.isScreenOffOrLocked(activity)) return
         val pillsSnapshot = activePills.toList()
         val rawQuery = searchInput.text?.toString()?.trim().orEmpty()
         val gen = queryGeneration.incrementAndGet()
-        queryExecutor.execute {
-            val outcome = executeQuery(pillsSnapshot, rawQuery)
-            if (gen != queryGeneration.get()) return@execute
-            mainHandler.post {
-                if (gen != queryGeneration.get()) return@post
-                applyQueryOutcome(outcome, pillsSnapshot, rawQuery)
+        runCatching {
+            queryExecutor.execute {
+                if (isDestroyed || activity.isDestroyed || activity.isFinishing ||
+                    gen != queryGeneration.get() || PriorityVault.isScreenOffOrLocked(activity)
+                ) {
+                    return@execute
+                }
+                val outcome = executeQuery(pillsSnapshot, rawQuery)
+                if (isDestroyed || activity.isDestroyed || activity.isFinishing ||
+                    gen != queryGeneration.get() || PriorityVault.isScreenOffOrLocked(activity)
+                ) {
+                    return@execute
+                }
+                mainHandler.post {
+                    if (isDestroyed || activity.isDestroyed || activity.isFinishing ||
+                        gen != queryGeneration.get() || PriorityVault.isScreenOffOrLocked(activity)
+                    ) {
+                        return@post
+                    }
+                    applyQueryOutcome(outcome, pillsSnapshot, rawQuery)
+                }
             }
         }
     }
@@ -515,11 +595,17 @@ class KokohoSearchView(
     )
 
     private fun applyQueryOutcome(outcome: QueryOutcome, pills: List<String>, rawQuery: String) {
+        updateSearchHint()
+        var effectivePills = pills
+        if (!DeviceTrustManager.hasIntelligenceAccess(activity) && activePills.removeAll { isPersonSchemaToken(it) }) {
+            renderPills()
+            effectivePills = activePills.toList()
+        }
         // When rawQuery is non-empty, only show filter suggestions that actually match rawQuery;
         // when no filter matches, hide suggestions cleanly while raw search displays matching rows!
         renderSuggestions(outcome.suggestions)
         adapter.submitList(outcome.rows)
-        val hasQuery = pills.isNotEmpty() || rawQuery.isNotEmpty()
+        val hasQuery = effectivePills.isNotEmpty() || rawQuery.isNotEmpty()
         summaryCountView.text = if (hasQuery) {
             "${outcome.rows.size} MATCHING ${if (outcome.rows.size == 1) "RECORD" else "RECORDS"}"
         } else {
@@ -529,7 +615,17 @@ class KokohoSearchView(
     }
 
     private fun executeQuery(pills: List<String>, rawQuery: String): QueryOutcome {
+        if (isDestroyed || PriorityVault.isScreenOffOrLocked(activity)) {
+            return QueryOutcome(suggestions = emptyList(), rows = emptyList())
+        }
         KokohoDirectory.ensureLoaded(activity)
+        val hasIntel = DeviceTrustManager.hasIntelligenceAccess(activity)
+        val curRev = PriorityVault.vaultDataRevision
+        if (lastQueryVaultRevision != curRev || lastQueryIntelAccess != hasIntel) {
+            stationedCountCache.clear()
+            lastQueryVaultRevision = curRev
+            lastQueryIntelAccess = hasIntel
+        }
 
         val allLocations = KokohoDirectory.allLocations(activity)
         val allThreats = KokohoPostureEngine.allSearchableThreats(activity)
@@ -549,7 +645,8 @@ class KokohoSearchView(
         val contentTokens = ArrayList<String>()
 
         for (pill in pills) {
-            val schema = parseSchemaPill(pill)
+            if (isPersonSchemaToken(pill) && !hasIntel) continue
+            val schema = parseSchemaPill(pill, allowPerson = hasIntel)
             if (schema != null) {
                 requestedSchemas += schema
             } else {
@@ -564,7 +661,7 @@ class KokohoSearchView(
 
         val includeDetections = requestedSchemas.isEmpty() || SchemaKind.DETECTION in requestedSchemas
         val includeLocations = requestedSchemas.isEmpty() || SchemaKind.LOCATION in requestedSchemas
-        val includePersons = requestedSchemas.isEmpty() || SchemaKind.PERSON in requestedSchemas
+        val includePersons = hasIntel && (requestedSchemas.isEmpty() || SchemaKind.PERSON in requestedSchemas)
         val includePlates = requestedSchemas.isEmpty() || SchemaKind.PLATE in requestedSchemas
         val includeDevices = requestedSchemas.isEmpty() || SchemaKind.DEVICE in requestedSchemas
 
@@ -742,10 +839,13 @@ class KokohoSearchView(
         return QueryOutcome(suggestions = suggestions, rows = rankedRows)
     }
 
-    private fun parseSchemaPill(token: String): SchemaKind? = when (token.trim().lowercase(Locale.US)) {
+    private fun parseSchemaPill(
+        token: String,
+        allowPerson: Boolean = DeviceTrustManager.hasIntelligenceAccess(activity)
+    ): SchemaKind? = when (token.trim().lowercase(Locale.US)) {
         "detection", "detections", "entity", "entities" -> SchemaKind.DETECTION
         "location", "locations", "station", "stations", "facility", "facilities" -> SchemaKind.LOCATION
-        "person", "persons", "personnel", "people" -> SchemaKind.PERSON
+        "person", "persons", "personnel", "people" -> if (allowPerson) SchemaKind.PERSON else null
         "plate", "plates", "vehicle", "vehicles" -> SchemaKind.PLATE
         "device", "devices", "hardware" -> SchemaKind.DEVICE
         else -> null
@@ -758,7 +858,8 @@ class KokohoSearchView(
         threats: List<EvaluatedThreat>
     ): List<String> {
         val q = rawQuery.trim().lowercase(Locale.US)
-        val hasPersons = KokohoDirectory.isDirectoryAvailable || KokohoDirectory.browsePersons(activity, limit = 1).isNotEmpty()
+        val hasIntel = DeviceTrustManager.hasIntelligenceAccess(activity)
+        val hasPersons = hasIntel && KokohoDirectory.isPersonnelDirectoryAvailable(activity)
         val hasPlates = org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncedPlates(activity).isNotEmpty()
 
         val baseFilters = buildList {
@@ -808,8 +909,10 @@ class KokohoSearchView(
         for (t in threats) {
             for (cap in t.capabilities) consider(cap)
         }
-        for (personSug in KokohoDirectory.suggestPersonPills(activity, q, existingLower, limit = 4)) {
-            consider(personSug)
+        if (hasIntel) {
+            for (personSug in KokohoDirectory.suggestPersonPills(activity, q, existingLower, limit = 4)) {
+                consider(personSug)
+            }
         }
 
         return (prefixMatches + containsMatches).take(8)
@@ -912,8 +1015,12 @@ class KokohoSearchView(
         val isFire = loc.locationGroup.equals("FIRE", ignoreCase = true) ||
             loc.title.contains("Fire", ignoreCase = true) ||
             loc.description.contains("Fire", ignoreCase = true)
-        val count = stationedCountCache.getOrPut(loc.id) {
-            KokohoDirectory.stationedPersonnelCount(activity, loc.id)
+        val count = if (DeviceTrustManager.hasIntelligenceAccess(activity)) {
+            stationedCountCache.getOrPut(loc.id) {
+                KokohoDirectory.stationedPersonnelCount(activity, loc.id)
+            }
+        } else {
+            0
         }
         val countSuffix = if (count > 0) " · $count stationed" else ""
         val detail = listOf(loc.address, loc.description)
@@ -1056,8 +1163,11 @@ class KokohoSearchView(
             }
             row.targetDetailKey.startsWith("loc:", ignoreCase = true) ->
                 DeviceDetailActivity.openLocation(activity, row.targetDetailKey)
-            row.targetDetailKey.startsWith("person:", ignoreCase = true) ->
-                DeviceDetailActivity.openPerson(activity, row.targetDetailKey)
+            row.targetDetailKey.startsWith("person:", ignoreCase = true) -> {
+                if (DeviceTrustManager.hasIntelligenceAccess(activity)) {
+                    DeviceDetailActivity.openPerson(activity, row.targetDetailKey)
+                }
+            }
             else ->
                 activity.startActivity(
                     Intent(activity, DeviceDetailActivity::class.java)

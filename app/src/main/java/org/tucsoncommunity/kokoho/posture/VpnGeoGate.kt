@@ -9,6 +9,7 @@ import android.os.Looper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -64,7 +65,8 @@ object VpnGeoGate {
         RegexOption.IGNORE_CASE
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scopeJob = SupervisorJob()
+    private val scope = CoroutineScope(scopeJob + Dispatchers.IO)
     private val cacheLock = Any()
     private val callbackRegistered = AtomicBoolean(false)
     private val listeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
@@ -120,6 +122,7 @@ object VpnGeoGate {
     }
 
     internal fun resetForTest() {
+        scopeJob.cancelChildren()
         testOverrideVerdict = null
         invalidateCache()
         lastObservedBlockedTucson = false

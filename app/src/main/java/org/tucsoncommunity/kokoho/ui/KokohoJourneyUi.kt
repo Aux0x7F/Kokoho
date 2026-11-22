@@ -666,7 +666,7 @@ object KokohoJourneyUi {
         addUtilEntry("Radio Waterfall", "Live RTL-SDR spectrum waterfall & narrowband hold") {
             activity.startActivity(Intent(activity, WaterfallActivity::class.java))
         }
-        addUtilEntry("Antenna & NOAA Check", "Verify RTL-SDR receive gain on 162.400–162.550 MHz") {
+        addUtilEntry("Antenna & NOAA Check", "Verify RTL-SDR receive gain on 162.400-162.550 MHz") {
             activity.startActivity(Intent(activity, AntennaCheckActivity::class.java))
         }
         addUtilEntry("Aircraft Monitor", "Active ADS-B & orbiting aircraft feed") {

@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.Looper
 import android.view.LayoutInflater
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
@@ -23,6 +24,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.File
@@ -474,43 +476,49 @@ class KokohoTest {
             onSwitchPanes = {},
             onFilterChanged = {}
         )
-        views.syncRunningState(false)
-        val nowMs = 1794373000000L
-        views.selectTab(KokohoViews.Tab.MONITOR)
-        views.updatePosture(nowMs)
+        try {
+            views.syncRunningState(false)
+            val nowMs = 1794373000000L
+            views.selectTab(KokohoViews.Tab.MONITOR)
+            views.updatePosture(nowMs)
 
-        renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#1B5E20"), "kokoho_sandbox_monitor_green_light.png")
+            renderViewToPng(binding.root, 1080, 2160, Color.parseColor("#1B5E20"), "kokoho_sandbox_monitor_green_light.png")
 
-        // Render side-by-side comparison sheet of Light Theme (#000000 black/transparent) vs Dark Theme (#FFFFFF white/transparent) icons
-        val sheet = Bitmap.createBitmap(1080, 560, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(sheet)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            // Render side-by-side comparison sheet of Light Theme (#000000 black/transparent) vs Dark Theme (#FFFFFF white/transparent) icons
+            val sheet = Bitmap.createBitmap(1080, 560, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(sheet)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        // Left half: Light theme surface (#FFFFFF) with light-mode ic_kokoho_logo (#000000 on transparent)
-        paint.color = Color.WHITE
-        canvas.drawRect(0f, 0f, 540f, 560f, paint)
-        val lightLogo = ContextCompat.getDrawable(activity, R.drawable.ic_kokoho_logo)!!
-        lightLogo.setBounds(110, 80, 430, 400)
-        lightLogo.draw(canvas)
-        paint.color = Color.BLACK
-        paint.textSize = 30f
-        paint.textAlign = Paint.Align.CENTER
-        canvas.drawText("Light Theme: #000000 / Transparent", 270f, 490f, paint)
+            // Left half: Light theme surface (#FFFFFF) with light-mode ic_kokoho_logo (#000000 on transparent)
+            paint.color = Color.WHITE
+            canvas.drawRect(0f, 0f, 540f, 560f, paint)
+            val lightLogo = ContextCompat.getDrawable(activity, R.drawable.ic_kokoho_logo)!!
+            lightLogo.setBounds(110, 80, 430, 400)
+            lightLogo.draw(canvas)
+            paint.color = Color.BLACK
+            paint.textSize = 30f
+            paint.textAlign = Paint.Align.CENTER
+            canvas.drawText("Light Theme: #000000 / Transparent", 270f, 490f, paint)
 
-        // Right half: Dark theme surface (#0B0F14) with night-mode ic_kokoho_logo (#FFFFFF on transparent)
-        paint.color = Color.parseColor("#0B0F14")
-        canvas.drawRect(540f, 0f, 1080f, 560f, paint)
-        val nightConfig = Configuration(activity.resources.configuration).apply {
-            uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_YES
+            // Right half: Dark theme surface (#0B0F14) with night-mode ic_kokoho_logo (#FFFFFF on transparent)
+            paint.color = Color.parseColor("#0B0F14")
+            canvas.drawRect(540f, 0f, 1080f, 560f, paint)
+            val nightConfig = Configuration(activity.resources.configuration).apply {
+                uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_YES
+            }
+            val nightCtx = activity.createConfigurationContext(nightConfig)
+            val darkLogo = ContextCompat.getDrawable(nightCtx, R.drawable.ic_kokoho_logo)!!
+            darkLogo.setBounds(650, 80, 970, 400)
+            darkLogo.draw(canvas)
+            paint.color = Color.WHITE
+            canvas.drawText("Dark Theme: #FFFFFF / Transparent", 810f, 490f, paint)
+
+            saveBitmap(sheet, "kokoho_sandbox_theme_icons_proof.png")
+        } finally {
+            views.destroy()
+            controller.pause().stop().destroy()
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
         }
-        val nightCtx = activity.createConfigurationContext(nightConfig)
-        val darkLogo = ContextCompat.getDrawable(nightCtx, R.drawable.ic_kokoho_logo)!!
-        darkLogo.setBounds(650, 80, 970, 400)
-        darkLogo.draw(canvas)
-        paint.color = Color.WHITE
-        canvas.drawText("Dark Theme: #FFFFFF / Transparent", 810f, 490f, paint)
-
-        saveBitmap(sheet, "kokoho_sandbox_theme_icons_proof.png")
     }
 
     @Test
@@ -1366,7 +1374,7 @@ class KokohoTest {
         assertTrue("True distance from home must reflect ~3.5 km (>3200m), got ${rf807.estimatedDistanceM}", rf807.estimatedDistanceM > 3200)
         assertTrue("Anchored mapCircleRadiusM must stay fixed at uncertaintyRadiusM (<= 120m), got ${rf807.mapCircleRadiusM}", rf807.mapCircleRadiusM <= 120)
 
-        // 3. DoD 406.1–411.0 MHz multi-channel base trunk suppression (Davis-Monthan AFB)
+        // 3. DoD 406.1-411.0 MHz multi-channel base trunk suppression (Davis-Monthan AFB)
         RadioLog.clear()
         KokohoHubClient.clearCachedObjects()
         KokohoPostureEngine.clearLocalState()

@@ -498,13 +498,14 @@ object KokohoHubClient {
                     }
                     val base = hubUrl(app)
                     val url = URL("$base/v1/stream?since=$lastSeq&wait_ms=20000")
+                    var streamTag: DeviceTrustManager.SignedRequestTag? = null
                     val conn = (url.openConnection() as HttpURLConnection).apply {
                         requestMethod = "GET"
                         connectTimeout = 10_000
                         readTimeout = 28_000
                         setRequestProperty("Accept", "text/event-stream")
                         if (lastSeq > 0) setRequestProperty("Last-Event-ID", lastSeq.toString())
-                        DeviceTrustManager.attachSignedHeaders(app, this)
+                        streamTag = DeviceTrustManager.attachSignedHeadersWithTag(app, this)
                     }
                     try {
                         val code = conn.responseCode
@@ -536,7 +537,14 @@ object KokohoHubClient {
                         } else {
                             val seatHdr = conn.getHeaderField("x-kokoho-seat-status")
                             val err = runCatching { conn.errorStream?.bufferedReader()?.use { it.readText() } }.getOrNull()
-                            DeviceTrustManager.inspectResponseForRevocation(app, code, seatHdr, err)
+                            DeviceTrustManager.inspectResponseForRevocationIfCurrent(
+                                context = app,
+                                httpCode = code,
+                                seatStatusHeader = seatHdr,
+                                errorBody = err,
+                                expectedEpoch = streamTag?.epoch,
+                                expectedSeatId = streamTag?.seatId
+                            )
                             statusLabel = "HTTP $code"
                             delay(5_000L)
                         }

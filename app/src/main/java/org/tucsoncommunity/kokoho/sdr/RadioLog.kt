@@ -61,7 +61,7 @@ object RadioLog {
         return repeaterBursts.size
     }
 
-    /** Count of concurrently active DoD 406.1–411.0 MHz UHF trunk base channels in the last 90 seconds. */
+    /** Count of concurrently active DoD 406.1-411.0 MHz UHF trunk base channels in the last 90 seconds. */
     @Synchronized
     fun activeDodTrunkChannelCount(now: Long = System.currentTimeMillis()): Int {
         prune(now)

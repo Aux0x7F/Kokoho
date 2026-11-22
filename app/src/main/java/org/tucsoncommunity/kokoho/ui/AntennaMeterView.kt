@@ -110,7 +110,7 @@ class AntennaMeterView @JvmOverloads constructor(
         canvas.drawText("Δ", cx, cy - 26 * density, text)
         text.color = ink
         text.textSize = 30 * density
-        val value = d?.let { "%.1f".format(abs(it)) } ?: "–"
+        val value = d?.let { "%.1f".format(abs(it)) } ?: "--"
         canvas.drawText(value, cx, cy + 10 * density, text)
         if (d != null && abs(d) > 1.0) {
             val half = text.measureText(value) / 2
@@ -149,7 +149,7 @@ class AntennaMeterView @JvmOverloads constructor(
         }
 
         // The reading, big, with its unit.
-        val num = dbm?.let { "%.0f".format(it) } ?: "–"
+        val num = dbm?.let { "%.0f".format(it) } ?: "--"
         text.color = color
         text.textSize = 12 * density
         val uw = text.measureText(" dBm")

@@ -202,7 +202,7 @@ class KokohoV130FieldReplayAndHygieneTest {
         // must remain 2 distinct entities rather than speculatively merging!
         assertEquals(2, bleSnap.activeThreats.size)
 
-        // 5. Speedway / I-10 Field-Drive False-Positive Suppression & Legitimate Hit Preservation (2026-11-16 16:33–17:22):
+        // 5. Speedway / I-10 Field-Drive False-Positive Suppression & Legitimate Hit Preservation (2026-11-16 16:33-17:22):
         DeviceRegistry.clear()
         KokohoEntityLedger.clearAll(ctx)
         KokohoPostureEngine.clearLocalState()

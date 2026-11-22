@@ -169,7 +169,7 @@ class StatusPanel(private val context: Context) {
             while (r.history.size > 60) r.history.removeFirst()
         }
         if (r.last < 0 || now - r.at >= 900) { r.last = n; r.at = now }
-        return r.history.lastOrNull()?.let { "%.0f%s".format(it, h.unit) } ?: "–"
+        return r.history.lastOrNull()?.let { "%.0f%s".format(it, h.unit) } ?: "-"
     }
 
     private fun card() = LinearLayout(context).apply {
