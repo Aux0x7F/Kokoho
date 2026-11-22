@@ -201,24 +201,7 @@ class MapFragment : Fragment() {
         androidx.activity.result.contract.ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null && alive) {
-            runCatching {
-                act.contentResolver.openInputStream(uri)?.use { stream ->
-                    val raw = android.graphics.BitmapFactory.decodeStream(stream) ?: return@use null
-                    val maxDim = 1080
-                    val scale = kotlin.math.min(1f, maxDim.toFloat() / kotlin.math.max(raw.width, raw.height).coerceAtLeast(1))
-                    val bmp = if (scale < 1f) {
-                        android.graphics.Bitmap.createScaledBitmap(
-                            raw,
-                            (raw.width * scale).toInt().coerceAtLeast(1),
-                            (raw.height * scale).toInt().coerceAtLeast(1),
-                            true
-                        )
-                    } else raw
-                    val bos = java.io.ByteArrayOutputStream()
-                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, bos)
-                    "data:image/jpeg;base64," + android.util.Base64.encodeToString(bos.toByteArray(), android.util.Base64.NO_WRAP)
-                }
-            }.getOrNull()?.let { dataUrl ->
+            WitnessPhotoCodec.encodePreservingZoomDetail(act, uri)?.let { dataUrl ->
                 pendingWizardPhotoCb?.invoke(dataUrl)
             }
         }
@@ -538,10 +521,8 @@ class MapFragment : Fragment() {
             } else {
                 renderLive()
                 val activeWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(act)
-                if (activeWin != org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
-                    org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = activeWin.windowMs) {
-                        if (alive) renderLive()
-                    }
+                org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = activeWin.windowMs) {
+                    if (alive) renderLive()
                 }
                 org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
                     if (alive) renderLive()
@@ -655,22 +636,42 @@ class MapFragment : Fragment() {
         styleThemeButton()
     }
 
-    /** Floating rolling `30m` | `3h` | `24h` | `1wk` | `1mo` | `Heat` selector pills at the top of the Map tab. */
+    /**
+     * Floating top Map controls:
+     *  - Row 1: Rolling time window pills (`30m` | `3h` | `24h` | `1wk` | `1mo` | `∞`)
+     *  - Row 2 (immediately below): `Heat` overlay toggle + `Confirmed` | `Unconfirmed` | `All` 3-way filter
+     */
     private fun setupMapTimeWindowPills() {
         if (tripId != null) return
         val density = resources.displayMetrics.density
-        val bar = android.widget.LinearLayout(act).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            val padH = (5 * density).toInt()
-            val padV = (4 * density).toInt()
-            setPadding(padH, padV, padH, padV)
-            background = android.graphics.drawable.GradientDrawable().apply {
+        val padH = (5 * density).toInt()
+        val padV = (4 * density).toInt()
+
+        fun capsuleBackground(): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = 999f * density
                 setColor(0xEB0F1622.toInt())
                 setStroke((1 * density).toInt(), 0x5594A3B8)
             }
+
+        fun pillHighlightDrawable(active: Boolean): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 999f * density
+                if (active) {
+                    setColor(0xFF3B280C.toInt())
+                    setStroke((1.5f * density).toInt(), 0xFFF59E0B.toInt())
+                } else {
+                    setColor(0x00000000)
+                }
+            }
+
+        val bar = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(padH, padV, padH, padV)
+            background = capsuleBackground()
             elevation = 6f * density
         }
 
@@ -680,16 +681,7 @@ class MapFragment : Fragment() {
             for ((win, tv) in buttons) {
                 val active = win == selected
                 tv.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
-                tv.background = android.graphics.drawable.GradientDrawable().apply {
-                    shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                    cornerRadius = 999f * density
-                    if (active) {
-                        setColor(0xFF3B280C.toInt())
-                        setStroke((1.5f * density).toInt(), 0xFFF59E0B.toInt())
-                    } else {
-                        setColor(0x00000000)
-                    }
-                }
+                tv.background = pillHighlightDrawable(active)
             }
         }
 
@@ -707,10 +699,8 @@ class MapFragment : Fragment() {
                     stylePills(win)
                     rf?.onTimeWindowChanged(win)
                     renderLive()
-                    if (win != org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
-                        org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = win.windowMs) {
-                            if (alive) renderLive()
-                        }
+                    org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(act, target = null, windowMs = win.windowMs) {
+                        if (alive) renderLive()
                     }
                     org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(act) {
                         if (alive) renderLive()
@@ -738,6 +728,131 @@ class MapFragment : Fragment() {
             addView(bar, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
 
+        // Secondary compact bar immediately below time window: [Heat] + [Confirmed | Unconfirmed | All]
+        val secondaryRow = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+        }
+
+        val heatPillWrap = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val hPad = (4 * density).toInt()
+            val vPad = (3 * density).toInt()
+            setPadding(hPad, vPad, hPad, vPad)
+            background = capsuleBackground()
+            elevation = 6f * density
+        }
+
+        val heatToggleTv = android.widget.TextView(act).apply {
+            text = "Heat"
+            textSize = 11.5f
+            isSingleLine = true
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            contentDescription = "Toggle heatmap overlay"
+            val ph = (10 * density).toInt()
+            val pv = (4 * density).toInt()
+            setPadding(ph, pv, ph, pv)
+        }
+
+        fun styleHeatPill(enabled: Boolean) {
+            heatToggleTv.isSelected = enabled
+            heatToggleTv.setTextColor(if (enabled) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
+            heatToggleTv.background = pillHighlightDrawable(enabled)
+        }
+
+        heatToggleTv.setOnClickListener {
+            val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act)
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapHeatOverlayEnabled(act, next)
+            styleHeatPill(next)
+            renderLive()
+        }
+        styleHeatPill(org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(act))
+        heatPillWrap.addView(heatToggleTv)
+
+        val confirmBar = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            val hPad = (4 * density).toInt()
+            val vPad = (3 * density).toInt()
+            setPadding(hPad, vPad, hPad, vPad)
+            background = capsuleBackground()
+            elevation = 6f * density
+        }
+
+        val confirmButtons = mutableMapOf<org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter, android.widget.TextView>()
+
+        fun styleConfirmPills(selected: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter) {
+            for ((opt, tv) in confirmButtons) {
+                val active = opt == selected
+                tv.isSelected = active
+                tv.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
+                tv.background = pillHighlightDrawable(active)
+            }
+        }
+
+        for (opt in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.UI_OPTIONS) {
+            val segTv = android.widget.TextView(act).apply {
+                text = opt.label
+                textSize = 11.5f
+                isSingleLine = true
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                val ph = (8.5f * density).toInt()
+                val pv = (4 * density).toInt()
+                setPadding(ph, pv, ph, pv)
+                setOnClickListener {
+                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapConfirmationFilter(act, opt)
+                    styleConfirmPills(opt)
+                    renderLive()
+                }
+            }
+            confirmButtons[opt] = segTv
+            confirmBar.addView(segTv, android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                if (confirmBar.childCount > 0) marginStart = (2 * density).toInt()
+            })
+        }
+        styleConfirmPills(org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapConfirmationFilter(act))
+
+        secondaryRow.addView(heatPillWrap, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        secondaryRow.addView(confirmBar, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginStart = (6 * density).toInt()
+        })
+
+        val secondaryScroller = android.widget.HorizontalScrollView(act).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = false
+            val hp = (8 * density).toInt()
+            setPadding(hp, 0, hp, 0)
+            elevation = 6f * density
+            addView(secondaryRow, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
+        val topStack = android.widget.LinearLayout(act).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            elevation = 6f * density
+            addView(scroller, android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(secondaryScroller, android.widget.LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (5 * density).toInt()
+            })
+        }
+
         val lp = android.widget.FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -745,7 +860,7 @@ class MapFragment : Fragment() {
         ).apply {
             topMargin = (10 * density).toInt()
         }
-        binding.root.addView(scroller, lp)
+        binding.root.addView(topStack, lp)
     }
 
     private fun hideLegacyMapChrome() {
@@ -895,6 +1010,12 @@ class MapFragment : Fragment() {
             },
             onSubmitted = { submittedKey ->
                 selectionSubmenuOpen = false
+                if (mode == KokohoReportWizard.Mode.BUG_REPORT && existingUuid == null) {
+                    selectOnMap(null)
+                    Toast.makeText(act, "Bug report submitted. Thank you!", Toast.LENGTH_SHORT).show()
+                    renderLive()
+                    return@open
+                }
                 val normUuid = org.tucsoncommunity.kokoho.posture.KokohoSignatures.normalizeEntityId(submittedKey)
                 renderLive()
                 val snap = org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(act)

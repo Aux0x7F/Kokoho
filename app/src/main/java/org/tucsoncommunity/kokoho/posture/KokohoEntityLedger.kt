@@ -169,6 +169,12 @@ object KokohoEntityLedger {
         ) {
             return true
         }
+        val cleanMacCandidate = hwClean.removePrefix("UAS:MAC:").removePrefix("DRONE:").trim()
+        if (KokohoSignatures.isDjiConsumerHandheld(cleanMacCandidate, summaryRaw) ||
+            KokohoSignatures.isDjiConsumerHandheld(cleanMacCandidate, extraText)
+        ) {
+            return true
+        }
         return suppressedLedgerTextRegex.containsMatchIn(combined)
     }
 

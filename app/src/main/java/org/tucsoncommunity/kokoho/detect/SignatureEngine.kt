@@ -642,11 +642,22 @@ object SignatureEngine {
     }
 
     /** DJI's handheld cameras, gimbals and microphones share its address blocks; they aren't drones. */
-    private val DJI_HANDHELD = Regex("^(dji ?)?(osmo|om ?\\d|rs ?\\d|ronin|mic\\b|mic ?(mini|\\d))", RegexOption.IGNORE_CASE)
+    private val DJI_HANDHELD = Regex(
+        "(?:^|\\b)(?:dji[-_ ]?)?(?:osmo(?:[-_ ]?(?:action|pocket|mobile|nano|360|\\d)\\w*|\\b)|om[-_ ]?(?:\\d|se)\\b\\w*|rs[-_ ]?\\d\\w*|ronin\\w*|dji[-_ ]?mic\\w*|mic\\b|mic[-_ ]?(?:mini|\\d)\\w*)",
+        RegexOption.IGNORE_CASE
+    )
+
+    internal fun isDjiHandheldDevice(mac: String, name: String?): Boolean {
+        if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isDjiConsumerHandheld(mac, name)) return true
+        val effectiveName = name?.trim()?.takeIf { it.isNotEmpty() }
+            ?: org.tucsoncommunity.kokoho.service.DeviceRegistry.knownNameOf(mac)
+        if (effectiveName != null && DJI_HANDHELD.containsMatchIn(effectiveName)) return true
+        return org.tucsoncommunity.kokoho.posture.KokohoSignatures.isDjiConsumerHandheld(mac, effectiveName)
+    }
 
     private fun droneByPrefix(a: Advert): Hit? {
         if (a.randomBle || isLocallyAdministered(a.mac)) return null
-        if (a.name?.trim()?.let { DJI_HANDHELD.containsMatchIn(it) } == true) return null
+        if (isDjiHandheldDevice(a.mac, a.name)) return null
         val (prefix, vendor) = DRONE_PREFIXES.match(a.mac) ?: return null
         return Hit(Category.DRONE, "$vendor equipment (drone or controller)", 60,
             "Address in $vendor's registered block ${fmtPrefix(prefix)}; no Remote ID decoded",

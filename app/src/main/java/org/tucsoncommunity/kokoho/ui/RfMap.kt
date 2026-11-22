@@ -233,13 +233,14 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     }
 
     fun onTimeWindowChanged(newWindow: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow) {
-        if (newWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
-            selectedFlightTrackEntityUuid = null
-            selectedFlightTrackRecord = null
-            if (ready()) {
-                set(FLIGHT_TRACKS, emptyList())
-                drawTrace(emptyList(), TRACE_COLOR)
-            }
+        if (!ready() || TripRecorder.isRecording) return
+        val selUuid = selectedFlightTrackEntityUuid ?: return
+        val selRecord = selectedFlightTrackRecord ?: flightTracksByEntityUuid[selUuid] ?: return
+        val clipped = selRecord.clippedPointsForWindow(System.currentTimeMillis(), newWindow.windowMs)
+        if (clipped.size >= 2) {
+            drawTrace(PoliceAircraft.chaikinSmooth(clipped, 2), selectedFlightTrackColorHex, selUuid)
+        } else {
+            drawTrace(emptyList(), TRACE_COLOR)
         }
     }
 
@@ -708,62 +709,36 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
     ): List<MapPin> {
         if (!ready()) return emptyList()
         val snap = precomputedSnap ?: org.tucsoncommunity.kokoho.posture.KokohoPostureEngine.evaluate(activity)
-        val nowMs = System.currentTimeMillis()
+        val nowMs = snap.evaluatedAtMs
         val fallbackLat = ScanForegroundService.lastFix?.latitude ?: map.camera.lat.takeIf { kotlin.math.abs(it) > 1e-4 } ?: 32.2226
         val fallbackLon = ScanForegroundService.lastFix?.longitude ?: map.camera.lon.takeIf { kotlin.math.abs(it) > 1e-4 } ?: -110.9747
         val timeWindow = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
+        val confirmFilter = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapConfirmationFilter(activity)
+        val heatOverlayEnabled = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapHeatOverlayEnabled(activity)
 
-        if (timeWindow == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
-            val heatFeatures = snap.mapThreats.mapNotNull { t ->
-                if (t.isAircraft) return@mapNotNull null
-                if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(t.hardwareIdentifier, t.title)) return@mapNotNull null
-                val lat = t.lat ?: return@mapNotNull null
-                val lon = t.lon ?: return@mapNotNull null
-                val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
-                val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
-                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight, "agency" to t.agency.id)
-            }
-            set(HEAT, heatFeatures)
-            drawPins(emptyList())
-            wazeShown = emptyMap()
-            set(WAZE, emptyList())
-            set(WIGLE, emptyList())
-            set(ASKED, emptyList())
-            droneThreatsByUuid = emptyMap()
-            unpinpointedAirspaceUuids = emptySet()
-            standaloneOperatorUuids = emptySet()
-            drones = emptyMap()
-            set(DRONES, emptyList())
-            set(DRONE_OPS, emptyList())
-            set(DRONE_LINES, emptyList())
-            airThreatsByUuid = emptyMap()
-            flightTracksByEntityUuid = emptyMap()
-            localDroneTrailsByUuid = emptyMap()
-            set(AIRCRAFT, emptyList())
-            set(FLIGHT_TRACKS, emptyList())
-            drawTrace(emptyList(), TRACE_COLOR)
-            airborneOverlay?.updateScene(emptyList(), emptyList(), null, cameraTopPaddingPx)
-            drawLocations()
-            return emptyList()
+        val windowFilteredThreats = snap.mapThreats.filter { t ->
+            val ageMs = (nowMs - t.lastSeenMs).coerceAtLeast(0L)
+            ageMs <= timeWindow.windowMs &&
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.matchesMapConfirmationFilter(activity, t, confirmFilter)
         }
 
-        val groundThreats = snap.mapThreats.filter {
+        val groundThreats = windowFilteredThreats.filter {
             !it.isAircraft &&
                 !isUnpinpointedAircraft(it) &&
                 !isDroneDetection(it) &&
                 !isStandaloneDroneOperator(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
-        val standaloneOperators = snap.mapThreats.filter {
+        val standaloneOperators = windowFilteredThreats.filter {
             isStandaloneDroneOperator(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
-        val unpinpointedDrones = snap.mapThreats.filter {
+        val unpinpointedDrones = windowFilteredThreats.filter {
             isUnpinpointedDrone(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
-        val pinpointedAirThreats = snap.mapThreats.filter { isPinpointedAircraft(it) }
-        val unpinpointedAirThreats = snap.mapThreats.filter {
+        val pinpointedAirThreats = windowFilteredThreats.filter { isPinpointedAircraft(it) }
+        val unpinpointedAirThreats = windowFilteredThreats.filter {
             isUnpinpointedAircraft(it) &&
                 !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(it.hardwareIdentifier, it.title)
         }
@@ -909,8 +884,20 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             }
         }
 
-        // Pure gravity-centered centroid bubbles (no blurry heatmap layer overlay)
-        set(HEAT, emptyList())
+        if (heatOverlayEnabled) {
+            val heatFeatures = windowFilteredThreats.mapNotNull { t ->
+                if (t.isAircraft) return@mapNotNull null
+                if (org.tucsoncommunity.kokoho.posture.KokohoSignatures.isFlockCamera(t.hardwareIdentifier, t.title)) return@mapNotNull null
+                val lat = t.lat ?: return@mapNotNull null
+                val lon = t.lon ?: return@mapNotNull null
+                val mass = (t.sightingCount.coerceAtLeast(1) * t.evidenceCount.coerceAtLeast(1)).toDouble()
+                val weight = (0.65 + 0.35 * kotlin.math.ln(1.0 + mass)).coerceIn(0.65, 2.8)
+                GeoJson.feature(GeoJson.point(lat, lon), "weight" to weight, "agency" to t.agency.id)
+            }
+            set(HEAT, heatFeatures)
+        } else {
+            set(HEAT, emptyList())
+        }
         drawLocations(excludedIds = mergedStationIds)
 
         val shown = clusters.map { c ->
@@ -1152,7 +1139,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         set(ASKED, emptyList())
 
         // Pinpointed Pro/Enterprise/RemoteID Drones with Altitude and Operator Tether
-        val droneThreats = snap.mapThreats.filter { isPinpointedDrone(it) }
+        val droneThreats = windowFilteredThreats.filter { isPinpointedDrone(it) }
         unpinpointedAirspaceUuids = (unpinpointedDrones.map { it.uuid } + unpinpointedAirThreats.map { it.uuid }).toSet()
         standaloneOperatorUuids = standaloneOperators.map { it.uuid }.toSet()
         val droneThreatsMap = LinkedHashMap<String, org.tucsoncommunity.kokoho.posture.EvaluatedThreat>()
@@ -1360,7 +1347,39 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val coveredEntities = HashSet<String>()
         val activeTracksByEntity = LinkedHashMap<String, org.tucsoncommunity.kokoho.posture.KokohoHubClient.RemoteFlightTrack>()
 
+        fun trackMatchesConfirmFilter(entityUuid: String): Boolean {
+            return when (confirmFilter) {
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.ALL -> true
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.CONFIRMED -> {
+                    if (entityUuid.isBlank()) false
+                    else {
+                        val matched = snap.mapThreats.firstOrNull { it.uuid == entityUuid }
+                            ?: org.tucsoncommunity.kokoho.posture.KokohoEntityLedger.findByUuid(activity, entityUuid)
+                        if (matched != null) {
+                            org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasApprovedWitnessReport(activity, matched)
+                        } else {
+                            org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasApprovedWitnessReportForUuid(activity, entityUuid)
+                        }
+                    }
+                }
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.UNCONFIRMED -> {
+                    if (entityUuid.isBlank()) true
+                    else {
+                        val matched = snap.mapThreats.firstOrNull { it.uuid == entityUuid }
+                            ?: org.tucsoncommunity.kokoho.posture.KokohoEntityLedger.findByUuid(activity, entityUuid)
+                        val confirmed = if (matched != null) {
+                            org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasApprovedWitnessReport(activity, matched)
+                        } else {
+                            org.tucsoncommunity.kokoho.posture.KokohoSignatures.hasApprovedWitnessReportForUuid(activity, entityUuid)
+                        }
+                        !confirmed
+                    }
+                }
+            }
+        }
+
         for (tr in cachedTracks) {
+            if (!trackMatchesConfirmFilter(tr.entityUuid)) continue
             val ag = org.tucsoncommunity.kokoho.posture.KokohoAgency.fromCode(tr.category)
                 ?: org.tucsoncommunity.kokoho.posture.KokohoAgency.DHS_AMO
             val allowed = when {
@@ -1452,6 +1471,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         val localDroneMap = LinkedHashMap<String, PoliceAircraft.LocalDroneTrail>()
         if (org.tucsoncommunity.kokoho.posture.KokohoAgency.DRONE in enabledGroundAgencies) {
             for (dt in PoliceAircraft.recentDroneTrailsForWindow(nowMs, trackWindowMs)) {
+                if (!trackMatchesConfirmFilter(dt.entityUuid)) continue
                 localDroneMap[dt.entityUuid] = dt
                 if (dt.entityUuid in coveredEntities) continue
                 val smoothed = PoliceAircraft.chaikinSmooth(dt.points, 2)
@@ -1498,6 +1518,7 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             val selUuid = selectedFlightTrackEntityUuid
             val selRecord = selectedFlightTrackRecord
             val selClipped = when {
+                selUuid != null && !trackMatchesConfirmFilter(selUuid) -> emptyList()
                 selRecord != null -> selRecord.clippedPointsForWindow(nowMs, trackWindowMs)
                 selUuid != null -> {
                     val liveAir = airThreatsByUuid[selUuid]
@@ -1714,7 +1735,6 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
         selectedFlightTrackEntityUuid = entityUuid
         selectedFlightTrackColorHex = colorHex
         val activeWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
-        if (activeWin == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) return
         val winMs = activeWin.windowMs
         val nowMs = System.currentTimeMillis()
         flightTracksByEntityUuid[entityUuid]?.let { cached ->
@@ -1732,10 +1752,6 @@ internal class RfMap(private val activity: AppCompatActivity, val map: MapEngine
             if (activity.isFinishing || activity.isDestroyed) return@fetchFlightTracks
             if (selectedFlightTrackEntityUuid != entityUuid) return@fetchFlightTracks
             val curWin = org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapTimeWindow(activity)
-            if (curWin == org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapTimeWindow.HEAT) {
-                drawTrace(emptyList(), TRACE_COLOR)
-                return@fetchFlightTracks
-            }
             val best = tracks.maxByOrNull { it.endedAtMs } ?: return@fetchFlightTracks
             selectedFlightTrackRecord = best
             val clipped = best.clippedPointsForWindow(System.currentTimeMillis(), curWin.windowMs)

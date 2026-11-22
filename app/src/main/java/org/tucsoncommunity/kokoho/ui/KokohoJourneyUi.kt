@@ -824,12 +824,27 @@ object KokohoJourneyUi {
         dialog.show()
     }
 
-    fun decodeDataUrlBitmap(dataUrl: String?): Bitmap? {
+    fun decodeDataUrlBitmap(dataUrl: String?, maxSidePx: Int = 2048): Bitmap? {
         if (dataUrl.isNullOrBlank()) return null
         return runCatching {
             val b64 = dataUrl.substringAfter("base64,", dataUrl)
             val bytes = Base64.decode(b64, Base64.DEFAULT)
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (maxSidePx <= 0) {
+                return@runCatching BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            }
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            var sample = 1
+            val longest = maxOf(bounds.outWidth, bounds.outHeight)
+            while (longest / sample > maxSidePx) {
+                sample *= 2
+            }
+            BitmapFactory.decodeByteArray(
+                bytes,
+                0,
+                bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            )
         }.getOrNull()
     }
 

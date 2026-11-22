@@ -111,7 +111,7 @@ object DeviceRegistry {
         @Volatile var touchedAt = now
         val sources = HashSet<Advert.Source>()
         var advert: Advert? = null
-        var name: String? = null
+        @Volatile var name: String? = null
         var vendor: String? = null
         var identity = DeviceIntel.Identity("Device", emptyList())
         var hits: List<Hit> = emptyList()
@@ -193,15 +193,26 @@ object DeviceRegistry {
         var isFirst = false
         val t = tracks.compute(a.mac) { _, old -> (old ?: Track(a.mac, now).also { isFirst = true }).also { it.touchedAt = now } }!!
         if (isFirst) linkRotatedAddress(t, a, now)
+        var purgeSiblingHandheldDroneHits = false
         synchronized(t) {
             PatrolCluster.roleOf(hits, vendor, a.name)?.let { t.role = it }
             t.sources += a.source
             t.advert = a
             a.name?.trim()?.removeSurrounding("\"")?.takeIf { it.isNotEmpty() }?.let { t.name = it }
             vendor?.let { t.vendor = it }
+            val effectiveName = t.name ?: knownNameOf(t.mac)
+            val isHandheld = (remoteId ?: t.remoteId) == null &&
+                org.tucsoncommunity.kokoho.posture.KokohoSignatures.isDjiConsumerHandheld(t.mac, effectiveName, t.vendor)
+            val sanitizedHits = if (isHandheld) {
+                clearOuiOnlyDroneHitsLocked(t)
+                purgeSiblingHandheldDroneHits = true
+                hits.filterNot { isOuiOnlyDroneHit(it) }
+            } else {
+                hits
+            }
             // Keep the richest identity: a later advert may lack the fields an earlier one had.
             if (identity.facts.size >= t.identity.facts.size || t.identity.type == "Device") t.identity = identity
-            t.hits = mergeHits(t, hits, now)
+            t.hits = mergeHits(t, sanitizedHits, now)
             remoteId?.let {
                 t.remoteId = it
                 if (it.hasPosition) t.remoteIdPosAt = now
@@ -253,8 +264,46 @@ object DeviceRegistry {
                 }
             }
         }
+        if (purgeSiblingHandheldDroneHits) {
+            for (o in tracks.values) {
+                if (o === t || !WifiFingerprint.sameAccessPoint(t.mac, o.mac)) continue
+                synchronized(o) {
+                    if (o.remoteId == null) {
+                        clearOuiOnlyDroneHitsLocked(o)
+                    }
+                }
+            }
+        }
         relocate(t, now)
         return isFirst
+    }
+
+    private fun isOuiOnlyDroneHit(hit: Hit): Boolean =
+        hit.category == Category.DRONE && hit.confidence < 90
+
+    private fun clearOuiOnlyDroneHitsLocked(t: Track) {
+        if (t.heldHit?.let { isOuiOnlyDroneHit(it) } == true) {
+            t.heldHit = null
+            t.heldUntil = 0L
+        }
+        if (t.inherited.any { isOuiOnlyDroneHit(it) }) {
+            t.inherited = t.inherited.filterNot { isOuiOnlyDroneHit(it) }
+        }
+        if (t.hits.any { isOuiOnlyDroneHit(it) }) {
+            t.hits = t.hits.filterNot { isOuiOnlyDroneHit(it) }
+        }
+    }
+
+    /** Known advertised name or SSID for [mac] (or a sibling BSSID on the same access point), if learned this session. */
+    fun knownNameOf(mac: String?): String? {
+        if (mac.isNullOrBlank()) return null
+        tracks[mac]?.name?.takeIf { it.isNotBlank() }?.let { return it }
+        val norm = org.tucsoncommunity.kokoho.posture.KokohoSignatures.normalizeMac(mac)
+        tracks[norm]?.name?.takeIf { it.isNotBlank() }?.let { return it }
+        return tracks.values.firstNotNullOfOrNull { o ->
+            val n = o.name
+            if (!n.isNullOrBlank() && (o.mac.equals(norm, ignoreCase = true) || WifiFingerprint.sameAccessPoint(norm, o.mac))) n else null
+        }
     }
 
     /**
@@ -656,6 +705,9 @@ object DeviceRegistry {
                 val seenAt = if (t.localAt > 0L) t.localAt else t.lastSeen
                 if (seenAt <= 0L || nowMs - seenAt !in 0L..activeWindowMs) return@synchronized
                 val rid = t.remoteId
+                if (rid == null && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isDjiConsumerHandheld(t.mac, t.name ?: knownNameOf(t.mac), t.vendor)) {
+                    return@synchronized
+                }
                 val isDrone = rid != null ||
                     org.tucsoncommunity.kokoho.usb.UsbWifi.isDronePriorityOui(t.mac) ||
                     t.hits.any { it.category == Category.DRONE } ||

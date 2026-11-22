@@ -577,10 +577,10 @@ class KokohoTest {
         val ctx = controller.get()
         KokohoSignatures.ensureLoaded(ctx)
 
-        // 1. Default map window is 30m (current investigation) and all 6 rolling duration / heatmap pills are exposed
+        // 1. Default map window is 30m (current investigation) and all 6 rolling duration pills are exposed
         assertEquals(KokohoSignatures.MapTimeWindow.MIN_30, KokohoSignatures.getMapTimeWindow(ctx))
         assertEquals(
-            listOf("30m", "3h", "24h", "1wk", "1mo", "Heat"),
+            listOf("30m", "3h", "24h", "1wk", "1mo", "∞"),
             KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS.map { it.label }
         )
         assertTrue(KokohoSignatures.zoomGravityMergeRadiusM(11.5) > KokohoSignatures.zoomGravityMergeRadiusM(15.2))

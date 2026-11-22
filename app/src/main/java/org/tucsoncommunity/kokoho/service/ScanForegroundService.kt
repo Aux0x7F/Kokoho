@@ -1024,9 +1024,10 @@ class ScanForegroundService : Service() {
         if (a.isBle) org.tucsoncommunity.kokoho.detect.HackerWatch.tagFlood(a, now)?.let { onTagFlood(it) }
 
         val prev = classified[mac]
+        val newlyNamed = !a.name.isNullOrBlank() && DeviceRegistry.knownNameOf(mac) == null
         // A newly heard address counts toward a Bluetooth spam flood (HackerWatch).
         val spam = if (prev == null) org.tucsoncommunity.kokoho.detect.HackerWatch.bleSpam(a, now) else null
-        val c = if (prev == null || now - prev.time >= CLASSIFY_INTERVAL_MS) {
+        val c = if (prev == null || newlyNamed || now - prev.time >= CLASSIFY_INTERVAL_MS) {
             classify(a, now, listOfNotNull(spam, org.tucsoncommunity.kokoho.detect.HackerWatch.evilTwin(a))).also { classified[mac] = it }
         } else {
             prev

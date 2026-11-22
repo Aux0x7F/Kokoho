@@ -372,12 +372,14 @@ class KokohoV130FieldReplayAndHygieneTest {
         KokohoSignatures.setEnabledAgencies(ctx, KokohoAgency.entries.toSet())
         KokohoSignatures.setMapVisibleAgencies(ctx, KokohoAgency.entries.toSet())
 
-        // 1. All 6 UI windows exposed & legacy "ALL" migrates cleanly to HEAT
+        // 1. All 6 UI windows exposed & legacy "ALL" / "HEAT" / "ALL_TIME" migrate cleanly to all-time ∞ window
         assertEquals(
-            listOf("30m", "3h", "24h", "1wk", "1mo", "Heat"),
+            listOf("30m", "3h", "24h", "1wk", "1mo", "∞"),
             KokohoSignatures.MapTimeWindow.ROLLING_UI_WINDOWS.map { it.label }
         )
         assertEquals(KokohoSignatures.MapTimeWindow.HEAT, KokohoSignatures.MapTimeWindow.fromId("ALL"))
+        assertEquals(KokohoSignatures.MapTimeWindow.HEAT, KokohoSignatures.MapTimeWindow.fromId("HEAT"))
+        assertEquals(KokohoSignatures.MapTimeWindow.HEAT, KokohoSignatures.MapTimeWindow.fromId("ALL_TIME"))
         assertEquals(KokohoSignatures.MapTimeWindow.WEEK_1, KokohoSignatures.MapTimeWindow.fromId("1W"))
         assertEquals(KokohoSignatures.MapTimeWindow.MONTH_1, KokohoSignatures.MapTimeWindow.fromId("1M"))
 
@@ -524,18 +526,24 @@ class KokohoV130FieldReplayAndHygieneTest {
             )
         }
 
-        val heatPins = rfMap.drawLive(emptyList(), snapHeat)
-        assertTrue("Heat mode must suppress individual entity pins", heatPins.isEmpty())
+        KokohoSignatures.setMapHeatOverlayEnabled(act, false)
+        KokohoSignatures.setMapConfirmationFilter(act, KokohoSignatures.MapConfirmationFilter.ALL)
+        val allTimePins = rfMap.drawLive(emptyList(), snapHeat)
+        assertTrue("All-time ∞ window must render normal historical pins when Heat overlay is off", allTimePins.isNotEmpty())
+        assertEquals(0, org.json.JSONObject(sourceData["rf-kokoho-heat"]!!).getJSONArray("features").length())
+
+        KokohoSignatures.setMapHeatOverlayEnabled(act, true)
+        rfMap.drawLive(emptyList(), snapHeat)
         val heatGeoJson = org.json.JSONObject(sourceData["rf-kokoho-heat"]!!)
         val heatFeaturesArr = heatGeoJson.getJSONArray("features")
-        assertEquals("Heat mode must populate all 3 historical points into rf-kokoho-heat", 3, heatFeaturesArr.length())
+        assertEquals("Heat overlay on ∞ window must populate all 3 historical points into rf-kokoho-heat", 3, heatFeaturesArr.length())
         for (i in 0 until heatFeaturesArr.length()) {
             assertEquals("POLICE", heatFeaturesArr.getJSONObject(i).getJSONObject("properties").getString("agency"))
         }
-        assertEquals(0, org.json.JSONObject(sourceData["rf-devices"]!!).getJSONArray("features").length())
-        assertEquals(0, org.json.JSONObject(sourceData["rf-precision"]!!).getJSONArray("features").length())
 
-        // Switch to 1wk and verify individual pins render and rf-kokoho-heat clears
+        // Switch to 1wk with Heat overlay off and verify individual pins render and rf-kokoho-heat clears
+        KokohoSignatures.setMapHeatOverlayEnabled(act, false)
+        KokohoSignatures.setMapTimeWindow(act, KokohoSignatures.MapTimeWindow.WEEK_1)
         KokohoSignatures.setMapTimeWindow(ctx, KokohoSignatures.MapTimeWindow.WEEK_1)
         val weekPins = rfMap.drawLive(emptyList(), snap1wk)
         assertEquals(1, weekPins.size)

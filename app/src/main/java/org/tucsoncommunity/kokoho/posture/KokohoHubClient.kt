@@ -176,8 +176,10 @@ object KokohoHubClient {
         @SerializedName("vehicle_number") val vehicleNumber: String = "",
         val notes: String = "",
         @SerializedName("photo_data_url") val photoDataUrl: String? = null,
+        @SerializedName("photo_data_urls") val photoDataUrls: List<String>? = null,
         @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L,
         val status: String = "PENDING",
+        @SerializedName("report_kind") val reportKind: String = "LE",
         @SerializedName("confidence_pct") val confidencePct: Int = 85,
         @SerializedName("subject_kind") val subjectKind: String = "VEHICLE",
         @SerializedName("plate_number") val plateNumber: String = "",
@@ -222,6 +224,8 @@ object KokohoHubClient {
         @SerializedName("release_channel") val releaseChannel: String = "",
         @SerializedName("device_info") val deviceInfo: String = "",
         val diagnostics: String = "",
+        val lat: Double? = null,
+        val lon: Double? = null,
         val status: String = "OPEN"
     )
 
@@ -903,12 +907,41 @@ object KokohoHubClient {
         }
     }
 
-    /** Submits a Witness Report to `/v1/witness` (queued for manual review on server). */
+    private fun postPublicOrSeatedJsonBlocking(app: Context, path: String, plainJson: String): Boolean {
+        val cleanPath = if (path.startsWith("/")) path else "/$path"
+        if (VpnGeoGate.checkHubEgressAllowedBlocking(app, forceSeatedCheck = false) == VpnGeoGate.Verdict.BLOCKED_TUCSON) {
+            return false
+        }
+        if (DeviceTrustManager.isEnrolled(app)) {
+            val envResp = DeviceTrustManager.executeEnvelopedPost(app, cleanPath, plainJson)
+            return envResp != null && envResp.code in 200..299
+        }
+        return runCatching {
+            val base = hubUrl(app)
+            val conn = (URL("$base$cleanPath").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 10_000
+                readTimeout = 12_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Accept", "application/json")
+            }
+            try {
+                conn.outputStream.use { it.write(plainJson.toByteArray(Charsets.UTF_8)) }
+                conn.responseCode in 200..299
+            } finally {
+                conn.disconnect()
+            }
+        }.getOrDefault(false)
+    }
+
+    /** Submits a Witness Report (LE sighting, Confirm/Refine, or False Positive) to `/v1/witness`. */
     fun submitWitnessReport(report: WitnessReportRecord, context: Context? = null, onComplete: ((Boolean) -> Unit)? = null) {
         scope.launch {
             val ok = runCatching {
                 val appCtx = context?.applicationContext ?: context ?: org.tucsoncommunity.kokoho.KokohoApp.appContext
                     ?: return@runCatching false
+                val allPhotos = report.allPhotos()
                 val dto = RemoteWitnessDto(
                     targetKey = report.targetKey,
                     entityUuid = report.entityUuid,
@@ -918,9 +951,11 @@ object KokohoHubClient {
                     agentName = report.agentName,
                     vehicleNumber = report.vehicleNumber,
                     notes = report.notes,
-                    photoDataUrl = report.photoDataUrl,
+                    photoDataUrl = allPhotos.firstOrNull(),
+                    photoDataUrls = allPhotos.takeIf { it.isNotEmpty() },
                     updatedAtMs = report.updatedAtMs,
                     status = "PENDING",
+                    reportKind = report.reportKind.ifBlank { "LE" },
                     confidencePct = report.confidencePct,
                     subjectKind = report.subjectKind,
                     plateNumber = report.plateNumber,
@@ -935,8 +970,7 @@ object KokohoHubClient {
                     lon = report.lon
                 )
                 val json = gson.toJson(dto)
-                val envResp = DeviceTrustManager.executeEnvelopedPost(appCtx, "/v1/witness", json)
-                envResp != null && envResp.code in 200..299
+                postPublicOrSeatedJsonBlocking(appCtx, "/v1/witness", json)
             }.getOrDefault(false)
             if (onComplete != null) {
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -978,17 +1012,34 @@ object KokohoHubClient {
         }
     }
 
+    private val CRASH_HW_LINE_REGEX = Regex("(?m)^.*, Android [^\\n]*\\(API \\d+\\)\\r?\\n?")
+
+    internal fun sanitizeDiagnosticsForHub(raw: String): String {
+        if (raw.isEmpty()) return ""
+        var cleaned = CRASH_HW_LINE_REGEX.replace(raw, "")
+        val hwTokens = listOfNotNull(
+            android.os.Build.MANUFACTURER,
+            android.os.Build.MODEL,
+            android.os.Build.BRAND,
+            android.os.Build.DEVICE,
+            android.os.Build.PRODUCT
+        ).map { it.trim() }.filter { it.length >= 2 }.distinct().sortedByDescending { it.length }
+        for (tok in hwTokens) {
+            cleaned = cleaned.replace(tok, "[redacted]", ignoreCase = true)
+        }
+        return cleaned.trim()
+    }
+
     /**
-     * Builds a diagnostic summary (app version, device model/SDK, active sensors, & recent crash log tail)
-     * without attaching personal GPS coordinates.
+     * Builds a diagnostic summary (app version, release channel, active sensors, & sanitized crash log tail)
+     * without attaching device hardware model strings or personal subscriber GPS coordinates.
      */
     fun buildBugDiagnostics(context: Context, includeLogs: Boolean): BugReportSubmission {
         val appVer = "${org.tucsoncommunity.kokoho.BuildConfig.VERSION_NAME} (${org.tucsoncommunity.kokoho.BuildConfig.VERSION_CODE})${if (org.tucsoncommunity.kokoho.BuildConfig.DEBUG) " debug" else ""}"
-        val devInfo = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})"
         val diag = if (!includeLogs) {
             ""
         } else {
-            buildString {
+            val rawDiag = buildString {
                 append("scanning=").append(org.tucsoncommunity.kokoho.service.ScanForegroundService.isRunning)
                 append(", sharing=").append(KokohoSignatures.isSharingActive(context))
                 append(", bt=").append(org.tucsoncommunity.kokoho.util.Permissions.isBluetoothEnabled(context))
@@ -1001,20 +1052,24 @@ object KokohoHubClient {
                     }
                 }
             }
+            sanitizeDiagnosticsForHub(rawDiag)
         }
         return BugReportSubmission(
             appVersion = appVer,
             releaseChannel = org.tucsoncommunity.kokoho.BuildConfig.RELEASE_CHANNEL,
-            deviceInfo = devInfo,
+            deviceInfo = "",
             diagnostics = diag
         )
     }
 
     private fun postSingleBugReportBlocking(app: Context, item: BugReportSubmission): Boolean {
         return runCatching {
-            val json = gson.toJson(item)
-            val envResp = DeviceTrustManager.executeEnvelopedPost(app, "/v1/bugs", json)
-            envResp != null && envResp.code in 200..299
+            val sanitized = item.copy(
+                deviceInfo = "",
+                diagnostics = sanitizeDiagnosticsForHub(item.diagnostics)
+            )
+            val json = gson.toJson(sanitized)
+            postPublicOrSeatedJsonBlocking(app, "/v1/bugs", json)
         }.getOrDefault(false)
     }
 
@@ -1046,6 +1101,8 @@ object KokohoHubClient {
         category: String,
         summary: String,
         targetKey: String? = null,
+        lat: Double? = null,
+        lon: Double? = null,
         includeDiagnostics: Boolean = true,
         onComplete: ((uploadedNow: Boolean) -> Unit)? = null
     ): BugReportSubmission {
@@ -1054,7 +1111,10 @@ object KokohoHubClient {
         val submission = template.copy(
             category = category.trim().ifEmpty { "App / UI" },
             summary = summary.trim(),
-            targetKey = targetKey?.takeIf { it.isNotBlank() }
+            targetKey = targetKey?.takeIf { it.isNotBlank() },
+            deviceInfo = "",
+            lat = lat?.takeIf { it.isFinite() },
+            lon = lon?.takeIf { it.isFinite() }
         )
         enqueueBugReport(app, submission)
         scope.launch {
@@ -1109,6 +1169,7 @@ object KokohoHubClient {
                                 photoDataUrl = w.photoDataUrl,
                                 updatedAtMs = w.updatedAtMs,
                                 status = w.status.ifBlank { "APPROVED" },
+                                reportKind = w.reportKind.ifBlank { "LE" },
                                 subjectKind = w.subjectKind.ifBlank { "VEHICLE" },
                                 plateNumber = w.plateNumber,
                                 plateState = w.plateState.ifBlank { "AZ" },
@@ -1189,6 +1250,7 @@ object KokohoHubClient {
                                 photoDataUrl = it.photoDataUrl,
                                 updatedAtMs = it.updatedAtMs,
                                 status = "APPROVED",
+                                reportKind = it.reportKind.ifBlank { "LE" },
                                 subjectKind = it.subjectKind.ifBlank { "VEHICLE" },
                                 plateNumber = it.plateNumber,
                                 plateState = it.plateState.ifBlank { "AZ" },

@@ -143,6 +143,8 @@ object KokohoSignatures {
     private const val KEY_PUSH_NOTIFICATIONS = "push_notifications"
     private const val KEY_SIGNAL_DECAY_MINUTES = "signal_decay_minutes"
     private const val KEY_MAP_TIME_WINDOW = "map_time_window_v2"
+    private const val KEY_MAP_HEAT_OVERLAY_ENABLED = "map_heat_overlay_enabled_v1"
+    private const val KEY_MAP_CONFIRMATION_FILTER = "map_confirmation_filter_v1"
     private const val KEY_ADSB_ENABLED = "adsb_enabled"
     private const val KEY_DRONE_ENABLED = "drone_detection_enabled"
     private const val KEY_ENABLED_AIRCRAFT_AGENCIES = "enabled_aircraft_agencies"
@@ -785,7 +787,7 @@ object KokohoSignatures {
         prefs.edit { putStringSet(KEY_WATCHED_ENTITIES, next) }
     }
 
-    // ---- Map Time Window ("30m", "3h", "24h", "1wk", "1mo", "Heat"), Gravity Clustering & Color Mixing ----
+    // ---- Map Time Window ("30m", "3h", "24h", "1wk", "1mo", "∞"), Heat Overlay, Confirmation Filter, Gravity Clustering & Color Mixing ----
 
     enum class MapTimeWindow(val id: String, val label: String, val windowMs: Long) {
         MIN_30("30M", "30m", 30 * 60_000L),
@@ -793,17 +795,40 @@ object KokohoSignatures {
         HOURS_24("24H", "24h", 24 * 60 * 60_000L),
         WEEK_1("1W", "1wk", 7L * 24 * 60 * 60_000L),
         MONTH_1("1M", "1mo", 30L * 24 * 60 * 60_000L),
-        HEAT("HEAT", "Heat", 36_500L * 24 * 60 * 60_000L);
+        HEAT("ALL_TIME", "∞", 36_500L * 24 * 60 * 60_000L);
 
         companion object {
-            /** Rolling duration windows exposed in the Map UI (`30m`, `3h`, `24h`, `1wk`, `1mo`, `Heat`). */
+            val ALL_TIME: MapTimeWindow get() = HEAT
+
+            /** Rolling duration windows exposed in the Map UI (`30m`, `3h`, `24h`, `1wk`, `1mo`, `∞`). */
             val ROLLING_UI_WINDOWS = listOf(MIN_30, HOURS_3, HOURS_24, WEEK_1, MONTH_1, HEAT)
 
             fun fromId(id: String?): MapTimeWindow {
                 if (id.isNullOrBlank()) return MIN_30
+                val trimmed = id.trim()
+                val up = trimmed.uppercase()
+                if (up == "ALL" || up == "ALL_TIME" || up == "HEAT" || up == "INF" || up == "INFINITY" || trimmed == "∞") {
+                    return HEAT
+                }
+                return entries.firstOrNull { it.id.equals(up, ignoreCase = true) || it.label.equals(trimmed, ignoreCase = true) } ?: MIN_30
+            }
+        }
+    }
+
+    enum class MapConfirmationFilter(val id: String, val label: String) {
+        CONFIRMED("CONFIRMED", "Confirmed"),
+        UNCONFIRMED("UNCONFIRMED", "Unconfirmed"),
+        ALL("ALL", "All");
+
+        companion object {
+            val UI_OPTIONS = listOf(CONFIRMED, UNCONFIRMED, ALL)
+
+            fun fromId(id: String?): MapConfirmationFilter {
+                if (id.isNullOrBlank()) return ALL
                 val up = id.trim().uppercase()
-                if (up == "ALL" || up == "ALL_TIME") return HEAT
-                return entries.firstOrNull { it.id.equals(up, ignoreCase = true) || it.label.equals(up, ignoreCase = true) } ?: MIN_30
+                return entries.firstOrNull {
+                    it.id.equals(up, ignoreCase = true) || it.label.equals(up, ignoreCase = true)
+                } ?: ALL
             }
         }
     }
@@ -888,6 +913,66 @@ object KokohoSignatures {
     fun setMapTimeWindow(context: Context, window: MapTimeWindow) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putString(KEY_MAP_TIME_WINDOW, window.id)
+        }
+    }
+
+    fun isMapHeatOverlayEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_MAP_HEAT_OVERLAY_ENABLED, false)
+
+    fun setMapHeatOverlayEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_HEAT_OVERLAY_ENABLED, enabled)
+        }
+    }
+
+    fun getMapConfirmationFilter(context: Context): MapConfirmationFilter {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_MAP_CONFIRMATION_FILTER, MapConfirmationFilter.ALL.id)
+        return MapConfirmationFilter.fromId(raw)
+    }
+
+    fun setMapConfirmationFilter(context: Context, filter: MapConfirmationFilter) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_MAP_CONFIRMATION_FILTER, filter.id)
+        }
+    }
+
+    fun hasApprovedWitnessReportForUuid(context: Context, keyOrUuid: String): Boolean {
+        if (keyOrUuid.isBlank()) return false
+        val rec = getWitnessReport(context, keyOrUuid, approvedOnly = true) ?: return false
+        return rec.reportKind.equals("LE", ignoreCase = true)
+    }
+
+    fun hasApprovedWitnessReport(context: Context, threat: EvaluatedThreat): Boolean {
+        if (hasApprovedWitnessReportForUuid(context, threat.uuid)) return true
+        if (threat.trackUuid.isNotBlank() && threat.trackUuid != threat.uuid &&
+            hasApprovedWitnessReportForUuid(context, threat.trackUuid)
+        ) {
+            return true
+        }
+        val hw = threat.hardwareIdentifier?.takeIf { it.isNotBlank() }
+        if (hw != null && hasApprovedWitnessReportForUuid(context, hw)) return true
+        for (ev in threat.evidenceSources) {
+            if (hasApprovedWitnessReportForUuid(context, ev.facetKey)) return true
+        }
+        return false
+    }
+
+    fun matchesMapConfirmationFilter(
+        context: Context,
+        threat: EvaluatedThreat,
+        filter: MapConfirmationFilter = getMapConfirmationFilter(context)
+    ): Boolean {
+        return when (filter) {
+            MapConfirmationFilter.ALL -> true
+            MapConfirmationFilter.CONFIRMED -> hasApprovedWitnessReport(context, threat)
+            MapConfirmationFilter.UNCONFIRMED -> {
+                val confirmed = hasApprovedWitnessReport(context, threat)
+                val standaloneWitnessPoint = threat.evidenceSources.isNotEmpty() &&
+                    threat.evidenceSources.all { it.kind.equals("WITNESS_REPORT", ignoreCase = true) }
+                !confirmed && !standaloneWitnessPoint
+            }
         }
     }
 
@@ -1729,17 +1814,56 @@ object KokohoSignatures {
         return false
     }
 
+    private val DJI_ALL_OUIS = setOf(
+        "20:1F:55", "60:60:1F", "34:D2:62", "48:1C:B9", "E4:7A:2C", "58:B8:58", "04:A8:5A",
+        "8C:58:23", "0C:9A:E6", "88:29:85", "4C:43:F6", "9C:5A:8A", "EC:72:F7", "34:91:F0"
+    )
+
+    private val DJI_CONSUMER_NON_ENTERPRISE_24BIT_OUIS = setOf(
+        "20:1F:55", "0C:9A:E6", "8C:58:23", "E4:7A:2C", "88:29:85", "58:B8:58", "4C:43:F6"
+    )
+
+    private val DJI_CONSUMER_HANDHELD_NAME_REGEX = Regex(
+        "(?i)(?:^|\\b)(?:dji[-_ ]?)?(?:osmo(?:[-_ ]?(?:action|pocket|mobile|nano|360|\\d)\\w*|\\b)|om[-_ ]?(?:\\d|se)\\b\\w*|rs[-_ ]?\\d\\w*|ronin\\w*|dji[-_ ]?mic\\w*|mic[-_ ]?(?:mini|[123])\\w*)(?:\\b|$)"
+    )
+
+    private val DJI_SHORT_MIC_NAME_REGEX = Regex("(?i)^mic(?:[-_ ]|[0-9]|$)")
+
+    /**
+     * Returns true when a MAC / SSID / BLE name belongs to DJI consumer handheld cameras, gimbals,
+     * or wireless microphones (`OsmoAction*`, `OsmoPocket*`, `OsmoMobile*`, `OM *`, `RS *`, `Ronin*`,
+     * `DJI Mic*`, or DJI Osmo Technology OUI `20:1F:55`).
+     */
+    fun isDjiConsumerHandheld(mac: String?, ssidOrName: String?, vendor: String? = null): Boolean {
+        val rawNorm = mac?.let { normalizeMac(it) }.orEmpty()
+        val canonNorm = if (rawNorm.isNotEmpty()) canonicalHardwareOuiMac(rawNorm) else ""
+        if (rawNorm.startsWith("20:1F:55") || canonNorm.startsWith("20:1F:55")) return true
+        val vend = vendor?.trim().orEmpty()
+        if (vend.contains("DJI Osmo", ignoreCase = true)) return true
+        val name = ssidOrName?.trim().orEmpty()
+        if (name.isEmpty()) return false
+        if (DJI_CONSUMER_HANDHELD_NAME_REGEX.containsMatchIn(name)) return true
+        val isDjiOui = (rawNorm.length >= 8 && rawNorm.take(8) in DJI_ALL_OUIS) ||
+            (canonNorm.length >= 8 && canonNorm.take(8) in DJI_ALL_OUIS) ||
+            vend.contains("DJI", ignoreCase = true)
+        if (isDjiOui && DJI_SHORT_MIC_NAME_REGEX.containsMatchIn(name)) return true
+        return false
+    }
+
     /**
      * Returns true if a MAC / SSID belongs to fixed non-Flock highway/traffic infrastructure,
      * Compex light-pole backhaul (`MimoSeries*`), Axon Networks consumer ISP home routers (`00:58:28`),
-     * fixed Cradlepoint/Inseego branch routers (`IBR600C-*`, `E100-*`), or known retail POS backup Wi-Fi.
+     * fixed Cradlepoint/Inseego branch routers (`IBR600C-*`, `E100-*`), DJI consumer handhelds, or known retail POS backup Wi-Fi.
      */
     fun isNonFlockIgnoredInfraOrRetail(mac: String, ssidOrName: String?, vendor: String? = null): Boolean {
-        if (isExplicitAgencyOrTacticalSsid(ssidOrName)) return false
-        if (isAxonNetworksConsumerRouter(mac, ssidOrName, vendor)) return true
+        val effectiveName = ssidOrName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: org.tucsoncommunity.kokoho.service.DeviceRegistry.knownNameOf(mac)
+        if (isExplicitAgencyOrTacticalSsid(effectiveName)) return false
+        if (isDjiConsumerHandheld(mac, effectiveName, vendor)) return true
+        if (isAxonNetworksConsumerRouter(mac, effectiveName, vendor)) return true
         val normMac = normalizeMac(mac)
         if (IGNORED_INFRA_MAC_PREFIXES.any { it != "24:B2:B9:" && normMac.startsWith(it) }) return true
-        val ssid = ssidOrName?.trim().orEmpty()
+        val ssid = effectiveName?.trim().orEmpty()
         if (isAttestedAgencySubblock(normMac) && ssid.startsWith("PEPLINK_", ignoreCase = true)) {
             return false
         }
@@ -1766,7 +1890,7 @@ object KokohoSignatures {
 
     /**
      * Returns true if a MAC / SSID belongs to a known municipal traffic-signal cabinet (`"rmat"`),
-     * intersection V2X bridge, ambulance ePCR, Flock camera, or fixed commercial/retail POS backup router.
+     * intersection V2X bridge, ambulance ePCR, Flock camera, DJI consumer handheld, or fixed commercial/retail POS backup router.
      */
     fun isIgnoredInfrastructureOrRetail(mac: String, ssidOrName: String?): Boolean {
         if (isFlockCamera(mac, ssidOrName)) return true
@@ -1795,6 +1919,11 @@ object KokohoSignatures {
             .maxByOrNull { it.prefix.length }
             ?.let { return it }
         if (sub != null && sub.agency != null && sub.role != "BODY_CAM" && sub.role != "LMR_RADIO") {
+            // Consumer DJI 24-bit blocks (0C:9A:E6, 8C:58:23, etc. used by Osmo Action/Pocket/Mobile/Mic)
+            // must NEVER match as Tactical Drones on bare OUI before SSID decoding.
+            if (sub.role == "DRONE" && norm.length >= 8 && norm.take(8) in DJI_CONSUMER_NON_ENTERPRISE_24BIT_OUIS) {
+                return null
+            }
             return FleetOuiSig(
                 prefix = sub.prefixHex.chunked(2).joinToString(":"),
                 agency = sub.agency.id,
@@ -1832,10 +1961,13 @@ object KokohoSignatures {
         vendor: String?,
         hasRemoteId: Boolean
     ): Boolean {
+        val effectiveName = ssidOrName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: org.tucsoncommunity.kokoho.service.DeviceRegistry.knownNameOf(mac)
+        if (!hasRemoteId && isDjiConsumerHandheld(mac, effectiveName, vendor)) return false
         if (hasRemoteId) return true
         val norm = normalizeMac(mac)
         if (TACTICAL_DRONE_OUIs.any { norm.startsWith(it) }) return true
-        val combined = "${ssidOrName.orEmpty()} ${vendor.orEmpty()}"
+        val combined = "${effectiveName.orEmpty()} ${vendor.orEmpty()}"
         return TACTICAL_DRONE_TOKEN_REGEX.containsMatchIn(combined)
     }
 

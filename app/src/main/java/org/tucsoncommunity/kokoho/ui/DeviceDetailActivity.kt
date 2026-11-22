@@ -1190,6 +1190,11 @@ class DeviceDetailActivity : AppCompatActivity() {
                         KokohoJourneyUi.SubjourneyMenuItem("Submit Sighting Report Here") {
                             openWizardFromDetails(KokohoReportWizard.Mode.LAW_ENFORCEMENT, null, it.agency, it.lat, it.lon)
                         }
+                    },
+                    loc?.let {
+                        KokohoJourneyUi.SubjourneyMenuItem("Submit Bug Report Here") {
+                            openWizardFromDetails(KokohoReportWizard.Mode.BUG_REPORT, null, it.agency, it.lat, it.lon)
+                        }
                     }
                 )
             }
@@ -1237,6 +1242,11 @@ class DeviceDetailActivity : AppCompatActivity() {
                 pickPhotoLauncher.launch("image/*")
             },
             onSubmitted = { entityKey ->
+                if (mode == KokohoReportWizard.Mode.BUG_REPORT && existingUuid == null) {
+                    Toast.makeText(this, "Bug report submitted. Thank you!", Toast.LENGTH_SHORT).show()
+                    renderCurrentNode()
+                    return@open
+                }
                 val newUuid = KokohoSignatures.normalizeEntityId(entityKey)
                 if (breadcrumbStack.peek() is DetailNode.Entity && (breadcrumbStack.peek() as DetailNode.Entity).uuid == newUuid) {
                     renderCurrentNode()
@@ -1396,22 +1406,6 @@ class DeviceDetailActivity : AppCompatActivity() {
         Toast.makeText(this, "$label copied", Toast.LENGTH_SHORT).show()
     }
 
-    private fun encodeUriToDataUrl(uri: Uri): String? = runCatching {
-        contentResolver.openInputStream(uri)?.use { stream ->
-            val raw = BitmapFactory.decodeStream(stream) ?: return null
-            val maxDim = 960
-            val scale = minOf(1f, maxDim.toFloat() / maxOf(raw.width, raw.height).coerceAtLeast(1))
-            val bmp = if (scale < 1f) {
-                Bitmap.createScaledBitmap(
-                    raw,
-                    (raw.width * scale).toInt().coerceAtLeast(1),
-                    (raw.height * scale).toInt().coerceAtLeast(1),
-                    true
-                )
-            } else raw
-            val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, 82, out)
-            "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        }
-    }.getOrNull()
+    private fun encodeUriToDataUrl(uri: Uri): String? =
+        WitnessPhotoCodec.encodePreservingZoomDetail(this, uri)
 }

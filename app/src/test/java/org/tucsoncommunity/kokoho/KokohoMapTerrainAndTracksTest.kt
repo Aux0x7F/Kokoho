@@ -354,11 +354,21 @@ class KokohoMapTerrainAndTracksTest {
         assertEquals("air-uuid-9911", det?.entityUuid)
         assertEquals("DHS_AMO", det?.agencyCode)
 
-        // Switching to Heat immediately clears flight tracks
+        // Switching to ∞ (ALL_TIME) retains flight tracks across history; Confirmed filter hides unconfirmed tracks
         org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, MapTimeWindow.HEAT)
         rfMap.onTimeWindowChanged(MapTimeWindow.HEAT)
         rfMap.drawLive(emptyList(), snap)
-        assertTrue("Heat window must clear rf-flight-tracks", sourceData["rf-flight-tracks"].orEmpty().contains("\"features\":[]"))
+        assertTrue("∞ all-time window must retain rf-flight-tracks", sourceData["rf-flight-tracks"].orEmpty().contains("\"hex\":\"air-uuid-9911\""))
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapConfirmationFilter(
+            act,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.CONFIRMED
+        )
+        rfMap.drawLive(emptyList(), snap)
+        assertTrue("Confirmed filter must hide unconfirmed flight tracks", sourceData["rf-flight-tracks"].orEmpty().contains("\"features\":[]"))
+        org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapConfirmationFilter(
+            act,
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.ALL
+        )
         org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapTimeWindow(act, MapTimeWindow.MIN_30)
     }
 

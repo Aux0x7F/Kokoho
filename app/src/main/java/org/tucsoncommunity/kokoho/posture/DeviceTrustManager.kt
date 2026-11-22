@@ -1541,14 +1541,12 @@ object DeviceTrustManager {
         val msg = "enroll|$idOrSlug|${seat.voucher}|$ts"
         val sig = signMessageBase64(privKey, msg)
             ?: return AuthOutcomeResult(dto = null, committed = false, nextExpectedEpoch = null, superseded = false)
-        val devInfo = "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})"
-
         val bodyMap = mapOf(
             "seat_id" to seat.seatId,
             "slug" to seat.slug,
             "voucher" to seat.voucher,
             "pubkey_spki_b64" to pubSpkiB64,
-            "device_info" to devInfo,
+            "device_info" to "",
             "timestamp_ms" to ts,
             "signature_b64" to sig
         )

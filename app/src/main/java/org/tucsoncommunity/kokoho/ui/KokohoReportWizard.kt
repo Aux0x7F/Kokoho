@@ -249,22 +249,13 @@ object KokohoReportWizard {
                         Toast.makeText(activity, "Please enter bug report details", Toast.LENGTH_SHORT).show()
                         return@primaryActionButton
                     }
-                    val rec = WitnessReportRecord(
-                        targetKey = targetUuid,
-                        entityUuid = targetUuid,
-                        agencyCode = selectedAgency.id,
-                        notes = detail,
-                        reportKind = "BUG",
-                        subjectKind = "BUG",
-                        lat = droppedLat,
-                        lon = droppedLon
-                    )
-                    KokohoSignatures.saveWitnessReport(activity, rec, syncRemote = true)
                     org.tucsoncommunity.kokoho.posture.KokohoHubClient.submitBugReport(
                         context = activity,
                         category = "Map / Detection",
                         summary = detail,
                         targetKey = targetUuid,
+                        lat = droppedLat,
+                        lon = droppedLon,
                         includeDiagnostics = true
                     )
                     org.tucsoncommunity.kokoho.posture.FieldTelemetryLogger.recordUserInteraction(
@@ -598,7 +589,7 @@ object KokohoReportWizard {
         fun rebuildPhotosRow() {
             photosRow.removeAllViews()
             for ((idx, url) in attachedPhotos.withIndex()) {
-                val bmp = KokohoJourneyUi.decodeDataUrlBitmap(url) ?: continue
+                val bmp = KokohoJourneyUi.decodeDataUrlBitmap(url, maxSidePx = 256) ?: continue
                 val cell = FrameLayout(activity).apply {
                     layoutParams = LinearLayout.LayoutParams(dp(activity, 64), dp(activity, 64)).apply {
                         marginEnd = dp(activity, 8)

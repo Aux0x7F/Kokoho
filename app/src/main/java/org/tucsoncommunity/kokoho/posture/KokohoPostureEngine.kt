@@ -182,7 +182,8 @@ data class PostureSnapshot(
     /** Retained threats within the Map visibility window (30m solid + 2h fade = 2.5h). */
     val mapThreats: List<EvaluatedThreat>,
     val enabledScopeText: String,
-    val sectorTempoText: String? = null
+    val sectorTempoText: String? = null,
+    val evaluatedAtMs: Long = System.currentTimeMillis()
 )
 
 object KokohoPostureEngine {
@@ -637,6 +638,7 @@ object KokohoPostureEngine {
         val list = spatialHistory.getOrPut(uuid) { mutableListOf() }
         synchronized(list) {
             list.removeAll { refClockMs - it.timestampMs > decayMs }
+            val prevBest = list.maxByOrNull { it.signalDb }
             var geometryChanged = false
             val last = list.lastOrNull()
             // Strictly require advancing observation timestamp (`nowMs > last.timestampMs`) so silent cached devices
@@ -662,7 +664,11 @@ object KokohoPostureEngine {
                         triangulationCache.remove(uuid)
                     }
                     list.add(SpatialSample(gpsLat, gpsLon, signalDb, estDistanceM, nowMs))
-                    if (list.size > 32) list.removeAt(0)
+                    if (list.size > 32) {
+                        val peakSample = list.maxBy { it.signalDb }
+                        val dropIdx = if (list.first() === peakSample && list.size > 1) 1 else 0
+                        list.removeAt(dropIdx)
+                    }
                     geometryChanged = true
                 }
             }
@@ -739,6 +745,83 @@ object KokohoPostureEngine {
                 (best.signalDb - latest.signalDb) <= 14 &&
                 latest.estDistanceM <= 220
 
+            // Stationary RF centroid lock when driving away:
+            // When >= 4 samples have localized a stationary source (isApproximatedPosition && uncertaintyRadiusM <= 120)
+            // and a new sample arrives further from best (> uncertaintyRadiusM) with weaker signal (<= best.signalDb - 6),
+            // keep centerLat/centerLon and uncertaintyRadiusM strictly locked unless a stronger signal (> best.signalDb - 3)
+            // appears at a genuinely displaced location.
+            val referenceBest = prevBest ?: best
+            val hasConvergedStationaryAnchor = list.size >= 4 &&
+                cached != null &&
+                cached.result.isApproximatedPosition &&
+                cached.result.uncertaintyRadiusM <= 120 &&
+                cached.result.centerLat != null &&
+                cached.result.centerLon != null
+            if (hasConvergedStationaryAnchor) {
+                val anchorLat = cached!!.result.centerLat!!
+                val anchorLon = cached.result.centerLon!!
+                val distFromBest = haversineMeters(referenceBest.lat, referenceBest.lon, latest.lat, latest.lon)
+                if (distFromBest > cached.result.uncertaintyRadiusM && latest.signalDb <= referenceBest.signalDb - 6) {
+                    val keptDistM = haversineMeters(curUserLat, curUserLon, anchorLat, anchorLon).roundToInt()
+                    val lockedRes = cached.result.copy(
+                        centerLat = anchorLat,
+                        centerLon = anchorLon,
+                        estimatedDistanceM = keptDistM,
+                        isClosing = false,
+                        sampleCount = list.size
+                    )
+                    triangulationCache[uuid] = CachedTriangulation(
+                        list.size,
+                        curUserLat,
+                        curUserLon,
+                        signalDb,
+                        lockedRes,
+                        max(cached.peakSignalDb, best.signalDb)
+                    )
+                    return lockedRes
+                }
+                val displacedThresholdM = max(220.0, (referenceBest.estDistanceM + latest.estDistanceM) * 1.45)
+                if (distFromBest > displacedThresholdM && latest.signalDb > referenceBest.signalDb - 3 && !isLiveCoMoving) {
+                    val recentDisplaced = list.filter {
+                        haversineMeters(latest.lat, latest.lon, it.lat, it.lon) <= 120.0 &&
+                            latest.timestampMs - it.timestampMs <= 20_000L
+                    }.ifEmpty { listOf(latest) }
+                    var wSum = 0.0
+                    var latW = 0.0
+                    var lonW = 0.0
+                    for (s in recentDisplaced) {
+                        val w = 10.0.pow(s.signalDb / 8.0).coerceIn(1e-12, 1e6)
+                        wSum += w
+                        latW += s.lat * w
+                        lonW += s.lon * w
+                    }
+                    val dispLat = if (wSum > 0.0) latW / wSum else latest.lat
+                    val dispLon = if (wSum > 0.0) lonW / wSum else latest.lon
+                    val dispRadM = latest.estDistanceM.coerceIn(20, 150)
+                    val dispDistM = haversineMeters(curUserLat, curUserLon, dispLat, dispLon).roundToInt()
+                    val dispRes = TriangulationResult(
+                        centerLat = dispLat,
+                        centerLon = dispLon,
+                        estimatedDistanceM = dispDistM,
+                        uncertaintyRadiusM = dispRadM,
+                        spatialConfidence = 68,
+                        isApproximatedPosition = recentDisplaced.size >= 2 || dispRadM <= 35,
+                        isPinpointed = false,
+                        isClosing = isClosing,
+                        sampleCount = list.size
+                    )
+                    triangulationCache[uuid] = CachedTriangulation(
+                        list.size,
+                        curUserLat,
+                        curUserLon,
+                        signalDb,
+                        dispRes,
+                        max(cached.peakSignalDb, best.signalDb)
+                    )
+                    return dispRes
+                }
+            }
+
             if (isLiveCoMoving) {
                 // Genuinely co-moving emitter travelling with the observer: anchor at the live recent window
                 // (never lagged hundreds of meters behind at the historical path midpoint).
@@ -774,8 +857,12 @@ object KokohoPostureEngine {
             }
 
             // Stationary emitter: restrict triangulation to the local neighborhood (<= 450m) around peak reception
-            // so distant tail samples never create synthetic multi-kilometer 2D intersections.
-            val localSamples = list.filter { haversineMeters(best.lat, best.lon, it.lat, it.lon) <= 450.0 }.ifEmpty { listOf(best) }
+            // and exclude weak receding tail samples so departing drives never drag or bloom a settled source.
+            val recedingGuardRadiusM = (cached?.result?.uncertaintyRadiusM ?: 120).coerceAtLeast(45).toDouble()
+            val localSamples = list.filter {
+                val distM = haversineMeters(best.lat, best.lon, it.lat, it.lon)
+                distM <= 450.0 && !(distM > recedingGuardRadiusM && it.signalDb <= best.signalDb - 6)
+            }.ifEmpty { listOf(best) }
             var maxSpreadM = 0.0
             var farA = localSamples.first()
             var farB = localSamples.last()
@@ -917,13 +1004,13 @@ object KokohoPostureEngine {
 
             // Stationary centroid prior (30m current-investigation invariant):
             // Never bloom an already-settled uncertainty radius or drift its centroid unless >= 3 recent
-            // observations depart sharply in strength (>= 9 dB) or derived shift (> max(50m, 1.2 * r_settled)).
+            // strong observations (> peak - 3 dB) genuinely relocate (> max(50m, 1.2 * r_settled)).
             val prevSettled = cached?.result
             if (prevSettled != null && prevSettled.centerLat != null && prevSettled.centerLon != null && approxRadiusM > prevSettled.uncertaintyRadiusM) {
                 val shiftThresholdM = max(50.0, prevSettled.uncertaintyRadiusM * 1.2)
                 val recentTail = list.takeLast(3)
                 val sustainedDeparture = recentTail.size >= 3 && recentTail.all { s ->
-                    abs(s.signalDb - cached.peakSignalDb) >= 9 ||
+                    s.signalDb > cached.peakSignalDb - 3 &&
                         haversineMeters(s.lat, s.lon, prevSettled.centerLat, prevSettled.centerLon) > shiftThresholdM
                 }
                 if (!sustainedDeparture) {
@@ -1160,6 +1247,29 @@ object KokohoPostureEngine {
         val triDecayMs = min(retentionWindowMs, LOCAL_TRIANGULATION_DECAY_MS)
         val localRfHits = RadioLog.current(nowMs).filter { nowMs - it.lastSeen <= rfWindowMs }
         val localDevices = DeviceRegistry.snapshot(nowMs).filter { nowMs - it.lastSeen <= devWindowMs }
+        for (snap in localDevices) {
+            if (snap.remoteId == null && KokohoSignatures.isDjiConsumerHandheld(snap.mac, snap.name, snap.vendor)) {
+                val normMac = KokohoSignatures.normalizeMac(snap.mac)
+                val groupKey = KokohoSignatures.routerRadioGroupKey(normMac)
+                val staleIds = setOf(
+                    deterministicUuidV5("uas:mac:$normMac"),
+                    deterministicUuidV5("hw:mac:$normMac"),
+                    deterministicUuidV5("hw:mac:$groupKey")
+                )
+                for (sid in staleIds) {
+                    if (evaluated[sid]?.isDrone == true || evaluated[sid]?.agency == KokohoAgency.DRONE) {
+                        evaluated.remove(sid)
+                    }
+                    if (localThreatCache[sid]?.isDrone == true || localThreatCache[sid]?.agency == KokohoAgency.DRONE) {
+                        localThreatCache.remove(sid)
+                    }
+                    val persisted = KokohoEntityLedger.findByUuid(context, sid)
+                    if (persisted != null && (persisted.isDrone || persisted.agency == KokohoAgency.DRONE)) {
+                        KokohoEntityLedger.remove(context, sid)
+                    }
+                }
+            }
+        }
 
         // 2a. Pro / Enterprise / Military / Remote ID Drones (#24)
         if (KokohoSignatures.isDroneDetectionEnabled(context)) {
@@ -3660,7 +3770,8 @@ object KokohoPostureEngine {
                 monitorGroups = emptyList(),
                 mapThreats = mapThreats,
                 enabledScopeText = enabledScopeText,
-                sectorTempoText = sectorTempo
+                sectorTempoText = sectorTempo,
+                evaluatedAtMs = nowMs
             ).also { latestSnapshot = it }
         }
 
@@ -3681,7 +3792,8 @@ object KokohoPostureEngine {
             monitorGroups = monitorGroups,
             mapThreats = mapThreats,
             enabledScopeText = enabledScopeText,
-            sectorTempoText = sectorTempo
+            sectorTempoText = sectorTempo,
+            evaluatedAtMs = nowMs
         ).also { latestSnapshot = it }
     }
 
