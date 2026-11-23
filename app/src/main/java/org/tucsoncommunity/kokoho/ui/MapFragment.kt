@@ -802,10 +802,8 @@ class MapFragment : Fragment() {
         }
 
         val refreshMilVisibility = {
-            val hasIntel = org.tucsoncommunity.kokoho.posture.DeviceTrustManager.hasIntelligenceAccess(act)
-            milPillWrap.visibility = if (hasIntel) View.VISIBLE else View.GONE
-            val active = hasIntel && org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapMilitaryEnabled(act)
-            styleMilPill(active)
+            // Military visibility is controlled strictly inside Filters -> Federal -> Military (Owner & Intelligence only), never as a map pill.
+            milPillWrap.visibility = View.GONE
         }
         syncMilPillState = refreshMilVisibility
 

@@ -3936,6 +3936,7 @@ object KokohoPostureEngine {
                 updated
             }
 
+        val airEnabled = KokohoSignatures.getEnabledAircraftAgencies(context)
         val mapThreats = allRetained
             .filter { t ->
                 val ageMs = (nowMs - t.updatedAtMs).coerceAtLeast(0L)
@@ -3945,9 +3946,10 @@ object KokohoPostureEngine {
                     ageMs <= mapVisibilityMs
                 }
                 withinMapWindow && when {
-                    t.isAircraft -> true
+                    t.isAircraft -> KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, airEnabled) &&
+                        KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, mapVisible)
                     t.isDrone -> KokohoAgency.DRONE in mapVisible
-                    else -> t.agency in mapVisible
+                    else -> KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, mapVisible)
                 }
             }
             .map { t ->
@@ -3972,8 +3974,8 @@ object KokohoPostureEngine {
             .filter { t ->
                 if (nowMs - t.updatedAtMs > monitorWindowMs) return@filter false
                 if (t.isAircraft) {
-                    val airAlarmAllowed = t.isCircling ||
-                        (if (t.agency.isDhs) alarmEnabled.any { it.isDhs } else t.agency in alarmEnabled)
+                    val airAlarmAllowed = KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, airEnabled) &&
+                        KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, alarmEnabled)
                     airAlarmAllowed && isAircraftNearbyForMonitor(
                         distM = t.estimatedDistanceM,
                         isCircling = t.isCircling,
@@ -3983,7 +3985,7 @@ object KokohoPostureEngine {
                     val heardLocallyLive = (lastHeardByLocalHardwareAtMs[t.uuid] ?: 0L).let {
                         it > 0L && (nowMs - it) <= 90_000L
                     }
-                    t.agency in alarmEnabled && isGroundOrDroneNearbyForMonitor(
+                    KokohoSignatures.isEntityAllowedByAgencies(t.agency, t.label, alarmEnabled) && isGroundOrDroneNearbyForMonitor(
                         threat = t,
                         hasUserLoc = userLoc != null,
                         nowMs = nowMs,

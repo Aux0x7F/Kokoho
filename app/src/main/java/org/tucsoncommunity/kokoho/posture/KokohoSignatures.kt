@@ -42,8 +42,8 @@ enum class KokohoAgency(
     DHS_FPS("DHS_FPS", "FPS", "FPS", "FPS (Federal Protective)", isDhs = true, defaultEnabled = false, priorityRank = 5, mapColorArgb = 0xFFA855F7.toInt(), mapColorHex = "#A855F7"),
     DHS_INTEROP("DHS_INTEROP", "Federal Interop", "Federal Interop", "Federal Interop", isDhs = true, defaultEnabled = true, priorityRank = 8, mapColorArgb = 0xFFFF7043.toInt(), mapColorHex = "#FF7043"),
 
-    SHERIFF("SHERIFF", "Sheriff", "Sheriff", "Sheriff (PCSO / County)", isDhs = false, defaultEnabled = false, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
-    POLICE("POLICE", "Police", "Police", "Police (TPD / Municipal)", isDhs = false, defaultEnabled = false, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
+    SHERIFF("SHERIFF", "Sheriff", "Sheriff", "Sheriff (County)", isDhs = false, defaultEnabled = false, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
+    POLICE("POLICE", "Police", "Police", "Police (Municipal / State)", isDhs = false, defaultEnabled = true, priorityRank = 6, mapColorArgb = 0xFF38BDF8.toInt(), mapColorHex = "#38BDF8"),
     DRONE("DRONE", "Drone", "Tactical Drone", "Pro / Enterprise / Military Drones", isDhs = false, defaultEnabled = true, priorityRank = 6, mapColorArgb = 0xFF06B6D4.toInt(), mapColorHex = "#06B6D4"),
     FIRE("FIRE", "Fire", "Fire", "Fire (TFD / Wildland)", isDhs = false, defaultEnabled = false, priorityRank = 7, mapColorArgb = 0xFF10B981.toInt(), mapColorHex = "#10B981"),
     SAR("SAR", "SAR", "SAR", "SAR (Search & Rescue)", isDhs = false, defaultEnabled = false, priorityRank = 7, mapColorArgb = 0xFF10B981.toInt(), mapColorHex = "#10B981");
@@ -354,8 +354,164 @@ object KokohoSignatures {
                 putStringSet(KEY_ENABLED_AGENCIES, parsed.map { it.id }.toSet())
             }
         }
+        if (!prefs.getBoolean("police_default_alert_v1318_migrated", false)) {
+            parsed.add(KokohoAgency.POLICE)
+            prefs.edit {
+                putBoolean("police_default_alert_v1318_migrated", true)
+                putStringSet(KEY_ENABLED_AGENCIES, parsed.map { it.id }.toSet())
+            }
+        }
         return parsed
     }
+
+    fun setAgenciesEnabled(context: Context, targets: Set<KokohoAgency>, enabled: Boolean): Set<KokohoAgency> {
+        val current = getEnabledAgencies(context).toMutableSet()
+        if (enabled) current.addAll(targets) else current.removeAll(targets)
+        setEnabledAgencies(context, current)
+        return current
+    }
+
+    fun setAgenciesMapVisible(context: Context, targets: Set<KokohoAgency>, visible: Boolean): Set<KokohoAgency> {
+        val current = getMapVisibleAgencies(context).toMutableSet()
+        if (visible) current.addAll(targets) else current.removeAll(targets)
+        setMapVisibleAgencies(context, current)
+        return current
+    }
+
+    /** Resolves all organizational unit agencies an entity/aircraft belongs to (supports multi-unit assets like County Sheriff + SAR). */
+    fun memberAgenciesForEntity(primary: KokohoAgency, label: String): Set<KokohoAgency> {
+        val out = linkedSetOf(primary)
+        val up = label.uppercase()
+        if (up.contains("SARA") || up.contains("RESCUE") || up.contains("SAR")) out.add(KokohoAgency.SAR)
+        if (up.contains("SHERIFF") || up.contains("PCSO") || up.contains("MCSO")) out.add(KokohoAgency.SHERIFF)
+        if (up.contains("POLICE") || up.contains("TPD") || up.contains("DPS") || up.contains("TROOPER") || up.contains("UAPD") || up.contains("SUN ")) out.add(KokohoAgency.POLICE)
+        if (up.contains("FIRE") || up.contains("TFD")) out.add(KokohoAgency.FIRE)
+        return out
+    }
+
+    fun isEntityAllowedByAgencies(primary: KokohoAgency, label: String, allowed: Set<KokohoAgency>): Boolean {
+        val members = memberAgenciesForEntity(primary, label)
+        return members.any { ag -> if (ag.isDhs) (ag in allowed) else (ag in allowed) }
+    }
+
+    /** Data-driven hierarchical organizational unit tree parameterized by instance region (default AZ). */
+    data class OrgUnitNode(
+        val id: String,
+        val genericLabel: String,
+        val regionLabels: Map<String, String> = emptyMap(),
+        val agencies: Set<KokohoAgency> = emptySet(),
+        val isMilitaryBranch: Boolean = false,
+        val requiresIntelligence: Boolean = false,
+        val children: List<OrgUnitNode> = emptyList()
+    ) {
+        fun displayLabel(regionCode: String = INSTANCE_REGION_CODE): String =
+            regionLabels[regionCode.uppercase()] ?: genericLabel
+
+        fun allAgencies(): Set<KokohoAgency> =
+            agencies + children.flatMap { it.allAgencies() }
+    }
+
+    const val INSTANCE_REGION_CODE: String = "AZ"
+
+    val ORG_UNIT_TREE: List<OrgUnitNode> = listOf(
+        OrgUnitNode(
+            id = "FEDERAL",
+            genericLabel = "Federal",
+            children = listOf(
+                OrgUnitNode(
+                    id = "FED_DHS",
+                    genericLabel = "DHS",
+                    children = listOf(
+                        OrgUnitNode("DHS_ICE", "ICE", agencies = setOf(KokohoAgency.DHS_ICE)),
+                        OrgUnitNode("DHS_AMO", "DHS Air (AMO)", agencies = setOf(KokohoAgency.DHS_AMO)),
+                        OrgUnitNode("DHS_CBP", "CBP / Border Patrol", agencies = setOf(KokohoAgency.DHS_CBP)),
+                        OrgUnitNode("DHS_HSI", "HSI", agencies = setOf(KokohoAgency.DHS_HSI)),
+                        OrgUnitNode("DHS_FPS", "FPS", agencies = setOf(KokohoAgency.DHS_FPS)),
+                        OrgUnitNode("DHS_INTEROP", "Federal Interop", agencies = setOf(KokohoAgency.DHS_INTEROP))
+                    )
+                ),
+                OrgUnitNode(
+                    id = "FED_DOJ",
+                    genericLabel = "DOJ / Federal LE (FBI, DEA, USMS, ATF)",
+                    agencies = setOf(KokohoAgency.DHS_INTEROP)
+                ),
+                OrgUnitNode(
+                    id = "FED_MIL",
+                    genericLabel = "Military (Aircraft)",
+                    isMilitaryBranch = true,
+                    requiresIntelligence = false,
+                    children = listOf(
+                        OrgUnitNode("DOD_NG", "National Guard", isMilitaryBranch = true, requiresIntelligence = false),
+                        OrgUnitNode("DOD_ARMY", "Army", isMilitaryBranch = true, requiresIntelligence = false),
+                        OrgUnitNode("DOD_USAF", "Air Force", isMilitaryBranch = true, requiresIntelligence = false),
+                        OrgUnitNode("DOD_USN", "Navy / USMC", isMilitaryBranch = true, requiresIntelligence = false)
+                    )
+                )
+            )
+        ),
+        OrgUnitNode(
+            id = "STATE",
+            genericLabel = "State",
+            regionLabels = mapOf("AZ" to "State (AZ)"),
+            children = listOf(
+                OrgUnitNode(
+                    id = "STATE_DPS",
+                    genericLabel = "State Troopers / DPS",
+                    regionLabels = mapOf("AZ" to "AZDPS (State Troopers)"),
+                    agencies = setOf(KokohoAgency.POLICE)
+                )
+            )
+        ),
+        OrgUnitNode(
+            id = "COUNTY",
+            genericLabel = "County",
+            regionLabels = mapOf("AZ" to "County (Pima / Regional)"),
+            children = listOf(
+                OrgUnitNode(
+                    id = "COUNTY_SHERIFF",
+                    genericLabel = "Sheriff",
+                    regionLabels = mapOf("AZ" to "Sheriff (PCSO)"),
+                    agencies = setOf(KokohoAgency.SHERIFF)
+                ),
+                OrgUnitNode(
+                    id = "COUNTY_SAR",
+                    genericLabel = "Search & Rescue (County Aux)",
+                    regionLabels = mapOf("AZ" to "SARA (County Search & Rescue)"),
+                    agencies = setOf(KokohoAgency.SAR)
+                )
+            )
+        ),
+        OrgUnitNode(
+            id = "LOCAL",
+            genericLabel = "Local",
+            regionLabels = mapOf("AZ" to "Local (Municipal / Campus / Transit)"),
+            children = listOf(
+                OrgUnitNode(
+                    id = "LOCAL_POLICE",
+                    genericLabel = "Municipal Police",
+                    regionLabels = mapOf("AZ" to "Local Police (TPD / Municipal)"),
+                    agencies = setOf(KokohoAgency.POLICE)
+                ),
+                OrgUnitNode(
+                    id = "LOCAL_CAMPUS_TRANSIT",
+                    genericLabel = "Campus & Transit Police",
+                    regionLabels = mapOf("AZ" to "UAPD / Sun Tran / Campus"),
+                    agencies = setOf(KokohoAgency.POLICE)
+                ),
+                OrgUnitNode(
+                    id = "LOCAL_FIRE",
+                    genericLabel = "Fire / EMS",
+                    regionLabels = mapOf("AZ" to "Fire (TFD / Wildland)"),
+                    agencies = setOf(KokohoAgency.FIRE)
+                )
+            )
+        ),
+        OrgUnitNode(
+            id = "DRONE",
+            genericLabel = "Drones / UAS",
+            agencies = setOf(KokohoAgency.DRONE)
+        )
+    )
 
     fun setEnabledAgencies(context: Context, agencies: Set<KokohoAgency>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
@@ -408,9 +564,20 @@ object KokohoSignatures {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val saved = prefs.getStringSet(KEY_MAP_VISIBLE_AGENCIES, null)
         if (saved == null) {
+            if (!prefs.getBoolean("police_default_map_v1318_migrated", false)) {
+                prefs.edit { putBoolean("police_default_map_v1318_migrated", true) }
+            }
             return (getEnabledAgencies(context) + DEFAULT_MAP_VISIBLE_AGENCIES).toSet()
         }
-        return saved.mapNotNull { KokohoAgency.fromCode(it) }.toSet()
+        val parsed = saved.mapNotNull { KokohoAgency.fromCode(it) }.toMutableSet()
+        if (!prefs.getBoolean("police_default_map_v1318_migrated", false)) {
+            parsed.add(KokohoAgency.POLICE)
+            prefs.edit {
+                putStringSet(KEY_MAP_VISIBLE_AGENCIES, parsed.map { it.id }.toSet())
+                putBoolean("police_default_map_v1318_migrated", true)
+            }
+        }
+        return parsed
     }
 
     fun setMapVisibleAgencies(context: Context, agencies: Set<KokohoAgency>) {
@@ -999,15 +1166,13 @@ object KokohoSignatures {
      * `DeviceTrustManager.hasIntelligenceAccess(context)` (`INTELLIGENCE` or `OWNER`).
      */
     fun isMapMilitaryEnabled(context: Context): Boolean {
-        if (!DeviceTrustManager.hasIntelligenceAccess(context)) return false
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_MAP_MILITARY_ENABLED, false)
     }
 
     fun setMapMilitaryEnabled(context: Context, enabled: Boolean) {
-        val allowed = enabled && DeviceTrustManager.hasIntelligenceAccess(context)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
-            putBoolean(KEY_MAP_MILITARY_ENABLED, allowed)
+            putBoolean(KEY_MAP_MILITARY_ENABLED, enabled)
         }
     }
 
@@ -1205,15 +1370,33 @@ object KokohoSignatures {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val saved = prefs.getStringSet(KEY_ENABLED_AIRCRAFT_AGENCIES, null)
         if (saved == null) {
-            return setOf(KokohoAgency.DHS_AMO, KokohoAgency.DHS_CBP, KokohoAgency.DHS_ICE)
+            if (!prefs.getBoolean("police_default_air_v1318_migrated", false)) {
+                prefs.edit { putBoolean("police_default_air_v1318_migrated", true) }
+            }
+            return setOf(KokohoAgency.DHS_AMO, KokohoAgency.DHS_CBP, KokohoAgency.DHS_ICE, KokohoAgency.POLICE)
         }
-        return saved.mapNotNull { KokohoAgency.fromCode(it) }.toSet()
+        val parsed = saved.mapNotNull { KokohoAgency.fromCode(it) }.toMutableSet()
+        if (!prefs.getBoolean("police_default_air_v1318_migrated", false)) {
+            parsed.add(KokohoAgency.POLICE)
+            prefs.edit {
+                putStringSet(KEY_ENABLED_AIRCRAFT_AGENCIES, parsed.map { it.id }.toSet())
+                putBoolean("police_default_air_v1318_migrated", true)
+            }
+        }
+        return parsed
     }
 
     fun setEnabledAircraftAgencies(context: Context, agencies: Set<KokohoAgency>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putStringSet(KEY_ENABLED_AIRCRAFT_AGENCIES, agencies.map { it.id }.toSet())
         }
+    }
+
+    fun setAircraftAgenciesEnabled(context: Context, agencies: Set<KokohoAgency>, enabled: Boolean): Set<KokohoAgency> {
+        val current = getEnabledAircraftAgencies(context).toMutableSet()
+        if (enabled) current.addAll(agencies) else current.removeAll(agencies)
+        setEnabledAircraftAgencies(context, current)
+        return current
     }
 
     fun isDhsAircraftEnabled(context: Context): Boolean =

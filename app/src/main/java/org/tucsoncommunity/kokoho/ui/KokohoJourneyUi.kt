@@ -474,33 +474,57 @@ object KokohoJourneyUi {
         }
 
         fun addFilterToggleRow(
+            parent: LinearLayout,
             label: String,
             indentDp: Int = 0,
+            isBold: Boolean = indentDp == 0,
+            chevronView: TextView? = null,
+            onLabelClick: (() -> Unit)? = null,
+            showAlarmAndEye: Boolean = true,
             isAlarmOn: () -> Boolean,
             isEyeOn: () -> Boolean,
+            isAirOn: (() -> Boolean)? = null,
             onToggleAlarm: () -> Unit,
-            onToggleEye: () -> Unit
+            onToggleEye: () -> Unit,
+            onToggleAir: (() -> Unit)? = null
         ) {
             val row = LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(activity, indentDp), dp(activity, 5), 0, dp(activity, 5))
+                setPadding(dp(activity, indentDp), dp(activity, 4), 0, dp(activity, 4))
+            }
+            if (chevronView != null) {
+                row.addView(chevronView)
             }
             val tv = TextView(activity).apply {
                 text = label
-                textSize = if (indentDp == 0) 14.5f else 14f
-                typeface = if (indentDp == 0) Typeface.DEFAULT_BOLD else Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                textSize = if (isBold) 14f else 13f
+                typeface = if (isBold) Typeface.DEFAULT_BOLD else Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setTextColor(INK_PRIMARY)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val alarmBtn = ImageButton(activity).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(activity, 40), dp(activity, 36)).apply {
-                    marginEnd = dp(activity, 8)
+                if (onLabelClick != null) {
+                    setOnClickListener { onLabelClick() }
                 }
             }
-            val eyeBtn = ImageButton(activity).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(activity, 40), dp(activity, 36))
-            }
+            val alarmBtn = if (showAlarmAndEye) {
+                ImageButton(activity).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(activity, 36), dp(activity, 34)).apply {
+                        marginEnd = dp(activity, 6)
+                    }
+                }
+            } else null
+            val eyeBtn = if (showAlarmAndEye) {
+                ImageButton(activity).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(activity, 36), dp(activity, 34)).apply {
+                        if (isAirOn != null && onToggleAir != null) marginEnd = dp(activity, 6)
+                    }
+                }
+            } else null
+            val airBtn = if (isAirOn != null && onToggleAir != null) {
+                ImageButton(activity).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(activity, 36), dp(activity, 34))
+                }
+            } else null
 
             fun styleFilterBtn(btn: ImageButton, kind: VectorIconKind, active: Boolean, desc: String) {
                 btn.contentDescription = desc
@@ -520,66 +544,169 @@ object KokohoJourneyUi {
             }
 
             val syncRow = {
-                val aOn = isAlarmOn()
-                val eOn = isEyeOn()
-                styleFilterBtn(alarmBtn, VectorIconKind.BELL_ALARM, aOn, "$label monitor alert ${if (aOn) "on" else "off"}")
-                styleFilterBtn(eyeBtn, VectorIconKind.EYE_VISIBILITY, eOn, "$label map visibility ${if (eOn) "on" else "off"}")
+                if (alarmBtn != null) {
+                    val aOn = isAlarmOn()
+                    styleFilterBtn(alarmBtn, VectorIconKind.BELL_ALARM, aOn, "$label monitor alert ${if (aOn) "on" else "off"}")
+                }
+                if (eyeBtn != null) {
+                    val eOn = isEyeOn()
+                    styleFilterBtn(eyeBtn, VectorIconKind.EYE_VISIBILITY, eOn, "$label map visibility ${if (eOn) "on" else "off"}")
+                }
+                if (airBtn != null && isAirOn != null) {
+                    val airActive = isAirOn()
+                    styleFilterBtn(airBtn, VectorIconKind.AIRCRAFT, airActive, "$label aircraft ${if (airActive) "on" else "off"}")
+                }
             }
-            alarmBtn.setOnClickListener {
+            alarmBtn?.setOnClickListener {
                 onToggleAlarm()
                 notifyAllFilterRows()
             }
-            eyeBtn.setOnClickListener {
+            eyeBtn?.setOnClickListener {
                 onToggleEye()
+                notifyAllFilterRows()
+            }
+            airBtn?.setOnClickListener {
+                onToggleAir?.invoke()
                 notifyAllFilterRows()
             }
             syncRow()
             refreshCallbacks += syncRow
 
             row.addView(tv)
-            row.addView(alarmBtn)
-            row.addView(eyeBtn)
-            filtersSubmenu.addView(row)
+            if (alarmBtn != null) row.addView(alarmBtn)
+            if (eyeBtn != null) row.addView(eyeBtn)
+            if (airBtn != null) row.addView(airBtn)
+            parent.addView(row)
         }
 
-        // Master DHS row
-        addFilterToggleRow(
-            label = "DHS (All Sub-Agencies)",
-            indentDp = 0,
-            isAlarmOn = { KokohoSignatures.isMasterDhsEnabled(activity) },
-            isEyeOn = { KokohoSignatures.isDhsMasterMapVisible(activity) },
-            onToggleAlarm = { KokohoSignatures.setMasterDhs(activity, !KokohoSignatures.isMasterDhsEnabled(activity)) },
-            onToggleEye = { KokohoSignatures.setDhsMasterMapVisible(activity, !KokohoSignatures.isDhsMasterMapVisible(activity)) }
-        )
+        val hasIntel = org.tucsoncommunity.kokoho.posture.DeviceTrustManager.hasIntelligenceAccess(activity)
 
-        val orderedAgencies = listOf(
-            KokohoAgency.DHS_ICE to 12,
-            KokohoAgency.DHS_AMO to 12,
-            KokohoAgency.DHS_CBP to 12,
-            KokohoAgency.DHS_HSI to 12,
-            KokohoAgency.DHS_FPS to 12,
-            KokohoAgency.DHS_INTEROP to 12,
-            KokohoAgency.SHERIFF to 0,
-            KokohoAgency.POLICE to 0,
-            KokohoAgency.DRONE to 0,
-            KokohoAgency.FIRE to 0,
-            KokohoAgency.SAR to 0
-        )
-        for ((ag, indent) in orderedAgencies) {
-            addFilterToggleRow(
-                label = ag.friendlyLabel,
-                indentDp = indent,
-                isAlarmOn = { ag in KokohoSignatures.getEnabledAgencies(activity) },
-                isEyeOn = { ag in KokohoSignatures.getMapVisibleAgencies(activity) },
-                onToggleAlarm = { KokohoSignatures.toggleAgency(activity, ag) },
-                onToggleEye = { KokohoSignatures.toggleAgencyMapVisible(activity, ag) }
-            )
+        fun toggleMilitaryFromFilters() {
+            val next = !KokohoSignatures.isMapMilitaryEnabled(activity)
+            KokohoSignatures.setMapMilitaryEnabled(activity, next)
+            val curWin = KokohoSignatures.getMapTimeWindow(activity)
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchFlightTracks(activity, target = null, windowMs = curWin.windowMs) {
+                onFiltersChanged()
+            }
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.syncHistoricalEntities(activity) {
+                onFiltersChanged()
+            }
+            org.tucsoncommunity.kokoho.posture.KokohoHubClient.fetchStateSnapshot(activity) {
+                onFiltersChanged()
+            }
         }
+
+        fun addOrgUnitNodes(parent: LinearLayout, nodes: List<KokohoSignatures.OrgUnitNode>, depth: Int) {
+            for (node in nodes) {
+                if (node.requiresIntelligence && !hasIntel) continue
+                val visibleChildren = node.children.filter { !it.requiresIntelligence || hasIntel }
+                val indentDp = depth * 14
+                val isGroup = visibleChildren.isNotEmpty()
+                val childContainer = if (isGroup) {
+                    LinearLayout(activity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        visibility = View.GONE
+                    }
+                } else null
+                val chevron = if (isGroup) {
+                    TextView(activity).apply {
+                        text = "▸"
+                        textSize = 15f
+                        typeface = Typeface.DEFAULT_BOLD
+                        setTextColor(HIGHLIGHT_AMBER)
+                        setPadding(0, 0, dp(activity, 6), 0)
+                    }
+                } else null
+                val toggleExpand: (() -> Unit)? = if (childContainer != null && chevron != null) {
+                    {
+                        val expand = childContainer.visibility != View.VISIBLE
+                        childContainer.visibility = if (expand) View.VISIBLE else View.GONE
+                        chevron.text = if (expand) "▾" else "▸"
+                    }
+                } else null
+                chevron?.setOnClickListener { toggleExpand?.invoke() }
+
+                val nodeAgencies = node.allAgencies()
+                val supportsAircraft = node.isMilitaryBranch || nodeAgencies.any { it != KokohoAgency.DRONE }
+                addFilterToggleRow(
+                    parent = parent,
+                    label = node.displayLabel(),
+                    indentDp = indentDp,
+                    isBold = depth == 0,
+                    chevronView = chevron,
+                    onLabelClick = toggleExpand,
+                    showAlarmAndEye = !node.isMilitaryBranch,
+                    isAlarmOn = {
+                        if (node.isMilitaryBranch) {
+                            KokohoSignatures.isMapMilitaryEnabled(activity)
+                        } else {
+                            val enabled = KokohoSignatures.getEnabledAgencies(activity)
+                            nodeAgencies.any { it in enabled }
+                        }
+                    },
+                    isEyeOn = {
+                        if (node.isMilitaryBranch) {
+                            KokohoSignatures.isMapMilitaryEnabled(activity)
+                        } else {
+                            val vis = KokohoSignatures.getMapVisibleAgencies(activity)
+                            nodeAgencies.any { it in vis }
+                        }
+                    },
+                    isAirOn = if (supportsAircraft) {
+                        {
+                            if (node.isMilitaryBranch) {
+                                KokohoSignatures.isMapMilitaryEnabled(activity)
+                            } else {
+                                val air = KokohoSignatures.getEnabledAircraftAgencies(activity)
+                                nodeAgencies.any { it in air }
+                            }
+                        }
+                    } else null,
+                    onToggleAlarm = {
+                        if (node.isMilitaryBranch) {
+                            toggleMilitaryFromFilters()
+                        } else {
+                            val enabled = KokohoSignatures.getEnabledAgencies(activity)
+                            val turnOn = !nodeAgencies.any { it in enabled }
+                            KokohoSignatures.setAgenciesEnabled(activity, nodeAgencies, turnOn)
+                        }
+                    },
+                    onToggleEye = {
+                        if (node.isMilitaryBranch) {
+                            toggleMilitaryFromFilters()
+                        } else {
+                            val vis = KokohoSignatures.getMapVisibleAgencies(activity)
+                            val turnOn = !nodeAgencies.any { it in vis }
+                            KokohoSignatures.setAgenciesMapVisible(activity, nodeAgencies, turnOn)
+                        }
+                    },
+                    onToggleAir = if (supportsAircraft) {
+                        {
+                            if (node.isMilitaryBranch) {
+                                toggleMilitaryFromFilters()
+                            } else {
+                                val air = KokohoSignatures.getEnabledAircraftAgencies(activity)
+                                val turnOn = !nodeAgencies.any { it in air }
+                                KokohoSignatures.setAircraftAgenciesEnabled(activity, nodeAgencies, turnOn)
+                            }
+                        }
+                    } else null
+                )
+                if (childContainer != null) {
+                    addOrgUnitNodes(childContainer, visibleChildren, depth + 1)
+                    parent.addView(childContainer)
+                }
+            }
+        }
+
+        addOrgUnitNodes(filtersSubmenu, KokohoSignatures.ORG_UNIT_TREE, 0)
 
         // Facility / Station Locations filter row
         addFilterToggleRow(
+            parent = filtersSubmenu,
             label = "Locations (Stations & Facilities)",
             indentDp = 0,
+            isBold = true,
             isAlarmOn = { KokohoSignatures.isLocationsAlarmEnabled(activity) },
             isEyeOn = { KokohoSignatures.isMapLocationsVisible(activity) },
             onToggleAlarm = { KokohoSignatures.setLocationsAlarmEnabled(activity, !KokohoSignatures.isLocationsAlarmEnabled(activity)) },
@@ -856,6 +983,7 @@ object KokohoJourneyUi {
         FILTER_FUNNEL,
         BELL_ALARM,
         EYE_VISIBILITY,
+        AIRCRAFT,
         TOOLBOX,
         GEAR_SETTINGS,
         BUG_REPORT,
@@ -952,6 +1080,28 @@ object KokohoJourneyUi {
                     }
                     canvas.drawPath(p, paint)
                     canvas.drawCircle(cx, cy, w * 0.11f, fillPaint)
+                }
+                VectorIconKind.AIRCRAFT -> {
+                    val p = Path().apply {
+                        moveTo(cx, t + h * 0.14f)
+                        lineTo(cx + w * 0.08f, t + h * 0.40f)
+                        lineTo(l + w * 0.84f, t + h * 0.56f)
+                        lineTo(l + w * 0.84f, t + h * 0.64f)
+                        lineTo(cx + w * 0.08f, t + h * 0.55f)
+                        lineTo(cx + w * 0.07f, t + h * 0.74f)
+                        lineTo(cx + w * 0.22f, t + h * 0.82f)
+                        lineTo(cx + w * 0.22f, t + h * 0.87f)
+                        lineTo(cx, t + h * 0.82f)
+                        lineTo(cx - w * 0.22f, t + h * 0.87f)
+                        lineTo(cx - w * 0.22f, t + h * 0.82f)
+                        lineTo(cx - w * 0.07f, t + h * 0.74f)
+                        lineTo(cx - w * 0.08f, t + h * 0.55f)
+                        lineTo(l + w * 0.16f, t + h * 0.64f)
+                        lineTo(l + w * 0.16f, t + h * 0.56f)
+                        lineTo(cx - w * 0.08f, t + h * 0.40f)
+                        close()
+                    }
+                    canvas.drawPath(p, fillPaint)
                 }
                 VectorIconKind.TOOLBOX -> {
                     canvas.drawRoundRect(RectF(l + w * 0.18f, t + h * 0.34f, l + w * 0.82f, t + h * 0.78f), 3f * density, 3f * density, paint)

@@ -850,12 +850,15 @@ class KokohoV1318TierBKinematicsAndPassByTest {
             assertEquals(0, featureCount(sourceData, "rf-trace"))
             assertFalse("3D buildings MUST be hidden when Heat is ON", lastBuildings3d)
 
-            // --- C. Verify discreet `Mil` toggle pill gated strictly to `INTELLIGENCE` / `OWNER` ---
+            // --- C. Verify Military (Aircraft) is default OFF, opt-in for public via Filters, and standalone Mil pill stays GONE ---
             DeviceTrustManager.resetTrustForTest(act)
             assertFalse(DeviceTrustManager.hasIntelligenceAccess(act))
-            KokohoSignatures.setMapMilitaryEnabled(act, true)
-            assertFalse("Unenrolled user cannot enable include_military", KokohoSignatures.isMapMilitaryEnabled(act))
+            assertFalse("Military aircraft must default OFF", KokohoSignatures.isMapMilitaryEnabled(act))
             assertFalse(KokohoHubClient.buildFlightsRequestPath(act, null, 1_800_000L, nowMs).contains("include_military=1"))
+            KokohoSignatures.setMapMilitaryEnabled(act, true)
+            assertTrue("Public user can opt in to Military (Aircraft) via Filters", KokohoSignatures.isMapMilitaryEnabled(act))
+            assertTrue(KokohoHubClient.buildFlightsRequestPath(act, null, 1_800_000L, nowMs).contains("include_military=1"))
+            KokohoSignatures.setMapMilitaryEnabled(act, false)
 
             DeviceTrustManager.setEnrolledForTest(act, seatId = "seat-resp", slug = "resp", role = "RESPONDER", roles = listOf("RESPONDER"))
             assertFalse(DeviceTrustManager.hasIntelligenceAccess(act))
@@ -873,9 +876,13 @@ class KokohoV1318TierBKinematicsAndPassByTest {
             }
             val milWrap = findMilPillParent()
             assertNotNull("Mil pill view must be wired into MapFragment secondary bar", milWrap)
-            assertEquals("Mil pill MUST be GONE for RESPONDER", View.GONE, milWrap!!.visibility)
+            assertEquals("Standalone Mil map pill MUST stay GONE (controlled in Filters -> Federal -> Military)", View.GONE, milWrap!!.visibility)
 
-            // Upgrade seat to INTELLIGENCE -> Mil pill becomes VISIBLE and passes include_military=1 when toggled ON!
+            // Military aircraft opt-in works for public/responder and intelligence/owner via Filters -> Federal -> Military
+            KokohoSignatures.setMapMilitaryEnabled(act, true)
+            assertTrue(KokohoSignatures.isMapMilitaryEnabled(act))
+            assertTrue(KokohoHubClient.buildFlightsRequestPath(act, null, 1_800_000L, nowMs).contains("include_military=1"))
+
             DeviceTrustManager.setEnrolledForTest(
                 act,
                 seatId = "seat-intel",
@@ -885,13 +892,10 @@ class KokohoV1318TierBKinematicsAndPassByTest {
             )
             DeviceTrustManager.notifyTrustStateListeners(act)
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            assertEquals("Mil pill MUST be VISIBLE for INTELLIGENCE", View.VISIBLE, milWrap.visibility)
-
-            KokohoSignatures.setMapMilitaryEnabled(act, true)
-            assertTrue(KokohoSignatures.isMapMilitaryEnabled(act))
+            assertEquals("Standalone Mil map pill MUST stay GONE even for INTELLIGENCE", View.GONE, milWrap.visibility)
             assertTrue(KokohoHubClient.buildFlightsRequestPath(act, null, 1_800_000L, nowMs).contains("include_military=1"))
 
-            // OWNER also retains intelligence access
+            // OWNER also retains military filter access without standalone map pill
             DeviceTrustManager.setEnrolledForTest(
                 act,
                 seatId = "seat-owner",
@@ -901,7 +905,7 @@ class KokohoV1318TierBKinematicsAndPassByTest {
             )
             DeviceTrustManager.notifyTrustStateListeners(act)
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            assertEquals("Mil pill MUST be VISIBLE for OWNER", View.VISIBLE, milWrap.visibility)
+            assertEquals("Standalone Mil map pill MUST stay GONE even for OWNER", View.GONE, milWrap.visibility)
             assertTrue(KokohoHubClient.buildFlightsRequestPath(act, null, 1_800_000L, nowMs).contains("include_military=1"))
         } finally {
             actCtrl.pause().stop().destroy()
