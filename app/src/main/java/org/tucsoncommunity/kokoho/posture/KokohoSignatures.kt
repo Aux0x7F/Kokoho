@@ -1149,6 +1149,37 @@ object KokohoSignatures {
         }
     }
 
+    private const val KEY_MAP_CONFIRMED_ENABLED = "map_toggle_confirmed_v1"
+    private const val KEY_MAP_UNCONFIRMED_ENABLED = "map_toggle_unconfirmed_v1"
+    private const val KEY_MAP_DETECTIONS_ENABLED = "map_toggle_detections_v1"
+
+    fun isMapConfirmedEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MAP_CONFIRMED_ENABLED, true)
+
+    fun setMapConfirmedEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_CONFIRMED_ENABLED, enabled)
+        }
+    }
+
+    fun isMapUnconfirmedEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MAP_UNCONFIRMED_ENABLED, true)
+
+    fun setMapUnconfirmedEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_UNCONFIRMED_ENABLED, enabled)
+        }
+    }
+
+    fun isMapDetectionsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MAP_DETECTIONS_ENABLED, true)
+
+    fun setMapDetectionsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putBoolean(KEY_MAP_DETECTIONS_ENABLED, enabled)
+        }
+    }
+
     fun getMapConfirmationFilter(context: Context): MapConfirmationFilter {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_MAP_CONFIRMATION_FILTER, MapConfirmationFilter.ALL.id)
@@ -1158,6 +1189,23 @@ object KokohoSignatures {
     fun setMapConfirmationFilter(context: Context, filter: MapConfirmationFilter) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
             putString(KEY_MAP_CONFIRMATION_FILTER, filter.id)
+            when (filter) {
+                MapConfirmationFilter.ALL -> {
+                    putBoolean(KEY_MAP_CONFIRMED_ENABLED, true)
+                    putBoolean(KEY_MAP_UNCONFIRMED_ENABLED, true)
+                    putBoolean(KEY_MAP_DETECTIONS_ENABLED, true)
+                }
+                MapConfirmationFilter.CONFIRMED -> {
+                    putBoolean(KEY_MAP_CONFIRMED_ENABLED, true)
+                    putBoolean(KEY_MAP_UNCONFIRMED_ENABLED, false)
+                    putBoolean(KEY_MAP_DETECTIONS_ENABLED, true)
+                }
+                MapConfirmationFilter.UNCONFIRMED -> {
+                    putBoolean(KEY_MAP_CONFIRMED_ENABLED, false)
+                    putBoolean(KEY_MAP_UNCONFIRMED_ENABLED, true)
+                    putBoolean(KEY_MAP_DETECTIONS_ENABLED, true)
+                }
+            }
         }
     }
 
@@ -1206,18 +1254,21 @@ object KokohoSignatures {
     fun matchesMapConfirmationFilter(
         context: Context,
         threat: EvaluatedThreat,
-        filter: MapConfirmationFilter = getMapConfirmationFilter(context)
+        filter: MapConfirmationFilter? = null
     ): Boolean {
-        return when (filter) {
-            MapConfirmationFilter.ALL -> true
-            MapConfirmationFilter.CONFIRMED -> hasApprovedWitnessReport(context, threat)
-            MapConfirmationFilter.UNCONFIRMED -> {
-                val confirmed = hasApprovedWitnessReport(context, threat)
-                val standaloneWitnessPoint = threat.evidenceSources.isNotEmpty() &&
-                    threat.evidenceSources.all { it.kind.equals("WITNESS_REPORT", ignoreCase = true) }
-                !confirmed && !standaloneWitnessPoint
+        val confirmed = hasApprovedWitnessReport(context, threat) ||
+            (threat.isAircraft && !threat.label.contains("Unattributed", ignoreCase = true) && !threat.label.contains("Verify", ignoreCase = true))
+        val standaloneWitnessPoint = threat.evidenceSources.isNotEmpty() &&
+            threat.evidenceSources.all { it.kind.equals("WITNESS_REPORT", ignoreCase = true) }
+        if (filter != null) {
+            return when (filter) {
+                MapConfirmationFilter.ALL -> true
+                MapConfirmationFilter.CONFIRMED -> confirmed
+                MapConfirmationFilter.UNCONFIRMED -> !confirmed && !standaloneWitnessPoint
             }
         }
+        if (!standaloneWitnessPoint && !isMapDetectionsEnabled(context)) return false
+        return if (confirmed) isMapConfirmedEnabled(context) else isMapUnconfirmedEnabled(context)
     }
 
     fun signalDecayMinutes(context: Context): Int =

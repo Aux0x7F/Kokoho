@@ -204,9 +204,23 @@ object KokohoDirectory {
         return if (b0 == 0x1f && b1 == 0x8b) GZIPInputStream(pb) else pb
     }
 
-    @Synchronized
+    private val loadLock = Any()
+
     fun ensureLoaded(context: Context) {
         val app = context.applicationContext ?: context
+        // Never block the Android Main/UI thread waiting for PriorityVault directory decryption/hydration (prevents ANR).
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            if (!initialized || locationsList.isEmpty()) {
+                preloadAsync(app)
+            }
+            return
+        }
+        synchronized(loadLock) {
+            ensureLoadedLocked(app)
+        }
+    }
+
+    private fun ensureLoadedLocked(app: Context) {
         PriorityVault.ensureScreenOffReceiverRegistered(app)
         if (!legacyFilesCleaned) {
             legacyFilesCleaned = true

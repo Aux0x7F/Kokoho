@@ -844,41 +844,89 @@ class MapFragment : Fragment() {
             elevation = 6f * density
         }
 
-        val confirmButtons = mutableMapOf<org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter, android.widget.TextView>()
-
-        fun styleConfirmPills(selected: org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter) {
-            for ((opt, tv) in confirmButtons) {
-                val active = opt == selected
-                tv.isSelected = active
-                tv.setTextColor(if (active) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
-                tv.background = pillHighlightDrawable(active)
-            }
+        val confBtn = android.widget.TextView(act).apply {
+            text = "✓"
+            textSize = 13f
+            isSingleLine = true
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            contentDescription = "Confirmed sightings & corroborated reports"
+            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, "Confirmed sightings & reports")
+            val ph = (10 * density).toInt()
+            val pv = (4 * density).toInt()
+            setPadding(ph, pv, ph, pv)
+        }
+        val unconfBtn = android.widget.TextView(act).apply {
+            text = "?"
+            textSize = 13f
+            isSingleLine = true
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            contentDescription = "Unconfirmed sightings & reports"
+            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, "Unconfirmed sightings & reports")
+            val ph = (10 * density).toInt()
+            val pv = (4 * density).toInt()
+            setPadding(ph, pv, ph, pv)
+        }
+        val detBtn = android.widget.ImageView(act).apply {
+            contentDescription = "Wireless RF / Wi-Fi / BLE / ADS-B detections"
+            androidx.appcompat.widget.TooltipCompat.setTooltipText(this, "Wireless RF / Wi-Fi / BLE / ADS-B detections")
+            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            val ph = (9 * density).toInt()
+            val pv = (4 * density).toInt()
+            setPadding(ph, pv, ph, pv)
         }
 
-        for (opt in org.tucsoncommunity.kokoho.posture.KokohoSignatures.MapConfirmationFilter.UI_OPTIONS) {
-            val segTv = android.widget.TextView(act).apply {
-                text = opt.label
-                textSize = 11.5f
-                isSingleLine = true
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                val ph = (8.5f * density).toInt()
-                val pv = (4 * density).toInt()
-                setPadding(ph, pv, ph, pv)
-                setOnClickListener {
-                    org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapConfirmationFilter(act, opt)
-                    styleConfirmPills(opt)
-                    renderLive()
-                }
-            }
-            confirmButtons[opt] = segTv
-            confirmBar.addView(segTv, android.widget.LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                if (confirmBar.childCount > 0) marginStart = (2 * density).toInt()
-            })
+        fun styleLayerToggles() {
+            val cOn = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapConfirmedEnabled(act)
+            val uOn = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapUnconfirmedEnabled(act)
+            val dOn = org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapDetectionsEnabled(act)
+            confBtn.isSelected = cOn
+            confBtn.setTextColor(if (cOn) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
+            confBtn.background = pillHighlightDrawable(cOn)
+            unconfBtn.isSelected = uOn
+            unconfBtn.setTextColor(if (uOn) 0xFFFFFFFF.toInt() else 0xFFE2E8F0.toInt())
+            unconfBtn.background = pillHighlightDrawable(uOn)
+            detBtn.isSelected = dOn
+            detBtn.background = pillHighlightDrawable(dOn)
+            detBtn.setImageDrawable(
+                KokohoJourneyUi.VectorIconDrawable(
+                    act,
+                    KokohoJourneyUi.VectorIconKind.WIFI_SIGNAL,
+                    strokeColor = if (dOn) 0xFFFFFFFF.toInt() else 0xFF94A3B8.toInt()
+                )
+            )
         }
-        styleConfirmPills(org.tucsoncommunity.kokoho.posture.KokohoSignatures.getMapConfirmationFilter(act))
+
+        confBtn.setOnClickListener {
+            val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapConfirmedEnabled(act)
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapConfirmedEnabled(act, next)
+            styleLayerToggles()
+            renderLive()
+        }
+        unconfBtn.setOnClickListener {
+            val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapUnconfirmedEnabled(act)
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapUnconfirmedEnabled(act, next)
+            styleLayerToggles()
+            renderLive()
+        }
+        detBtn.setOnClickListener {
+            val next = !org.tucsoncommunity.kokoho.posture.KokohoSignatures.isMapDetectionsEnabled(act)
+            org.tucsoncommunity.kokoho.posture.KokohoSignatures.setMapDetectionsEnabled(act, next)
+            styleLayerToggles()
+            renderLive()
+        }
+        confirmBar.addView(confBtn, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        confirmBar.addView(unconfBtn, android.widget.LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = (2 * density).toInt() })
+        confirmBar.addView(detBtn, android.widget.LinearLayout.LayoutParams(
+            (34 * density).toInt(),
+            (26 * density).toInt()
+        ).apply { marginStart = (2 * density).toInt() })
+        styleLayerToggles()
 
         secondaryRow.addView(heatPillWrap, android.widget.LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,

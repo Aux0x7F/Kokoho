@@ -984,6 +984,7 @@ object KokohoJourneyUi {
         BELL_ALARM,
         EYE_VISIBILITY,
         AIRCRAFT,
+        WIFI_SIGNAL,
         TOOLBOX,
         GEAR_SETTINGS,
         BUG_REPORT,
@@ -1102,6 +1103,11 @@ object KokohoJourneyUi {
                         close()
                     }
                     canvas.drawPath(p, fillPaint)
+                }
+                VectorIconKind.WIFI_SIGNAL -> {
+                    canvas.drawArc(RectF(cx - w * 0.38f, cy - h * 0.28f, cx + w * 0.38f, cy + h * 0.48f), 225f, 90f, false, paint)
+                    canvas.drawArc(RectF(cx - w * 0.24f, cy - h * 0.12f, cx + w * 0.24f, cy + h * 0.36f), 225f, 90f, false, paint)
+                    canvas.drawCircle(cx, t + h * 0.74f, w * 0.07f, fillPaint)
                 }
                 VectorIconKind.TOOLBOX -> {
                     canvas.drawRoundRect(RectF(l + w * 0.18f, t + h * 0.34f, l + w * 0.82f, t + h * 0.78f), 3f * density, 3f * density, paint)
